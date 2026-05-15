@@ -363,6 +363,14 @@ while (未终止):
 输出: Trajectory_Result {initial, final, N_scat}
 ```
 
+当前默认数值上限：
+
+- `maximum_number_of_scatterings = 100000000000000`，即单条轨迹最多 `1e14` 次散射/碰撞。
+- `maximum_free_time_steps = 1000000000000`，即每段自由传播最多 `1e12` 个 RK45 步。
+- `R_max = 2 R_sun`，即传播逃逸边界和 bincount 半径截断均为 `2R_sun`。
+- `max_trajectory_wall_time_sec = 300 s`，配置文件可设为 `0` 表示不限制。
+- 没有独立的物理模拟时间上限；物理时间由散射次数、自由传播步数、RK45 步长上限、逃逸边界和 wall-clock 保护共同间接限制。
+
 **在线统计与输出策略**：
 
 当前 C++ 主模拟不再把每条轨迹写成 `.dat` 文件，而是在内存中在线累积径向箱计数。径向范围为 `[0, 2R_\odot)`，共 `2000` 个 bin，bin 宽约 `695.7 km`。每个 RK45 步用前一状态和当前步长累积：
@@ -458,7 +466,7 @@ $$\int \sum_i n_i \frac{m_\chi m_i}{(m_\chi + m_i)^2} \langle v_\text{rel} \rang
 普通 `Parameter point` 模式直接在 `Data_Generation.cpp` 中输出三类文件：
 
 - `bincount.txt`：captured 与 not_captured 的径向占据时间 $\sum \Delta t$、速度二阶矩 $\sum v^2\Delta t$，以及逐 bin 误差估计。
-- `evaporation_summary.txt`：每条 captured 轨迹的 `rank`、rank 内 `trajectory_id`、`t_evap = t_last_negative - t_first_negative` 和 `truncated` 标记。`trajectory_id` 是每个 MPI rank 内部的本地序号，完整轨迹标识应使用 `(rank, trajectory_id)`。
+- `evaporation_summary.txt`：有正蒸发持续时间的 captured 轨迹的 `rank`、rank 内 `trajectory_id`、`t_evap = t_last_negative - t_first_negative` 和 `truncated` 标记；`t_evap <= 0` 表示没有可统计的蒸发持续时间，不写入蒸发时间统计。`trajectory_id` 是每个 MPI rank 内部的本地序号，完整轨迹标识应使用 `(rank, trajectory_id)`。
 - `computation_time_summary.txt`：captured / not_captured 轨迹的 wall-clock 时间与 RK45 步数统计。
 
 `capture_rate`、`capture_rate_err` 和 `capture_rate_CI_95_lower/upper` 会写入这些文件头部；Capture Mode 不写这些文件，只在终端打印同类捕获率统计。
@@ -475,7 +483,7 @@ Snapshot 会合并各 rank 的当前进度，包括已完成轨迹的 captured /
 每个 snapshot 时间点在 `snapshot/` 目录下生成两个配对文件：
 
 - `snapshot_{time}s.txt`：主 snapshot 报告，开头的 rank 诊断表会把 checkpoint/final/wait reason 与该 rank 的 `running`/`done` 状态写在同一行，随后输出累计统计和 bincount histogram。
-- `snapshot_{time}s_evaporation.txt`：该 snapshot 合并成功时的蒸发时间列表，列为 `rank  trajectory_id  t_evap[s]  truncated(0/1)`，记录截至该 wall-clock snapshot 已完成并被捕获的轨迹。
+- `snapshot_{time}s_evaporation.txt`：该 snapshot 合并成功时的正蒸发持续时间列表，列为 `rank  trajectory_id  t_evap[s]  truncated(0/1)`，记录截至该 wall-clock snapshot 已完成、被捕获且有可统计蒸发持续时间的轨迹。
 
 各 rank 的二进制 checkpoint 临时文件位于 `snapshot/rank_snapshot/`，只用于合并中间状态；snapshot 合并成功后会清理对应 checkpoint。
 
