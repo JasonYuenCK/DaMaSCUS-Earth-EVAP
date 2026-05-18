@@ -365,7 +365,7 @@ while (未终止):
 
 当前默认数值上限：
 
-- `maximum_number_of_scatterings = 100000000000000`，即单条轨迹最多 `1e14` 次散射/碰撞。
+- `maximum_number_of_scatterings = 100000000000000L`，即单条轨迹最多 `1e14` 次散射/碰撞；可在 config 文件中修改。大整数建议使用 libconfig 的 `L` 后缀。
 - `maximum_free_time_steps = 1000000000000`，即每段自由传播最多 `1e12` 个 RK45 步。
 - `R_max = 2 R_sun`，即传播逃逸边界和 bincount 半径截断均为 `2R_sun`。
 - `max_trajectory_wall_time_sec = 300 s`，配置文件可设为 `0` 表示不限制。

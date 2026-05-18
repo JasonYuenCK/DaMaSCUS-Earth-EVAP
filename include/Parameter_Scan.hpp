@@ -28,6 +28,7 @@ class Configuration : public obscura::Configuration
 	unsigned int isoreflection_rings, interpolation_points;
 	unsigned int sample_size, cross_sections;
 	unsigned int max_trajectories;
+	unsigned long int maximum_number_of_scatterings;
 	SnapshotConfig snapshot_config;
 	double cross_section_min, cross_section_max;
 	bool compute_halo_constraints, perform_full_scan, capture_mode;
@@ -39,7 +40,7 @@ class Configuration : public obscura::Configuration
 // 2. 	Class to perform parameter scans in the (m_DM, sigma)-plane to search for equal-p-value contours.
 //		Either a full scan, or more efficiently and targeted via the square tracing algorithm (STA).
 
-double Compute_p_Value(unsigned int sample_size, obscura::DM_Particle& DM, obscura::DM_Detector& detector, Solar_Model& solar_model, obscura::DM_Distribution& halo_model, unsigned int rate_interpolation_points = 1000, int mpi_rank = 0);
+double Compute_p_Value(unsigned int sample_size, obscura::DM_Particle& DM, obscura::DM_Detector& detector, Solar_Model& solar_model, obscura::DM_Distribution& halo_model, unsigned int rate_interpolation_points = 1000, int mpi_rank = 0, unsigned long int max_scatterings = DEFAULT_MAXIMUM_SCATTERINGS);
 
 class Parameter_Scan
 {
@@ -48,6 +49,7 @@ class Parameter_Scan
 	std::vector<double> DM_masses;
 	std::vector<double> couplings;
 	unsigned int sample_size, scattering_rate_interpolation_points;
+	unsigned long int maximum_number_of_scatterings;
 	double certainty_level;
 	std::vector<std::vector<double>> p_value_grid;
 	// Check for progress of a previous, incomplete parameter scan to import and continue
@@ -63,7 +65,7 @@ class Parameter_Scan
 	std::vector<double> Find_Contour_Point(int row, int column, int row_previous, int column_previous, double p_critical);
 
   public:
-	Parameter_Scan(const std::vector<double>& masses, const std::vector<double>& coupl, std::string ID, unsigned int samplesize, unsigned int interpolation_points = 1000, double CL = 0.95);
+	Parameter_Scan(const std::vector<double>& masses, const std::vector<double>& coupl, std::string ID, unsigned int samplesize, unsigned int interpolation_points = 1000, double CL = 0.95, unsigned long int max_scatterings = DEFAULT_MAXIMUM_SCATTERINGS);
 	Parameter_Scan(Configuration& config);
 
 	void Perform_Full_Scan(obscura::DM_Particle& DM, obscura::DM_Detector& detector, Solar_Model& solar_model, obscura::DM_Distribution& halo_model, int mpi_rank = 0);

@@ -1,7 +1,9 @@
 #include "Parameter_Scan.hpp"
 
 #include <algorithm>
+#include <cmath>
 #include <libconfig.h++>
+#include <limits>
 #include <mpi.h>
 #include <set>
 
@@ -172,6 +174,36 @@ void Configuration::Import_Parameter_Scan_Parameter()
 		g_max_trajectories = max_trajectories;
 	}
 
+	// Maximum number of scatterings/collisions per trajectory. Optional in cfg.
+	maximum_number_of_scatterings = DEFAULT_MAXIMUM_SCATTERINGS;
+	try
+	{
+		config.lookup("maximum_number_of_scatterings");
+		unsigned long long max_scatterings = 0;
+		if(config.lookupValue("maximum_number_of_scatterings", max_scatterings))
+		{
+			if(max_scatterings > std::numeric_limits<unsigned long int>::max())
+			{
+				std::cerr << "Error in Configuration::Import_Parameter_Scan_Parameter(): 'maximum_number_of_scatterings' is too large." << std::endl;
+				std::exit(EXIT_FAILURE);
+			}
+			maximum_number_of_scatterings = static_cast<unsigned long int>(max_scatterings);
+		}
+		else
+		{
+			double max_scatterings_float = 0.0;
+			if(!config.lookupValue("maximum_number_of_scatterings", max_scatterings_float) || !std::isfinite(max_scatterings_float) || max_scatterings_float < 0.0 || std::floor(max_scatterings_float) != max_scatterings_float || max_scatterings_float > static_cast<double>(std::numeric_limits<unsigned long int>::max()))
+			{
+				std::cerr << "Error in Configuration::Import_Parameter_Scan_Parameter(): 'maximum_number_of_scatterings' must be a non-negative integer." << std::endl;
+				std::exit(EXIT_FAILURE);
+			}
+			maximum_number_of_scatterings = static_cast<unsigned long int>(max_scatterings_float);
+		}
+	}
+	catch(const SettingNotFoundException& nfex)
+	{
+	}
+
 	// Snapshot configuration (optional)
 	try
 	{
@@ -339,6 +371,7 @@ void Configuration::Print_Summary(int mpi_rank)
 				  << "\tRun mode:\t\t\t" << run_mode << std::endl
 				  << "\tCapture mode:\t\t\t" << (capture_mode ? "[x]" : "[ ]") << std::endl
 				  << "\tSample size:\t\t\t" << sample_size << std::endl
+				  << "\tMax scatterings/traj:\t\t" << maximum_number_of_scatterings << std::endl
 				  << "\tSc. rate interpolation:\t\t" << ((interpolation_points > 0) ? "[x] (Grid: " + std::to_string(interpolation_points) + "×" + std::to_string(interpolation_points) + ")" : "[ ]") << std::endl;
 		if(run_mode == "Parameter point" && isoreflection_rings > 1)
 			std::cout << "\tIsoreflection rings:\t\t" << isoreflection_rings << std::endl;
@@ -351,12 +384,13 @@ void Configuration::Print_Summary(int mpi_rank)
 	}
 }
 
-double Compute_p_Value(unsigned int sample_size, obscura::DM_Particle& DM, obscura::DM_Detector& detector, Solar_Model& solar_model, obscura::DM_Distribution& halo_model, unsigned int rate_interpolation_points, int mpi_rank)
+double Compute_p_Value(unsigned int sample_size, obscura::DM_Particle& DM, obscura::DM_Detector& detector, Solar_Model& solar_model, obscura::DM_Distribution& halo_model, unsigned int rate_interpolation_points, int mpi_rank, unsigned long int max_scatterings)
 {
 	double u_min = detector.Minimum_DM_Speed(DM);
 
 	solar_model.Interpolate_Total_DM_Scattering_Rate(DM, rate_interpolation_points, rate_interpolation_points);
 	Simulation_Data data_set(sample_size, g_max_trajectories, u_min);
+	data_set.Configure(2.0 * rSun, 1, max_scatterings);
 	data_set.Generate_Data(DM, solar_model, halo_model);
 	data_set.Print_Summary(mpi_rank);
 	Reflection_Spectrum spectrum(data_set, solar_model, halo_model, DM.mass);
@@ -365,8 +399,8 @@ double Compute_p_Value(unsigned int sample_size, obscura::DM_Particle& DM, obscu
 }
 
 // 2. 	Class to perform parameter scans in the (m_DM, sigma)-plane to search for equal-p-value contours.
-Parameter_Scan::Parameter_Scan(const std::vector<double>& masses, const std::vector<double>& coupl, std::string ID, unsigned int samplesize, unsigned int interpolation_points, double CL)
-: DM_masses(masses), couplings(coupl), sample_size(samplesize), scattering_rate_interpolation_points(interpolation_points), certainty_level(CL)
+Parameter_Scan::Parameter_Scan(const std::vector<double>& masses, const std::vector<double>& coupl, std::string ID, unsigned int samplesize, unsigned int interpolation_points, double CL, unsigned long int max_scatterings)
+: DM_masses(masses), couplings(coupl), sample_size(samplesize), scattering_rate_interpolation_points(interpolation_points), maximum_number_of_scatterings(max_scatterings), certainty_level(CL)
 {
 	results_path = g_top_level_dir + "results/" + ID + "/";
 	p_value_grid = std::vector<std::vector<double>>(couplings.size(), std::vector<double>(DM_masses.size(), -1.0));
@@ -379,7 +413,7 @@ Parameter_Scan::Parameter_Scan(const std::vector<double>& masses, const std::vec
 }
 
 Parameter_Scan::Parameter_Scan(Configuration& config)
-: Parameter_Scan(libphysica::Log_Space(config.constraints_mass_min, config.constraints_mass_max, config.constraints_masses), libphysica::Log_Space(config.cross_section_min, config.cross_section_max, config.cross_sections), config.ID, config.sample_size, config.interpolation_points, config.constraints_certainty)
+: Parameter_Scan(libphysica::Log_Space(config.constraints_mass_min, config.constraints_mass_max, config.constraints_masses), libphysica::Log_Space(config.cross_section_min, config.cross_section_max, config.cross_sections), config.ID, config.sample_size, config.interpolation_points, config.constraints_certainty, config.maximum_number_of_scatterings)
 {
 }
 
@@ -595,7 +629,7 @@ void Parameter_Scan::Perform_STA_Scan(obscura::DM_Particle& DM, obscura::DM_Dete
 			Print_Grid(mpi_rank, row, column);
 			MPI_Barrier(MPI_COMM_WORLD);
 
-			p = Compute_p_Value(sample_size, DM, detector, solar_model, halo_model, scattering_rate_interpolation_points, mpi_rank);
+			p = Compute_p_Value(sample_size, DM, detector, solar_model, halo_model, scattering_rate_interpolation_points, mpi_rank, maximum_number_of_scatterings);
 
 			p_value_grid[row][column] = p;
 			libphysica::Export_Table(results_path + "P_Values_Grid.txt", p_value_grid);
@@ -666,7 +700,7 @@ void Parameter_Scan::Perform_Full_Scan(obscura::DM_Particle& DM, obscura::DM_Det
 				Print_Grid(mpi_rank, row, column);
 				MPI_Barrier(MPI_COMM_WORLD);
 
-				p = Compute_p_Value(sample_size, DM, detector, solar_model, halo_model, scattering_rate_interpolation_points, mpi_rank);
+				p = Compute_p_Value(sample_size, DM, detector, solar_model, halo_model, scattering_rate_interpolation_points, mpi_rank, maximum_number_of_scatterings);
 
 				p_value_grid[row][column] = p;
 				libphysica::Export_Table(results_path + "P_Values_Grid.txt", p_value_grid);
