@@ -57,13 +57,13 @@ Key parameters in the `.cfg` file:
 For each parameter point, the main generated files are:
 
 - `bincount.txt` — Combined captured/not-captured time-weighted radial histogram with error estimates
-- `evaporation_summary.txt` — Positive evaporation durations, keyed by `rank` and rank-local `trajectory_id`; zero-duration captures are treated as non-evaporation and are not included in the statistics
+- `evaporation_summary.txt` — Positive evaporation durations, keyed by `rank` and rank-local `trajectory_id`, with the first-negative radius, energy, and previous-step energy difference; zero-duration captures are treated as non-evaporation and are not included in the statistics
 - `computation_time_summary.txt` — Wall-clock time and RK45 step-count statistics
 
 When `snapshot_enabled = true`, intermediate files are written under `snapshot/`:
 
 - `snapshot_{time}s.txt` — Cumulative snapshot report and bincount histogram. The rank diagnostic table combines the checkpoint source with the current `running`/`done` status.
-- `snapshot_{time}s_evaporation.txt` — Rank-aware positive evaporation-duration list for captured trajectories completed by that snapshot time.
+- `snapshot_{time}s_evaporation.txt` — Rank-aware positive evaporation-duration list for captured trajectories completed by that snapshot time, with the same first-negative diagnostics as `evaporation_summary.txt`.
 
 ## References
 

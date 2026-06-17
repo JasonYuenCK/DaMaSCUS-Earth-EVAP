@@ -39,6 +39,7 @@ bin/job-*
 # Local config files (user-specific)
 bin/config_Lingyu.cfg
 bin/config_*.cfg
+/bin/
 
 # Library binaries
 /lib/
@@ -51,6 +52,7 @@ bin/config_*.cfg
 *.swp
 *.swo
 *~
+/cursor-test-extract/
 
 # OS
 *.DS_Store
@@ -74,3 +76,4 @@ install_manifest.txt
 compile_commands.json
 CTestTestfile.cmake
 _deps
+bin/job_Lingyu.sh

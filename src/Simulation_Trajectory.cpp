@@ -7,6 +7,7 @@
 #include <sys/types.h>
 #include <string>
 #include <iostream>
+#include <limits>
 
 #include "libphysica/Special_Functions.hpp"
 #include "libphysica/Statistics.hpp"
@@ -231,11 +232,20 @@ void Trajectory_Simulator::Accumulate_Bincount_Step(double r_km, double v2_km2s2
 	current_bincount.v2dt_hist[bin_idx] += v2_km2s2 * dt_sec;
 }
 
-bool Trajectory_Simulator::Update_Capture_State(double radius, double speed, double time, obscura::DM_Particle& DM)
+double Trajectory_Simulator::Capture_Energy_eV(double radius, double speed, obscura::DM_Particle& DM)
 {
 	double vesc = solar_model.Local_Escape_Speed(radius);
 	double E = 0.5 * DM.mass * (speed * speed - vesc * vesc);
-	double E_eV = In_Units(E, eV);
+	return In_Units(E, eV);
+}
+
+bool Trajectory_Simulator::Update_Capture_State(double radius, double speed, double time, obscura::DM_Particle& DM)
+{
+	double E_eV = Capture_Energy_eV(radius, speed, DM);
+	double dE_from_prev_eV = std::numeric_limits<double>::quiet_NaN();
+	if(std::isfinite(previous_capture_energy_eV))
+		dE_from_prev_eV = E_eV - previous_capture_energy_eV;
+	previous_capture_energy_eV = E_eV;
 
 	if(E_eV < 0.0)
 	{
@@ -244,6 +254,9 @@ bool Trajectory_Simulator::Update_Capture_State(double radius, double speed, dou
 		{
 			current_bincount.is_captured = true;
 			current_bincount.t_first_negative = t_now_sec;
+			current_bincount.r_first_negative_km = In_Units(radius, km);
+			current_bincount.E_first_negative_eV = E_eV;
+			current_bincount.dE_first_negative_from_prev_eV = dE_from_prev_eV;
 		}
 		current_bincount.t_last_negative = t_now_sec;
 		return true;
@@ -519,6 +532,7 @@ Trajectory_Result Trajectory_Simulator::Simulate(const Event& initial_condition,
 	prev_r_km = 0.0;
 	prev_v2_km2s2 = 0.0;
 	prev_dt_sec = 0.0;
+	previous_capture_energy_eV = Capture_Energy_eV(current_event.Radius(), current_event.Speed(), DM);
 	current_mpi_rank = mpi_rank;
 	current_trajectory_id++;
 	total_rk45_steps_current_traj = 0;

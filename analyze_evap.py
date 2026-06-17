@@ -6,6 +6,8 @@ DEFAULT_PATH = '/project/kennyng/backup_DM/Trajectoies/Data/results_0.000000_-38
 
 
 def parse_row(parts):
+    if len(parts) >= 7:
+        return float(parts[2]), bool(int(float(parts[6])))
     if len(parts) >= 4:
         return float(parts[2]), bool(int(float(parts[3])))
     if len(parts) >= 2:

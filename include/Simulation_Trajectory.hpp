@@ -8,6 +8,7 @@
 #include <vector>
 #include <array>
 #include <chrono>
+#include <limits>
 
 #include "libphysica/Natural_Units.hpp"
 
@@ -39,6 +40,9 @@ struct TrajectoryBincount
 	bool is_captured = false;
 	double t_first_negative = -1.0;  // first time E <= 0 [seconds]
 	double t_last_negative  = -1.0;  // last time E <= 0 [seconds]
+	double r_first_negative_km = -1.0;  // radius when E first becomes negative [km]
+	double E_first_negative_eV = std::numeric_limits<double>::quiet_NaN();  // first negative energy [eV]
+	double dE_first_negative_from_prev_eV = std::numeric_limits<double>::quiet_NaN();  // E_now - E_previous_step [eV]
 	bool truncated = false;          // true if last step has E <= 0
 
 	TrajectoryBincount()
@@ -89,9 +93,11 @@ class Trajectory_Simulator
 	double prev_r_km;           // previous step radius in km
 	double prev_v2_km2s2;       // previous step v² in (km/s)²
 	double prev_dt_sec;         // previous step dt in seconds (for last-step accumulation)
+	double previous_capture_energy_eV;
 	bool terminate_on_capture;
 
 	void Accumulate_Bincount_Step(double r_km, double v2_km2s2, double dt_sec);
+	double Capture_Energy_eV(double radius, double speed, obscura::DM_Particle& DM);
 	bool Update_Capture_State(double radius, double speed, double time, obscura::DM_Particle& DM);
 
 	// RK45 step counter for current trajectory

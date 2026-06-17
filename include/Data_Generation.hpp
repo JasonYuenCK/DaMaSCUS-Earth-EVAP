@@ -20,6 +20,9 @@ struct EvaporationRecord
 	int rank = -1;
 	unsigned long int trajectory_id = 0;
 	double t_evap = 0.0;    // seconds
+	double r_first_negative_km = -1.0;
+	double E_first_negative_eV = 0.0;
+	double dE_first_negative_from_prev_eV = 0.0;
 	bool truncated = false; // true if last step had E <= 0
 };
 

@@ -57,6 +57,9 @@ bool Build_Evaporation_Record(const TrajectoryBincount& bincount, int mpi_rank, 
 	rec.rank = mpi_rank;
 	rec.trajectory_id = trajectory_id;
 	rec.t_evap = t_evap;
+	rec.r_first_negative_km = bincount.r_first_negative_km;
+	rec.E_first_negative_eV = bincount.E_first_negative_eV;
+	rec.dE_first_negative_from_prev_eV = bincount.dE_first_negative_from_prev_eV;
 	rec.truncated = bincount.truncated;
 	return true;
 }
@@ -263,12 +266,14 @@ void Write_Evaporation_Record_List(std::ofstream& file, const std::vector<Evapor
 	file << "# evaporation_truncated_count = " << truncated_count << "\n";
 	if(record_count != records.size())
 		file << "# skipped_non_evaporation_count = " << (records.size() - record_count) << "\n";
-	file << "# rank  trajectory_id  t_evap[s]  truncated(0/1)\n";
+	file << "# rank  trajectory_id  t_evap[s]  r_first_negative[km]  E_first_negative[eV]  dE_first_negative_from_prev[eV]  truncated(0/1)\n";
 	for(const auto& rec : records)
 	{
 		if(!Has_Positive_Evaporation_Time(rec))
 			continue;
-		file << rec.rank << "\t" << rec.trajectory_id << "\t" << std::scientific << std::setprecision(10) << rec.t_evap << "\t" << (rec.truncated ? 1 : 0) << "\n";
+		file << rec.rank << "\t" << rec.trajectory_id << "\t" << std::scientific << std::setprecision(10)
+		     << rec.t_evap << "\t" << rec.r_first_negative_km << "\t" << rec.E_first_negative_eV
+		     << "\t" << rec.dE_first_negative_from_prev_eV << "\t" << (rec.truncated ? 1 : 0) << "\n";
 	}
 }
 
@@ -504,6 +509,9 @@ bool Write_Rank_Snapshot_State(const std::string& path, const Rank_Snapshot_Stat
 		Write_Binary_Value(file, rank);
 		Write_Binary_Value(file, trajectory_id);
 		Write_Binary_Value(file, rec.t_evap);
+		Write_Binary_Value(file, rec.r_first_negative_km);
+		Write_Binary_Value(file, rec.E_first_negative_eV);
+		Write_Binary_Value(file, rec.dE_first_negative_from_prev_eV);
 		Write_Binary_Value(file, truncated);
 	}
 	file.close();
@@ -573,15 +581,24 @@ bool Read_Rank_Snapshot_State(const std::string& path, uint64_t expected_run_id,
 		int32_t rank = -1;
 		uint64_t trajectory_id = 0;
 		double t_evap = 0.0;
+		double r_first_negative_km = -1.0;
+		double E_first_negative_eV = 0.0;
+		double dE_first_negative_from_prev_eV = 0.0;
 		uint8_t truncated = 0;
 		Read_Binary_Value(file, rank);
 		Read_Binary_Value(file, trajectory_id);
 		Read_Binary_Value(file, t_evap);
+		Read_Binary_Value(file, r_first_negative_km);
+		Read_Binary_Value(file, E_first_negative_eV);
+		Read_Binary_Value(file, dE_first_negative_from_prev_eV);
 		Read_Binary_Value(file, truncated);
 		EvaporationRecord rec;
 		rec.rank = static_cast<int>(rank);
 		rec.trajectory_id = static_cast<unsigned long int>(trajectory_id);
 		rec.t_evap = t_evap;
+		rec.r_first_negative_km = r_first_negative_km;
+		rec.E_first_negative_eV = E_first_negative_eV;
+		rec.dE_first_negative_from_prev_eV = dE_first_negative_from_prev_eV;
 		rec.truncated = (truncated != 0);
 		state.evaporation_records.push_back(rec);
 	}
@@ -1224,26 +1241,30 @@ void Simulation_Data::Perform_MPI_Reductions()
 
 	int total_evap = std::accumulate(evap_counts.begin(), evap_counts.end(), 0);
 
-	// Pack local evaporation data: (rank, trajectory_id, t_evap, truncated)
+	// Pack local evaporation data: (rank, trajectory_id, t_evap, r_first_negative, E_first_negative, dE_first_negative_from_prev, truncated)
 	// Use doubles for MPI transfer
-	std::vector<double> local_evap_data(local_evap_count * 4);
+	constexpr int EVAPORATION_MPI_FIELDS = 7;
+	std::vector<double> local_evap_data(local_evap_count * EVAPORATION_MPI_FIELDS);
 	for(int i = 0; i < local_evap_count; i++)
 	{
-		local_evap_data[4*i]     = static_cast<double>(evaporation_records[i].rank);
-		local_evap_data[4*i + 1] = static_cast<double>(evaporation_records[i].trajectory_id);
-		local_evap_data[4*i + 2] = evaporation_records[i].t_evap;
-		local_evap_data[4*i + 3] = evaporation_records[i].truncated ? 1.0 : 0.0;
+		local_evap_data[EVAPORATION_MPI_FIELDS*i]     = static_cast<double>(evaporation_records[i].rank);
+		local_evap_data[EVAPORATION_MPI_FIELDS*i + 1] = static_cast<double>(evaporation_records[i].trajectory_id);
+		local_evap_data[EVAPORATION_MPI_FIELDS*i + 2] = evaporation_records[i].t_evap;
+		local_evap_data[EVAPORATION_MPI_FIELDS*i + 3] = evaporation_records[i].r_first_negative_km;
+		local_evap_data[EVAPORATION_MPI_FIELDS*i + 4] = evaporation_records[i].E_first_negative_eV;
+		local_evap_data[EVAPORATION_MPI_FIELDS*i + 5] = evaporation_records[i].dE_first_negative_from_prev_eV;
+		local_evap_data[EVAPORATION_MPI_FIELDS*i + 6] = evaporation_records[i].truncated ? 1.0 : 0.0;
 	}
 
 	std::vector<int> recv_counts(mpi_processes), displacements(mpi_processes);
 	for(int j = 0; j < mpi_processes; j++)
 	{
-		recv_counts[j] = evap_counts[j] * 4;
+		recv_counts[j] = evap_counts[j] * EVAPORATION_MPI_FIELDS;
 		displacements[j] = (j == 0) ? 0 : displacements[j-1] + recv_counts[j-1];
 	}
 
-	std::vector<double> global_evap_data(total_evap * 4);
-	MPI_Allgatherv(local_evap_data.data(), local_evap_count * 4, MPI_DOUBLE,
+	std::vector<double> global_evap_data(total_evap * EVAPORATION_MPI_FIELDS);
+	MPI_Allgatherv(local_evap_data.data(), local_evap_count * EVAPORATION_MPI_FIELDS, MPI_DOUBLE,
 	               global_evap_data.data(), recv_counts.data(), displacements.data(), MPI_DOUBLE, MPI_COMM_WORLD);
 
 	// Unpack into evaporation_records
@@ -1251,10 +1272,13 @@ void Simulation_Data::Perform_MPI_Reductions()
 	evaporation_records.resize(total_evap);
 	for(int i = 0; i < total_evap; i++)
 	{
-		evaporation_records[i].rank          = static_cast<int>(global_evap_data[4*i]);
-		evaporation_records[i].trajectory_id = static_cast<unsigned long int>(global_evap_data[4*i + 1]);
-		evaporation_records[i].t_evap        = global_evap_data[4*i + 2];
-		evaporation_records[i].truncated     = (global_evap_data[4*i + 3] > 0.5);
+		evaporation_records[i].rank          = static_cast<int>(global_evap_data[EVAPORATION_MPI_FIELDS*i]);
+		evaporation_records[i].trajectory_id = static_cast<unsigned long int>(global_evap_data[EVAPORATION_MPI_FIELDS*i + 1]);
+		evaporation_records[i].t_evap        = global_evap_data[EVAPORATION_MPI_FIELDS*i + 2];
+		evaporation_records[i].r_first_negative_km = global_evap_data[EVAPORATION_MPI_FIELDS*i + 3];
+		evaporation_records[i].E_first_negative_eV = global_evap_data[EVAPORATION_MPI_FIELDS*i + 4];
+		evaporation_records[i].dE_first_negative_from_prev_eV = global_evap_data[EVAPORATION_MPI_FIELDS*i + 5];
+		evaporation_records[i].truncated     = (global_evap_data[EVAPORATION_MPI_FIELDS*i + 6] > 0.5);
 	}
 
 	MPI_Allreduce(MPI_IN_PLACE, &computing_time, 1, MPI_DOUBLE, MPI_MAX, MPI_COMM_WORLD);
