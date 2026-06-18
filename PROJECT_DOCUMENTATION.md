@@ -306,6 +306,7 @@ mpirun -n 32 ./DaMaSCUS-SUN config_Lingyu.cfg
 - 运行参数：样本大小，最大轨迹数，输出目录，等反射环数
 - 暗光子专属参数：$\epsilon$（动能混合），$\alpha_D$（暗规范耦合），$m_{A'}$（介质子质量），形因子类型
 - 可选数值模拟参数：`max_trajectories`（未设置时默认为 `sample_size * 1000`）、`snapshot_enabled`、`snapshot_interval`、`max_trajectory_wall_time_sec`
+- 分峰径向统计参数：`evaporation_mode_bincount_enabled`、`evaporation_mode_boundaries_log10_s`、`evaporation_mode_labels`、`evaporation_mode_include_truncated`。默认关闭；开启后按 `log10(t_evap/s)` 分组累积 captured 轨迹已有的在线 bincount。
 - 快速捕获率参数：`capture_mode = true`（也可使用 `run_mode = "Capture"`）。该模式只用于估计捕获率，$E < 0$ 后立即停止当前轨迹，不写模拟输出文件。
 
 示例：
@@ -315,6 +316,10 @@ run_mode = "Parameter point";
 capture_mode = true;
 sample_size = 1000;
 max_trajectories = 100000;
+evaporation_mode_bincount_enabled = true;
+evaporation_mode_boundaries_log10_s = (4.5, 11.1);
+evaporation_mode_labels = ("P1_fast", "P2_theory", "P3_tail");
+evaporation_mode_include_truncated = false;
 ```
 
 **全局配置变量**（`Parameter_Scan.cpp`）：
@@ -467,6 +472,8 @@ $$\int \sum_i n_i \frac{m_\chi m_i}{(m_\chi + m_i)^2} \langle v_\text{rel} \rang
 
 - `bincount.txt`：captured 与 not_captured 的径向占据时间 $\sum \Delta t$、速度二阶矩 $\sum v^2\Delta t$，以及逐 bin 误差估计。
 - `evaporation_summary.txt`：有正蒸发持续时间的 captured 轨迹的 `rank`、rank 内 `trajectory_id`、`t_evap = t_last_negative - t_first_negative`、首次能量变负时的半径 `r_first_negative[km]`、负能量 `E_first_negative[eV]`、与上一个 time step 的能量差 `dE_first_negative_from_prev[eV] = E_first_negative - E_previous_step` 和 `truncated` 标记；`t_evap <= 0` 表示没有可统计的蒸发持续时间，不写入蒸发时间统计。`trajectory_id` 是每个 MPI rank 内部的本地序号，完整轨迹标识应使用 `(rank, trajectory_id)`。
+- `evaporation_mode_summary.txt`：开启 `evaporation_mode_bincount_enabled` 后输出每个 evaporation mode 的 `log10(t_evap/s)` 区间、标签、样本数和截断样本数。
+- `evaporation_mode_bincount.txt`：开启 `evaporation_mode_bincount_enabled` 后输出按 evaporation mode 拆分的 captured 径向统计，列为每个 mode 的 $\sum\Delta t$、$\sum v^2\Delta t$ 及对应误差。默认边界 `(4.5, 11.1)` 与标签 `("P1_fast", "P2_theory", "P3_tail")` 可直接用于三峰 ensemble 图。
 - `computation_time_summary.txt`：captured / not_captured 轨迹的 wall-clock 时间与 RK45 步数统计。
 
 `capture_rate`、`capture_rate_err` 和 `capture_rate_CI_95_lower/upper` 会写入这些文件头部；Capture Mode 不写这些文件，只在终端打印同类捕获率统计。

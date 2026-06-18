@@ -45,6 +45,30 @@ bool Has_Positive_Evaporation_Time(const EvaporationRecord& rec)
 	return Has_Positive_Evaporation_Time(rec.t_evap);
 }
 
+int Classify_Evaporation_Mode(double log10_t_evap, const std::vector<double>& boundaries_log10_s)
+{
+	if(!std::isfinite(log10_t_evap))
+		return -1;
+	int mode = 0;
+	while(mode < static_cast<int>(boundaries_log10_s.size()) && log10_t_evap >= boundaries_log10_s[mode])
+		mode++;
+	return mode;
+}
+
+void Accumulate_Mode_Bincount(EvaporationModeBincount& mode_bincount, const TrajectoryBincount& bincount)
+{
+	mode_bincount.count++;
+	if(bincount.truncated)
+		mode_bincount.truncated_count++;
+	for(int bin = 0; bin < NUM_BINS; bin++)
+	{
+		mode_bincount.dt_hist[bin] += bincount.dt_hist[bin];
+		mode_bincount.v2dt_hist[bin] += bincount.v2dt_hist[bin];
+		mode_bincount.dt_sq_hist[bin] += bincount.dt_hist[bin] * bincount.dt_hist[bin];
+		mode_bincount.v2dt_sq_hist[bin] += bincount.v2dt_hist[bin] * bincount.v2dt_hist[bin];
+	}
+}
+
 bool Build_Evaporation_Record(const TrajectoryBincount& bincount, int mpi_rank, unsigned long int trajectory_id, EvaporationRecord& rec)
 {
 	if(!bincount.is_captured || !std::isfinite(bincount.t_first_negative) || !std::isfinite(bincount.t_last_negative))
@@ -930,6 +954,17 @@ void Simulation_Data::Configure(double initial_radius, unsigned int min_scatteri
 	maximum_free_time_steps       = max_free_steps;
 }
 
+void Simulation_Data::Configure_Evaporation_Mode_Bincount(bool enabled, const std::vector<double>& boundaries_log10_s, const std::vector<std::string>& labels, bool include_truncated)
+{
+	evaporation_mode_bincount_enabled = enabled;
+	evaporation_mode_boundaries_log10_s = boundaries_log10_s;
+	evaporation_mode_labels = labels;
+	evaporation_mode_include_truncated = include_truncated;
+	evaporation_mode_bincounts.clear();
+	if(evaporation_mode_bincount_enabled)
+		evaporation_mode_bincounts.resize(evaporation_mode_boundaries_log10_s.size() + 1);
+}
+
 void Simulation_Data::Generate_Data(obscura::DM_Particle& DM, Solar_Model& solar_model, obscura::DM_Distribution& halo_model, SnapshotConfig snapshot_cfg, unsigned int fixed_seed, bool capture_mode)
 {
 	if(capture_mode)
@@ -1106,7 +1141,15 @@ void Simulation_Data::Generate_Data(obscura::DM_Particle& DM, Solar_Model& solar
 				// Record only trajectories with a positive measured evaporation duration.
 				EvaporationRecord rec;
 				if(Build_Evaporation_Record(trajectory.bincount, mpi_rank, number_of_trajectories, rec))
+				{
 					evaporation_records.push_back(rec);
+					if(evaporation_mode_bincount_enabled && (evaporation_mode_include_truncated || !rec.truncated))
+					{
+						int mode = Classify_Evaporation_Mode(log10(rec.t_evap), evaporation_mode_boundaries_log10_s);
+						if(mode >= 0 && mode < static_cast<int>(evaporation_mode_bincounts.size()))
+							Accumulate_Mode_Bincount(evaporation_mode_bincounts[mode], trajectory.bincount);
+					}
+				}
 			}
 
 			// Computation time & step count statistics (captured)
@@ -1227,6 +1270,16 @@ void Simulation_Data::Perform_MPI_Reductions()
 	MPI_Allreduce(MPI_IN_PLACE, not_captured_dt_sq_hist.data(), NUM_BINS, MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
 	MPI_Allreduce(MPI_IN_PLACE, not_captured_v2dt_sq_hist.data(), NUM_BINS, MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
 
+	for(auto& mode_bincount : evaporation_mode_bincounts)
+	{
+		MPI_Allreduce(MPI_IN_PLACE, &mode_bincount.count, 1, MPI_UNSIGNED_LONG, MPI_SUM, MPI_COMM_WORLD);
+		MPI_Allreduce(MPI_IN_PLACE, &mode_bincount.truncated_count, 1, MPI_UNSIGNED_LONG, MPI_SUM, MPI_COMM_WORLD);
+		MPI_Allreduce(MPI_IN_PLACE, mode_bincount.dt_hist.data(), NUM_BINS, MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
+		MPI_Allreduce(MPI_IN_PLACE, mode_bincount.v2dt_hist.data(), NUM_BINS, MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
+		MPI_Allreduce(MPI_IN_PLACE, mode_bincount.dt_sq_hist.data(), NUM_BINS, MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
+		MPI_Allreduce(MPI_IN_PLACE, mode_bincount.v2dt_sq_hist.data(), NUM_BINS, MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
+	}
+
 	// Reduce early_stopped flag (any rank early stopped => global flag)
 	int local_es = early_stopped ? 1 : 0;
 	int global_es = 0;
@@ -1317,6 +1370,8 @@ void Simulation_Data::Write_Output_Files(const std::string& output_dir, obscura:
 
 	std::remove((output_dir + "/captured_bincount.txt").c_str());
 	std::remove((output_dir + "/not_captured_bincount.txt").c_str());
+	std::remove((output_dir + "/evaporation_mode_summary.txt").c_str());
+	std::remove((output_dir + "/evaporation_mode_bincount.txt").c_str());
 
 	// 1. Merged bincount
 	{
@@ -1346,6 +1401,61 @@ void Simulation_Data::Write_Output_Files(const std::string& output_dir, obscura:
 		std::ofstream f(output_dir + "/evaporation_summary.txt");
 		write_header(f);
 		Write_Evaporation_Record_List(f, evaporation_records);
+		f.close();
+	}
+
+	if(evaporation_mode_bincount_enabled)
+	{
+		std::ofstream f(output_dir + "/evaporation_mode_summary.txt");
+		write_header(f);
+		f << "# evaporation_mode_include_truncated = " << (evaporation_mode_include_truncated ? 1 : 0) << "\n";
+		f << "# mode_count = " << evaporation_mode_bincounts.size() << "\n";
+		f << "# boundary_count = " << evaporation_mode_boundaries_log10_s.size() << "\n";
+		f << "# boundaries_log10_s";
+		for(double boundary : evaporation_mode_boundaries_log10_s)
+			f << " " << std::scientific << std::setprecision(10) << boundary;
+		f << "\n";
+		f << "# mode_index  label  log10_t_lower  log10_t_upper  count  truncated_count\n";
+		for(size_t mode = 0; mode < evaporation_mode_bincounts.size(); mode++)
+		{
+			double lower = (mode == 0) ? -std::numeric_limits<double>::infinity() : evaporation_mode_boundaries_log10_s[mode - 1];
+			double upper = (mode < evaporation_mode_boundaries_log10_s.size()) ? evaporation_mode_boundaries_log10_s[mode] : std::numeric_limits<double>::infinity();
+			const std::string label = (mode < evaporation_mode_labels.size()) ? evaporation_mode_labels[mode] : ("mode_" + std::to_string(mode));
+			f << mode << "\t" << label << "\t" << std::scientific << std::setprecision(10)
+			  << lower << "\t" << upper << "\t" << evaporation_mode_bincounts[mode].count
+			  << "\t" << evaporation_mode_bincounts[mode].truncated_count << "\n";
+		}
+		f.close();
+	}
+
+	if(evaporation_mode_bincount_enabled)
+	{
+		std::ofstream f(output_dir + "/evaporation_mode_bincount.txt");
+		write_header(f);
+		f << "# bin_index";
+		for(size_t mode = 0; mode < evaporation_mode_bincounts.size(); mode++)
+		{
+			const std::string label = (mode < evaporation_mode_labels.size()) ? evaporation_mode_labels[mode] : ("mode_" + std::to_string(mode));
+			f << "  " << label << "_dt[s]"
+			  << "  " << label << "_v2dt[km2/s]"
+			  << "  " << label << "_err_dt[s]"
+			  << "  " << label << "_err_v2dt[km2/s]";
+		}
+		f << "\n";
+		for(int b = 0; b < NUM_BINS; b++)
+		{
+			f << b;
+			for(const auto& mode_bincount : evaporation_mode_bincounts)
+			{
+				double N_mode = static_cast<double>(mode_bincount.count);
+				double err_dt = Snapshot_Bin_Error(mode_bincount.dt_hist[b], mode_bincount.dt_sq_hist[b], N_mode);
+				double err_v2dt = Snapshot_Bin_Error(mode_bincount.v2dt_hist[b], mode_bincount.v2dt_sq_hist[b], N_mode);
+				f << "\t" << std::scientific << std::setprecision(10)
+				  << mode_bincount.dt_hist[b] << "\t" << mode_bincount.v2dt_hist[b]
+				  << "\t" << err_dt << "\t" << err_v2dt;
+			}
+			f << "\n";
+		}
 		f.close();
 	}
 

@@ -3,6 +3,7 @@
 
 #include <vector>
 #include <string>
+#include <array>
 
 #include "libphysica/Natural_Units.hpp"
 #include "libphysica/Statistics.hpp"
@@ -24,6 +25,16 @@ struct EvaporationRecord
 	double E_first_negative_eV = 0.0;
 	double dE_first_negative_from_prev_eV = 0.0;
 	bool truncated = false; // true if last step had E <= 0
+};
+
+struct EvaporationModeBincount
+{
+	unsigned long int count = 0;
+	unsigned long int truncated_count = 0;
+	std::array<double, NUM_BINS> dt_hist{};
+	std::array<double, NUM_BINS> v2dt_hist{};
+	std::array<double, NUM_BINS> dt_sq_hist{};
+	std::array<double, NUM_BINS> v2dt_sq_hist{};
 };
 
 class Simulation_Data
@@ -60,6 +71,11 @@ class Simulation_Data
 
 	// Evaporation records
 	std::vector<EvaporationRecord> evaporation_records;
+	bool evaporation_mode_bincount_enabled = false;
+	std::vector<double> evaporation_mode_boundaries_log10_s;
+	std::vector<std::string> evaporation_mode_labels;
+	bool evaporation_mode_include_truncated = false;
+	std::vector<EvaporationModeBincount> evaporation_mode_bincounts;
 
 	// --- Per-trajectory computation time statistics ---
 	double total_wall_time_captured;
@@ -103,6 +119,7 @@ class Simulation_Data
 	Simulation_Data(unsigned int sample_size, unsigned int max_trajectories, double u_min = 0.0, unsigned int iso_rings = 1);
 
 	void Configure(double initial_radius, unsigned int min_scattering, unsigned long int max_scattering, unsigned long int max_free_steps = DEFAULT_MAXIMUM_FREE_TIME_STEPS);
+	void Configure_Evaporation_Mode_Bincount(bool enabled, const std::vector<double>& boundaries_log10_s, const std::vector<std::string>& labels, bool include_truncated);
 
 	void Generate_Data(obscura::DM_Particle& DM, Solar_Model& solar_model, obscura::DM_Distribution& halo_model, SnapshotConfig snapshot_cfg = SnapshotConfig(), unsigned int fixed_seed = 0, bool capture_mode = false);
 

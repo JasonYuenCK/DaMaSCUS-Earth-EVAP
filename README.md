@@ -51,6 +51,16 @@ Key parameters in the `.cfg` file:
 | `DM_mass` | Dark matter mass in GeV |
 | `DM_cross_section_nucleon` | DM-nucleon cross section in cm² |
 | `run_mode` | "Parameter point" or "Parameter scan" |
+| `evaporation_mode_bincount_enabled` | Optional split of captured bincounts by evaporation-time peaks |
+
+Optional evaporation-mode settings:
+
+```cfg
+evaporation_mode_bincount_enabled = true;
+evaporation_mode_boundaries_log10_s = (4.5, 11.1);
+evaporation_mode_labels = ("P1_fast", "P2_theory", "P3_tail");
+evaporation_mode_include_truncated = false;
+```
 
 ### Output Files
 
@@ -58,6 +68,8 @@ For each parameter point, the main generated files are:
 
 - `bincount.txt` — Combined captured/not-captured time-weighted radial histogram with error estimates
 - `evaporation_summary.txt` — Positive evaporation durations, keyed by `rank` and rank-local `trajectory_id`, with the first-negative radius, energy, and previous-step energy difference; zero-duration captures are treated as non-evaporation and are not included in the statistics
+- `evaporation_mode_summary.txt` — Counts and log10(t_evap/s) boundaries for each configured evaporation mode, when enabled
+- `evaporation_mode_bincount.txt` — Per-mode captured radial bincounts (`dt`, `v2dt`, and errors), when enabled
 - `computation_time_summary.txt` — Wall-clock time and RK45 step-count statistics
 
 When `snapshot_enabled = true`, intermediate files are written under `snapshot/`:
