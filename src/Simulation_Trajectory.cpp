@@ -115,6 +115,8 @@ Trajectory_Result::Trajectory_Result(const Event& event_ini, const Event& event_
 
 bool Trajectory_Result::Particle_Reflected() const
 {
+	if(bincount.termination_reason != TrajectoryTerminationReason::OutwardEscape)
+		return false;
 	double r	= final_event.Radius();
 	double vesc = sqrt(2 * G_Newton * mSun / r);
 	return r > rSun && final_event.Speed() > vesc && number_of_scatterings > 0;
@@ -122,7 +124,8 @@ bool Trajectory_Result::Particle_Reflected() const
 
 bool Trajectory_Result::Particle_Free() const
 {
-	return number_of_scatterings == 0;
+	return bincount.termination_reason == TrajectoryTerminationReason::OutwardEscape
+	    && number_of_scatterings == 0;
 }
 
 bool Trajectory_Result::Particle_Captured(Solar_Model& solar_model) const
@@ -169,7 +172,7 @@ void Trajectory_Result::Print_Summary(Solar_Model& solar_model, unsigned int mpi
 
 // 2. Simulator
 Trajectory_Simulator::Trajectory_Simulator(const Solar_Model& model, unsigned long int max_time_steps, unsigned long int max_scatterings, double max_distance)
-: solar_model(model), terminate_on_capture(false), maximum_time_steps(max_time_steps), maximum_scatterings(max_scatterings), maximum_distance(max_distance), total_rk45_steps_current_traj(0), trajectory_in_progress(false), current_trajectory_physical_time_sec(0.0), current_mpi_rank(0), current_trajectory_id(0)
+: solar_model(model), current_physical_bound_state(false), terminate_on_capture(false), total_rk45_steps_current_traj(0), trajectory_in_progress(false), current_trajectory_physical_time_sec(0.0), maximum_time_steps(max_time_steps), maximum_scatterings(max_scatterings), maximum_distance(max_distance), current_mpi_rank(0), current_trajectory_id(0)
 {
 	std::random_device rd;
 	PRNG.seed(rd());
@@ -239,19 +242,25 @@ double Trajectory_Simulator::Capture_Energy_eV(double radius, double speed, obsc
 	return In_Units(E, eV);
 }
 
-bool Trajectory_Simulator::Update_Capture_State(double radius, double speed, double time, obscura::DM_Particle& DM)
+bool Trajectory_Simulator::Update_Capture_State(double radius, double speed, double time, obscura::DM_Particle& DM, bool allow_new_capture)
 {
 	double E_eV = Capture_Energy_eV(radius, speed, DM);
 	double dE_from_prev_eV = std::numeric_limits<double>::quiet_NaN();
 	if(std::isfinite(previous_capture_energy_eV))
 		dE_from_prev_eV = E_eV - previous_capture_energy_eV;
 	previous_capture_energy_eV = E_eV;
+	bool negative_energy = E_eV < 0.0;
 
-	if(E_eV < 0.0)
+	if(allow_new_capture)
+		current_physical_bound_state = negative_energy;
+
+	if(negative_energy && (allow_new_capture || current_physical_bound_state))
 	{
 		double t_now_sec = In_Units(time, sec);
 		if(!current_bincount.is_captured)
 		{
+			if(!allow_new_capture)
+				return false;
 			current_bincount.is_captured = true;
 			current_bincount.t_first_negative = t_now_sec;
 			current_bincount.r_first_negative_km = In_Units(radius, km);
@@ -265,18 +274,17 @@ bool Trajectory_Simulator::Update_Capture_State(double radius, double speed, dou
 	return false;
 }
 
-bool Trajectory_Simulator::Propagate_Freely(Event& current_event, obscura::DM_Particle& DM)
+TrajectoryTerminationReason Trajectory_Simulator::Propagate_Freely(Event& current_event, obscura::DM_Particle& DM)
 {
 	if(Outward_Escaping_At_Boundary(current_event, solar_model, maximum_distance))
-		return true;
+		return TrajectoryTerminationReason::OutwardEscape;
 
 	Free_Particle_Propagator particle_propagator(current_event);
-
 	double minus_log_xi = -log(libphysica::Sample_Uniform(PRNG));
-	bool success = false;
+	TrajectoryTerminationReason outcome = TrajectoryTerminationReason::MaxFreeSteps;
 	unsigned long int time_steps = 0;
 
-	while(time_steps < maximum_time_steps && !success)
+	while(time_steps < maximum_time_steps && outcome == TrajectoryTerminationReason::MaxFreeSteps)
 	{
 		time_steps++;
 		double r_before = particle_propagator.Current_Radius();
@@ -290,10 +298,22 @@ bool Trajectory_Simulator::Propagate_Freely(Event& current_event, obscura::DM_Pa
 			particle_propagator.time_step = RK45_Sanitized_Time_Step(particle_propagator.time_step);
 
 		double t_before = particle_propagator.Current_Time();
-		particle_propagator.Runge_Kutta_45_Step(solar_model);
+		bool rk_step_ok = particle_propagator.Runge_Kutta_45_Step(solar_model);
 		double actual_dt = particle_propagator.Current_Time() - t_before;
 		double r_after = particle_propagator.Current_Radius();
 		double v_after = particle_propagator.Current_Speed();
+
+		if(!rk_step_ok)
+		{
+			std::cerr << "\nWarning in Propagate_Freely(): RK45 step failed tolerance after retry limits (rank "
+			          << current_mpi_rank << ", traj " << current_trajectory_id
+			          << "). Marking trajectory as numerically failed." << std::endl;
+			current_trajectory_physical_time_sec = In_Units(particle_propagator.Current_Time(), sec);
+			Publish_Snapshot_Progress();
+			total_rk45_steps_current_traj += time_steps;
+			current_event = particle_propagator.Event_In_3D();
+			return TrajectoryTerminationReason::NumericalFailure;
+		}
 
 		if(!std::isfinite(r_after) || !std::isfinite(v_after) || !std::isfinite(actual_dt))
 		{
@@ -306,19 +326,22 @@ bool Trajectory_Simulator::Propagate_Freely(Event& current_event, obscura::DM_Pa
 			Publish_Snapshot_Progress();
 			total_rk45_steps_current_traj += time_steps;
 			current_event = particle_propagator.Event_In_3D();
-			return false;
+			return TrajectoryTerminationReason::NonFiniteState;
 		}
 
 		if(v_after > v_max)
 		{
 			std::cerr << "\nWarning in Propagate_Freely(): DM speed exceeds the maximum of v_max = " << v_max << std::endl
 					  << "\tAbort simulation." << std::endl;
-			return false;
+			current_trajectory_physical_time_sec = In_Units(particle_propagator.Current_Time(), sec);
+			Publish_Snapshot_Progress();
+			total_rk45_steps_current_traj += time_steps;
+			current_event = particle_propagator.Event_In_3D();
+			return TrajectoryTerminationReason::SpeedLimit;
 		}
 
 		// 单条轨迹 wall-clock 预算：防止任何一条轨迹把整个 rank 永远拖住。
-		// 正常轨迹最多占几秒，阈值由 Trajectory_Simulator::max_trajectory_wall_time_sec 控制
-		// （默认 300s，=0 表示不限）。每 256 步查一次，开销可忽略。
+		// 正式统计默认不限制；若配置为正值，每 256 步检查一次。
 		if(max_trajectory_wall_time_sec > 0.0 && (time_steps & 0xFFu) == 0u)
 		{
 			double traj_wall = Current_Trajectory_Wall_Time_Seconds();
@@ -332,7 +355,7 @@ bool Trajectory_Simulator::Propagate_Freely(Event& current_event, obscura::DM_Pa
 				Publish_Snapshot_Progress();
 				total_rk45_steps_current_traj += time_steps;
 				current_event = particle_propagator.Event_In_3D();
-				return false;
+				return TrajectoryTerminationReason::WallTimeLimit;
 			}
 		}
 
@@ -357,7 +380,7 @@ bool Trajectory_Simulator::Propagate_Freely(Event& current_event, obscura::DM_Pa
 			prev_v2_km2s2 = v2_now;
 		}
 
-		bool captured_now = Update_Capture_State(r_after, v_after, particle_propagator.Current_Time(), DM);
+		bool captured_now = Update_Capture_State(r_after, v_after, particle_propagator.Current_Time(), DM, false);
 
 		current_trajectory_physical_time_sec = t_now_sec;
 		Publish_Snapshot_Progress();
@@ -366,7 +389,7 @@ bool Trajectory_Simulator::Propagate_Freely(Event& current_event, obscura::DM_Pa
 		{
 			total_rk45_steps_current_traj += time_steps;
 			current_event = particle_propagator.Event_In_3D();
-			return false;
+			return TrajectoryTerminationReason::CaptureMode;
 		}
 
 		// Check for scatterings and reflection
@@ -385,23 +408,29 @@ bool Trajectory_Simulator::Propagate_Freely(Event& current_event, obscura::DM_Pa
 				particle_propagator.time_step = time_step_max;
 			minus_log_xi -= actual_dt * total_rate;
 			if(minus_log_xi < 0.0)
+			{
 				scattering = true;
+				outcome = TrajectoryTerminationReason::Scatter;
+			}
 		}
 		else
 		{
 			if(r_after >= maximum_distance && r_after >= r_before && v_after > solar_model.Local_Escape_Speed(r_after))
+			{
 				reflection = true;
+				outcome = TrajectoryTerminationReason::OutwardEscape;
+			}
 		}
 
 		if(reflection || scattering)
-			success = true;
+			break;
 	}
 
 	// Accumulate RK45 steps for this Propagate_Freely call
 	total_rk45_steps_current_traj += time_steps;
 
 	current_event = particle_propagator.Event_In_3D();
-	return success;
+	return outcome;
 }
 
 
@@ -533,6 +562,7 @@ Trajectory_Result Trajectory_Simulator::Simulate(const Event& initial_condition,
 	prev_v2_km2s2 = 0.0;
 	prev_dt_sec = 0.0;
 	previous_capture_energy_eV = Capture_Energy_eV(current_event.Radius(), current_event.Speed(), DM);
+	current_physical_bound_state = false;
 	current_mpi_rank = mpi_rank;
 	current_trajectory_id++;
 	total_rk45_steps_current_traj = 0;
@@ -541,21 +571,35 @@ Trajectory_Result Trajectory_Simulator::Simulate(const Event& initial_condition,
 	current_trajectory_wall_start = std::chrono::steady_clock::now();
 	Publish_Snapshot_Progress();
 
-	while(Propagate_Freely(current_event, DM) && number_of_scatterings < maximum_scatterings)
+	TrajectoryTerminationReason termination_reason = TrajectoryTerminationReason::Unknown;
+	while(number_of_scatterings < maximum_scatterings)
 	{
-		if(current_event.Radius() < rSun)
+		TrajectoryTerminationReason propagation_reason = Propagate_Freely(current_event, DM);
+		if(propagation_reason == TrajectoryTerminationReason::Scatter && current_event.Radius() < rSun)
 		{
 			Scatter(current_event, DM);
 			number_of_scatterings++;
-			if(terminate_on_capture && Update_Capture_State(current_event.Radius(), current_event.Speed(), current_event.time, DM))
+			bool captured_after_scatter = Update_Capture_State(current_event.Radius(), current_event.Speed(), current_event.time, DM, true);
+			if(terminate_on_capture && captured_after_scatter)
+			{
+				termination_reason = TrajectoryTerminationReason::CaptureMode;
 				break;
+			}
 		}
 		else
+		{
+			termination_reason = propagation_reason;
 			break;
+		}
 	}
-	trajectory_in_progress = false;
 
-	// Check truncation: if the last step still had negative energy
+	if(termination_reason == TrajectoryTerminationReason::Unknown && number_of_scatterings >= maximum_scatterings)
+		termination_reason = TrajectoryTerminationReason::MaxScatterings;
+
+	trajectory_in_progress = false;
+	current_bincount.termination_reason = termination_reason;
+
+	// A captured lifetime is complete only when the trajectory reaches the outward escape boundary.
 	if(current_bincount.is_captured)
 	{
 		// Compute energy at the final event
@@ -563,7 +607,7 @@ Trajectory_Result Trajectory_Simulator::Simulate(const Event& initial_condition,
 		double v_final = current_event.Speed();
 		double vesc_final = solar_model.Local_Escape_Speed(r_final);
 		double E_final = 0.5 * DM.mass * (v_final * v_final - vesc_final * vesc_final);
-		if(In_Units(E_final, eV) < 0.0)
+		if(termination_reason != TrajectoryTerminationReason::OutwardEscape || In_Units(E_final, eV) < 0.0)
 			current_bincount.truncated = true;
 	}
 
@@ -610,7 +654,7 @@ double Free_Particle_Propagator::dphi_dt(double r)
 	return angular_momentum / r / r;
 }
 
-void Free_Particle_Propagator::Runge_Kutta_45_Step(Solar_Model& solar_model)
+bool Free_Particle_Propagator::Runge_Kutta_45_Step(Solar_Model& solar_model)
 {
 	time_step = RK45_Sanitized_Time_Step(time_step);
 	bool accepted = false;
@@ -685,6 +729,7 @@ void Free_Particle_Propagator::Runge_Kutta_45_Step(Solar_Model& solar_model)
 		phi		  = phi_4;
 		time_step = time_step_new;
 		accepted  = true;
+		return true;
 	}
 	else
 	{
@@ -701,31 +746,33 @@ void Free_Particle_Propagator::Runge_Kutta_45_Step(Solar_Model& solar_model)
 			// 绝不能把 NaN 写回传播器状态，否则后续的每一步都会继续崩。
 			// 这时保留原状态，只把时间推进 abs_min_step，由外层 Propagate_Freely
 			// 的 is_finite 检查来中止本条轨迹。
-			const bool state_ok =
-			    std::isfinite(radius_4) && std::isfinite(v_radial_4) && std::isfinite(phi_4);
-			time = time + abs_min_step;
-			if(state_ok)
-			{
-				radius = radius_4;
-				if(radius < 0.0)
-					radius = 0.0;
-				v_radial = v_radial_4;
-				phi      = phi_4;
-			}
-			time_step = abs_min_step;
-			accepted  = true;
-		}
-		else
+		const bool state_ok =
+		    std::isfinite(radius_4) && std::isfinite(v_radial_4) && std::isfinite(phi_4);
+		time = time + abs_min_step;
+		if(state_ok)
 		{
-			time_step = time_step_new;
-			// Loop continues with smaller time_step (was recursive call before Q1 fix)
+			radius = radius_4;
+			if(radius < 0.0)
+				radius = 0.0;
+			v_radial = v_radial_4;
+			phi      = phi_4;
 		}
+		time_step = abs_min_step;
+		accepted  = true;
+		return false;
 	}
-  }   // end while(!accepted)
+	else
+	{
+		time_step = time_step_new;
+		// Loop continues with smaller time_step (was recursive call before Q1 fix)
+	}
+	}
+	}   // end while(!accepted)
+	return true;
 }
 
 // Overload with constant mass (for Kepler orbits outside the sun / testing)
-void Free_Particle_Propagator::Runge_Kutta_45_Step(double constant_mass)
+bool Free_Particle_Propagator::Runge_Kutta_45_Step(double constant_mass)
 {
 	time_step = RK45_Sanitized_Time_Step(time_step);
 	bool accepted = false;
@@ -781,6 +828,7 @@ void Free_Particle_Propagator::Runge_Kutta_45_Step(double constant_mass)
 		phi		  = phi_4;
 		time_step = time_step_new;
 		accepted  = true;
+		return true;
 	}
 	else
 	{
@@ -789,26 +837,28 @@ void Free_Particle_Propagator::Runge_Kutta_45_Step(double constant_mass)
 		const bool reached_iter_cap  = inner_iter >= RK45_MAX_INNER_RETRIES;
 		if(reached_min_step || reached_iter_cap)
 		{
-			const bool state_ok =
-			    std::isfinite(radius_4) && std::isfinite(v_radial_4) && std::isfinite(phi_4);
-			time = time + abs_min_step;
-			if(state_ok)
-			{
-				radius = radius_4;
-				if(radius < 0.0)
-					radius = 0.0;
-				v_radial = v_radial_4;
-				phi      = phi_4;
-			}
-			time_step = abs_min_step;
-			accepted  = true;
-		}
-		else
+		const bool state_ok =
+		    std::isfinite(radius_4) && std::isfinite(v_radial_4) && std::isfinite(phi_4);
+		time = time + abs_min_step;
+		if(state_ok)
 		{
-			time_step = time_step_new;
+			radius = radius_4;
+			if(radius < 0.0)
+				radius = 0.0;
+			v_radial = v_radial_4;
+			phi      = phi_4;
 		}
+		time_step = abs_min_step;
+		accepted  = true;
+		return false;
 	}
-  }
+	else
+	{
+		time_step = time_step_new;
+	}
+	}
+	}
+	return true;
 }
 
 double Free_Particle_Propagator::Current_Time()

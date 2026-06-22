@@ -24,7 +24,8 @@ struct EvaporationRecord
 	double r_first_negative_km = -1.0;
 	double E_first_negative_eV = 0.0;
 	double dE_first_negative_from_prev_eV = 0.0;
-	bool truncated = false; // true if last step had E <= 0
+	bool truncated = false; // true if trajectory did not end as a complete outward escape
+	TrajectoryTerminationReason termination_reason = TrajectoryTerminationReason::Unknown;
 };
 
 struct EvaporationModeBincount
@@ -53,6 +54,7 @@ class Simulation_Data
 	unsigned long int number_of_free_particles;
 	unsigned long int number_of_reflected_particles;
 	unsigned long int number_of_captured_particles;
+	std::array<unsigned long int, TRAJECTORY_TERMINATION_REASON_COUNT> termination_reason_counts;
 	double average_number_of_scatterings;
 	double computing_time;
 	bool early_stopped;

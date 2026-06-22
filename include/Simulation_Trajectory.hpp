@@ -29,6 +29,21 @@ constexpr double BIN_MAX_KM = 2.0 * R_SUN_KM;  // 2 R_sun in km
 constexpr double BIN_WIDTH_KM = BIN_MAX_KM / NUM_BINS;  // ~695.7 km
 constexpr unsigned long int DEFAULT_MAXIMUM_FREE_TIME_STEPS = 1000000000000UL;
 constexpr unsigned long int DEFAULT_MAXIMUM_SCATTERINGS = 100000000000000UL;
+constexpr int TRAJECTORY_TERMINATION_REASON_COUNT = 10;
+
+enum class TrajectoryTerminationReason
+{
+	Unknown = 0,
+	OutwardEscape = 1,
+	Scatter = 2,
+	WallTimeLimit = 3,
+	MaxFreeSteps = 4,
+	MaxScatterings = 5,
+	NonFiniteState = 6,
+	SpeedLimit = 7,
+	NumericalFailure = 8,
+	CaptureMode = 9
+};
 
 // Per-trajectory bincount result
 struct TrajectoryBincount
@@ -43,7 +58,8 @@ struct TrajectoryBincount
 	double r_first_negative_km = -1.0;  // radius when E first becomes negative [km]
 	double E_first_negative_eV = std::numeric_limits<double>::quiet_NaN();  // first negative energy [eV]
 	double dE_first_negative_from_prev_eV = std::numeric_limits<double>::quiet_NaN();  // E_now - E_previous_step [eV]
-	bool truncated = false;          // true if last step has E <= 0
+	bool truncated = false;          // true if trajectory did not end as a complete outward escape
+	TrajectoryTerminationReason termination_reason = TrajectoryTerminationReason::Unknown;
 
 	TrajectoryBincount()
 	{
@@ -59,8 +75,8 @@ struct SnapshotConfig
 	double interval_seconds = 60.0;  // wall-clock seconds between snapshots
 	// 单条轨迹最长允许的 wall-clock 时间（秒）；超过即中止该轨迹。
 	// 用于防止单条病态轨迹把整个 rank 卡死，从而导致 snapshot/MPI_Barrier 死锁。
-	// 0 表示不限制。默认 300 s。
-	double max_trajectory_wall_time_sec = 300.0;
+	// 0 表示不限制。正式统计默认不限制。
+	double max_trajectory_wall_time_sec = 0.0;
 };
 
 // 1. Result of one trajectory
@@ -94,11 +110,12 @@ class Trajectory_Simulator
 	double prev_v2_km2s2;       // previous step v² in (km/s)²
 	double prev_dt_sec;         // previous step dt in seconds (for last-step accumulation)
 	double previous_capture_energy_eV;
+	bool current_physical_bound_state;
 	bool terminate_on_capture;
 
 	void Accumulate_Bincount_Step(double r_km, double v2_km2s2, double dt_sec);
 	double Capture_Energy_eV(double radius, double speed, obscura::DM_Particle& DM);
-	bool Update_Capture_State(double radius, double speed, double time, obscura::DM_Particle& DM);
+	bool Update_Capture_State(double radius, double speed, double time, obscura::DM_Particle& DM, bool allow_new_capture);
 
 	// RK45 step counter for current trajectory
 	unsigned long int total_rk45_steps_current_traj;
@@ -109,7 +126,7 @@ class Trajectory_Simulator
 
 	void Publish_Snapshot_Progress() const;
 
-	bool Propagate_Freely(Event& current_event, obscura::DM_Particle& DM);
+	TrajectoryTerminationReason Propagate_Freely(Event& current_event, obscura::DM_Particle& DM);
 
 	int Sample_Target(obscura::DM_Particle& DM, double r, double DM_speed);
 	libphysica::Vector Sample_Target_Velocity(double temperature, double target_mass, const libphysica::Vector& vel_DM);
@@ -122,10 +139,10 @@ class Trajectory_Simulator
 	unsigned long int maximum_scatterings;
 	double maximum_distance;
 
-	// 单条轨迹的 wall-clock 时间上限（秒）。超过后 Propagate_Freely 会提前返回 false，
+	// 单条轨迹的 wall-clock 时间上限（秒）。超过后 Propagate_Freely 会返回 WallTimeLimit，
 	// 防止任一 rank 被单条病态轨迹卡死从而阻塞 snapshot / MPI_Barrier。
-	// 设为 0 表示不限制。默认 300 s 与 snapshot_interval 量级一致。
-	double max_trajectory_wall_time_sec = 300.0;
+	// 设为 0 表示不限制。正式统计默认不限制。
+	double max_trajectory_wall_time_sec = 0.0;
 
 	unsigned int current_mpi_rank;
 	unsigned long int current_trajectory_id;
@@ -164,8 +181,8 @@ class Free_Particle_Propagator
 
 	explicit Free_Particle_Propagator(const Event& event);
 
-	void Runge_Kutta_45_Step(Solar_Model& solar_model);
-	void Runge_Kutta_45_Step(double constant_mass);
+	bool Runge_Kutta_45_Step(Solar_Model& solar_model);
+	bool Runge_Kutta_45_Step(double constant_mass);
 
 	double Current_Time();
 	double Current_Radius();

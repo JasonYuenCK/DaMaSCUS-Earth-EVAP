@@ -51,13 +51,16 @@ TEST(TestSimulationTrajectory, TestParticleReflected)
 	Event not_reflected_2(t, r_in, v_2);
 	Event not_reflected_3(t, r_out, v_1);
 	Event reflected_1(t, r_out, v_2);
+	TrajectoryBincount escaped_bincount;
+	escaped_bincount.termination_reason = TrajectoryTerminationReason::OutwardEscape;
 
 	// ACT & ASSERT
 	EXPECT_FALSE(Trajectory_Result(initial_event, not_reflected_1, 1, 0, TrajectoryBincount{}).Particle_Reflected());
 	EXPECT_FALSE(Trajectory_Result(initial_event, not_reflected_2, 1, 0, TrajectoryBincount{}).Particle_Reflected());
 	EXPECT_FALSE(Trajectory_Result(initial_event, not_reflected_3, 1, 0, TrajectoryBincount{}).Particle_Reflected());
-	EXPECT_TRUE(Trajectory_Result(initial_event, reflected_1, 1, 0, TrajectoryBincount{}).Particle_Reflected());
-	EXPECT_FALSE(Trajectory_Result(initial_event, reflected_1, 0, 0, TrajectoryBincount{}).Particle_Reflected());
+	EXPECT_FALSE(Trajectory_Result(initial_event, reflected_1, 1, 0, TrajectoryBincount{}).Particle_Reflected());
+	EXPECT_TRUE(Trajectory_Result(initial_event, reflected_1, 1, 0, escaped_bincount).Particle_Reflected());
+	EXPECT_FALSE(Trajectory_Result(initial_event, reflected_1, 0, 0, escaped_bincount).Particle_Reflected());
 }
 
 TEST(TestSimulationTrajectory, TestParticleFree)
@@ -68,10 +71,13 @@ TEST(TestSimulationTrajectory, TestParticleFree)
 	libphysica::Vector v({0, 1000 * km / sec, 0});
 	Event initial_event;
 	Event final_event(t, r, v);
+	TrajectoryBincount escaped_bincount;
+	escaped_bincount.termination_reason = TrajectoryTerminationReason::OutwardEscape;
 
 	// ACT & ASSERT
 	EXPECT_FALSE(Trajectory_Result(initial_event, final_event, 1, 0, TrajectoryBincount{}).Particle_Free());
-	EXPECT_TRUE(Trajectory_Result(initial_event, final_event, 0, 0, TrajectoryBincount{}).Particle_Free());
+	EXPECT_FALSE(Trajectory_Result(initial_event, final_event, 0, 0, TrajectoryBincount{}).Particle_Free());
+	EXPECT_TRUE(Trajectory_Result(initial_event, final_event, 0, 0, escaped_bincount).Particle_Free());
 }
 
 TEST(TestSimulationTrajectory, TestParticleCaptured)
@@ -105,6 +111,16 @@ TEST(TestSimulationTrajectory, TestParticleCaptured)
 
 // 2. Simulator
 
+TEST(TestSimulationTrajectory, TestDefaultTrajectoryWallTimeIsUnlimited)
+{
+	SnapshotConfig cfg;
+	EXPECT_DOUBLE_EQ(cfg.max_trajectory_wall_time_sec, 0.0);
+
+	Solar_Model SSM;
+	Trajectory_Simulator simulator(SSM);
+	EXPECT_DOUBLE_EQ(simulator.max_trajectory_wall_time_sec, 0.0);
+}
+
 TEST(TestSimulationTrajectory, TestScatter)
 {
 	// ARRANGE
@@ -125,6 +141,22 @@ TEST(TestSimulationTrajectory, TestScatter)
 		for(int j = 0; j < 3; j++)
 			EXPECT_NE(event.velocity[j], v_ini[j]);
 	}
+}
+
+TEST(TestSimulationTrajectory, TestMaxFreeStepsTerminationReason)
+{
+	obscura::DM_Particle_SI DM(0.5 * GeV);
+	DM.Set_Sigma_Proton(0.1 * pb);
+	Solar_Model SSM;
+	Trajectory_Simulator simulator(SSM, 0, 10, 2.0 * rSun);
+
+	Event IC(0.0, libphysica::Vector({0.5 * rSun, 0.0, 0.0}), libphysica::Vector({0.0, 100.0 * km / sec, 0.0}));
+	Trajectory_Result result = simulator.Simulate(IC, DM, 0);
+
+	EXPECT_EQ(result.bincount.termination_reason, TrajectoryTerminationReason::MaxFreeSteps);
+	EXPECT_FALSE(result.bincount.truncated);
+	EXPECT_FALSE(result.Particle_Free());
+	EXPECT_FALSE(result.Particle_Reflected());
 }
 
 TEST(TestSimulationTrajectory, TestSimulate)
@@ -226,11 +258,13 @@ TEST(TestSimulationTrajectory, TestRungeKuttaHandlesNonFiniteDerivativesWithoutH
 
 	// ACT: a NaN mass makes every dv/dt NaN, hence every stage and every error NaN.
 	const double nan_mass = std::nan("");
+	bool step_ok = true;
 	for(int i = 0; i < 5; i++)
-		propagator.Runge_Kutta_45_Step(nan_mass);
+		step_ok = propagator.Runge_Kutta_45_Step(nan_mass);
 
 	// ASSERT: propagator must still expose finite public state and not have
 	// exploded the time step to infinity.
+	EXPECT_FALSE(step_ok);
 	EXPECT_TRUE(std::isfinite(propagator.Current_Time()));
 	EXPECT_TRUE(std::isfinite(propagator.time_step));
 	EXPECT_TRUE(std::isfinite(propagator.Current_Radius()));

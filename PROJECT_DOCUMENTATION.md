@@ -97,7 +97,7 @@ $$\text{单粒子轨迹} = \sum_{i=0}^{N_\text{scat}} \left[ \text{自由传播}
 ```
 
 - **"Parameter Point" 模式**：对单一 $(m_\chi, \sigma)$ 参数点进行详细模拟，生成大量轨迹，输出反射速度谱和探测器信号率。
-- **Capture Mode 快速捕获率模式**：通过 `capture_mode = true` 或 `run_mode = "Capture"` 启用。轨迹一旦出现总能量 $E < 0$ 就立即终止并记为捕获；不写 `bincount`、蒸发、snapshot 或反射谱输出，只在终端打印捕获率和 95% Wilson 上下误差。
+- **Capture Mode 快速捕获率模式**：通过 `capture_mode = true` 或 `run_mode = "Capture"` 启用。散射后若总能量 $E < 0$，轨迹立即终止并记为捕获；自由传播中的负能量检查只更新已捕获轨迹的最后束缚时间，不创建首次捕获。不写 `bincount`、蒸发、snapshot 或反射谱输出，只在终端打印捕获率和 95% Wilson 上下误差。
 - **"Parameter Scan" 模式**：在二维 $(m_\chi, \sigma)$ 参数空间中扫描，对每个点计算统计检验的p值，最终提取一定置信水平（如90% CL）下的排斥极限曲线。
 
 ---
@@ -130,7 +130,7 @@ $$\frac{dr}{dt} = v_r, \quad \frac{dv_r}{dt} = \frac{J^2}{r^3} - \frac{G_N M(r)}
 - 在太阳外传播时，步长还会受单步跨越距离和局域 Kepler 动力学时间限制，避免一步跳过 `2R_\odot` 边界并产生非物理巨大半径。
 - **太阳内部**：步长还受散射率约束，$\delta t \leq 0.1 / \Gamma_\text{total}(r, v)$。
 - **太阳外部**：无散射事件，RK45 步长只由轨道误差控制；从 `1000 AU` 到 `2R_\odot` 的入射段，以及逃逸后到 `1 AU` 的传播，可用 `Hyperbolic_Kepler_Shift()` 做解析 Kepler 推进。
-- **单轨迹 wall-time 保护**：`max_trajectory_wall_time_sec` 默认 `300 s`，每 `256` 个 RK45 步检查一次；超过后中止该轨迹，避免 MPI rank 被病态轨迹长期卡住。设为 `0` 表示不限制。
+- **单轨迹 wall-time 保护**：`max_trajectory_wall_time_sec` 默认 `0`，表示不限制；若显式设为正值，则每 `256` 个 RK45 步检查一次，超过后中止该轨迹并记录终止原因为 `wall_time_limit`。
 
 ### 3.2 弹性散射的蒙特卡洛采样
 
@@ -307,7 +307,7 @@ mpirun -n 32 ./DaMaSCUS-SUN config_Lingyu.cfg
 - 暗光子专属参数：$\epsilon$（动能混合），$\alpha_D$（暗规范耦合），$m_{A'}$（介质子质量），形因子类型
 - 可选数值模拟参数：`max_trajectories`（未设置时默认为 `sample_size * 1000`）、`snapshot_enabled`、`snapshot_interval`、`max_trajectory_wall_time_sec`
 - 分峰径向统计参数：`evaporation_mode_bincount_enabled`、`evaporation_mode_boundaries_log10_s`、`evaporation_mode_labels`、`evaporation_mode_include_truncated`。默认关闭；开启后按 `log10(t_evap/s)` 分组累积 captured 轨迹已有的在线 bincount。
-- 快速捕获率参数：`capture_mode = true`（也可使用 `run_mode = "Capture"`）。该模式只用于估计捕获率，$E < 0$ 后立即停止当前轨迹，不写模拟输出文件。
+- 快速捕获率参数：`capture_mode = true`（也可使用 `run_mode = "Capture"`）。该模式只用于估计捕获率，散射后若 $E < 0$ 则立即停止当前轨迹，不写模拟输出文件。
 
 示例：
 
@@ -352,7 +352,7 @@ while (未终止):
        - RK45 积分 Kepler 方程组
        - 累积光学深度，触发散射或逃逸
        - 每个 RK45 步在线累积径向 bincount
-       - 每个 RK45 步计算 E = ½mχ(v² - v_esc²)
+       - 每个 RK45 步计算 E = ½mχ(v² - v_esc²)，但首次捕获只在散射后记录
     2. if 散射被触发:
        Scatter()
        - 选择靶粒子 (Sample_Target)  
@@ -360,8 +360,8 @@ while (未终止):
        - 弹性碰撞 → 新暗物质速度 (New_DM_Velocity)
     3. 检查终止条件:
        - r > R_max 且 v > v_esc → 反射/自由逃逸
-       - 普通模式：E < 0 → 标记为捕获，但继续完整轨迹
-       - Capture Mode：E < 0 → 立即终止当前轨迹并计为捕获
+       - 普通模式：散射后 E < 0 → 标记为捕获，但继续完整轨迹；后续自由传播只更新最后负能时间
+       - Capture Mode：散射后 E < 0 → 立即终止当前轨迹并计为捕获
        - 散射次数达到 maximum_number_of_scatterings → 强制终止
        - 自由传播步数达到 maximum_free_time_steps → 本段传播终止
        - 速度超过 0.75c、非有限数值或单轨迹 wall-time 超限 → 中止该轨迹
@@ -373,7 +373,7 @@ while (未终止):
 - `maximum_number_of_scatterings = 100000000000000L`，即单条轨迹最多 `1e14` 次散射/碰撞；可在 config 文件中修改。大整数建议使用 libconfig 的 `L` 后缀。
 - `maximum_free_time_steps = 1000000000000`，即每段自由传播最多 `1e12` 个 RK45 步。
 - `R_max = 2 R_sun`，即传播逃逸边界和 bincount 半径截断均为 `2R_sun`。
-- `max_trajectory_wall_time_sec = 300 s`，配置文件可设为 `0` 表示不限制。
+- `max_trajectory_wall_time_sec = 0`，默认不限制；配置文件可设为正值来启用单轨迹 wall-clock 保护。
 - 没有独立的物理模拟时间上限；物理时间由散射次数、自由传播步数、RK45 步长上限、逃逸边界和 wall-clock 保护共同间接限制。
 
 **在线统计与输出策略**：
@@ -382,7 +382,7 @@ while (未终止):
 
 $$\sum \Delta t,\qquad \sum v^2 \Delta t$$
 
-普通模式按 captured / not_captured 分别累积 `bincount` 与每轨迹平方和，用于输出误差估计。Capture Mode 为了快速扫描捕获率，会跳过 `bincount`、蒸发记录、snapshot 和反射谱数据累积，只保留轨迹总数、捕获数和捕获率误差。
+普通模式按 captured / not_captured 分别累积 `bincount` 与每轨迹平方和，用于输出误差估计；not_captured bincount 只纳入完整 outward escape 终止的非捕获轨迹，数值失败、步数上限、wall-time 上限等非完整终止只进入 termination diagnostics。Capture Mode 为了快速扫描捕获率，会跳过 `bincount`、蒸发记录、snapshot 和反射谱数据累积，只保留轨迹总数、捕获数和捕获率误差。
 
 ### 5.3 Phase 3: 粒子命运分类
 
@@ -471,10 +471,10 @@ $$\int \sum_i n_i \frac{m_\chi m_i}{(m_\chi + m_i)^2} \langle v_\text{rel} \rang
 普通 `Parameter point` 模式直接在 `Data_Generation.cpp` 中输出三类文件：
 
 - `bincount.txt`：captured 与 not_captured 的径向占据时间 $\sum \Delta t$、速度二阶矩 $\sum v^2\Delta t$，以及逐 bin 误差估计。
-- `evaporation_summary.txt`：有正蒸发持续时间的 captured 轨迹的 `rank`、rank 内 `trajectory_id`、`t_evap = t_last_negative - t_first_negative`、首次能量变负时的半径 `r_first_negative[km]`、负能量 `E_first_negative[eV]`、与上一个 time step 的能量差 `dE_first_negative_from_prev[eV] = E_first_negative - E_previous_step` 和 `truncated` 标记；`t_evap <= 0` 表示没有可统计的蒸发持续时间，不写入蒸发时间统计。`trajectory_id` 是每个 MPI rank 内部的本地序号，完整轨迹标识应使用 `(rank, trajectory_id)`。
+- `evaporation_summary.txt`：有正蒸发持续时间的 captured 轨迹的 `rank`、rank 内 `trajectory_id`、`t_evap = t_last_negative - t_first_negative`、首次散射后能量变负时的半径 `r_first_negative[km]`、负能量 `E_first_negative[eV]`、与上一个 time step 的能量差 `dE_first_negative_from_prev[eV] = E_first_negative - E_previous_step`、`truncated` 标记和 `termination_reason`；`t_evap <= 0` 表示没有可统计的蒸发持续时间，不写入蒸发时间统计。`trajectory_id` 是每个 MPI rank 内部的本地序号，完整轨迹标识应使用 `(rank, trajectory_id)`。
 - `evaporation_mode_summary.txt`：开启 `evaporation_mode_bincount_enabled` 后输出每个 evaporation mode 的 `log10(t_evap/s)` 区间、标签、样本数和截断样本数。
 - `evaporation_mode_bincount.txt`：开启 `evaporation_mode_bincount_enabled` 后输出按 evaporation mode 拆分的 captured 径向统计，列为每个 mode 的 $\sum\Delta t$、$\sum v^2\Delta t$ 及对应误差。默认边界 `(4.5, 11.1)` 与标签 `("P1_fast", "P2_theory", "P3_tail")` 可直接用于三峰 ensemble 图。
-- `computation_time_summary.txt`：captured / not_captured 轨迹的 wall-clock 时间与 RK45 步数统计。
+- `computation_time_summary.txt`：captured / not_captured 轨迹的 wall-clock 时间、RK45 步数统计，以及各类 `termination_reason` 计数。
 
 `capture_rate`、`capture_rate_err` 和 `capture_rate_CI_95_lower/upper` 会写入这些文件头部；Capture Mode 不写这些文件，只在终端打印同类捕获率统计。
 
@@ -483,14 +483,14 @@ $$\int \sum_i n_i \frac{m_\chi m_i}{(m_\chi + m_i)^2} \langle v_\text{rel} \rang
 若设置 `snapshot_enabled = true`，代码按 wall-clock 间隔输出累计 snapshot。相关参数为：
 
 - `snapshot_interval`：snapshot 间隔，默认 `60 s`。
-- `max_trajectory_wall_time_sec`：单条轨迹 wall-clock 上限，默认 `300 s`；用于避免某个 MPI rank 卡在单条轨迹上，导致 snapshot 一直处于 waiting 状态。
+- `max_trajectory_wall_time_sec`：单条轨迹 wall-clock 上限，默认 `0` 表示不限制；若启用 snapshot 且希望避免某个 MPI rank 卡在单条轨迹上，可显式设为有限正值。
 
 Snapshot 会合并各 rank 的当前进度，包括已完成轨迹的 captured / not_captured bincount，以及正在运行轨迹的临时 bincount。Capture Mode 会强制关闭 snapshot，因为该模式只需要终端捕获率。
 
 每个 snapshot 时间点在 `snapshot/` 目录下生成两个配对文件：
 
 - `snapshot_{time}s.txt`：主 snapshot 报告，开头的 rank 诊断表会把 checkpoint/final/wait reason 与该 rank 的 `running`/`done` 状态写在同一行，随后输出累计统计和 bincount histogram。
-- `snapshot_{time}s_evaporation.txt`：该 snapshot 合并成功时的正蒸发持续时间列表，列为 `rank  trajectory_id  t_evap[s]  r_first_negative[km]  E_first_negative[eV]  dE_first_negative_from_prev[eV]  truncated(0/1)`，记录截至该 wall-clock snapshot 已完成、被捕获且有可统计蒸发持续时间的轨迹。
+- `snapshot_{time}s_evaporation.txt`：该 snapshot 合并成功时的正蒸发持续时间列表，列为 `rank  trajectory_id  t_evap[s]  r_first_negative[km]  E_first_negative[eV]  dE_first_negative_from_prev[eV]  truncated(0/1)  termination_reason`，记录截至该 wall-clock snapshot 已完成、被捕获且有可统计蒸发持续时间的轨迹。
 
 各 rank 的二进制 checkpoint 临时文件位于 `snapshot/rank_snapshot/`，只用于合并中间状态；snapshot 合并成功后会清理对应 checkpoint。
 
@@ -535,7 +535,7 @@ Snapshot 会合并各 rank 的当前进度，包括已完成轨迹的 captured /
 
 **优化内容**：当前主模拟不再依赖逐轨迹 `.dat` 文件保存/删除流程，而是在 C++ 内部在线累积 captured 与 not_captured 的径向 `bincount`、误差平方和、蒸发时间记录和计算时间统计。
 
-当配置 `capture_mode = true` 或 `run_mode = "Capture"` 时，模拟只关心捕获率：任意轨迹第一次满足 $E < 0$ 就立即停止并计为 captured，同时跳过 `bincount`、蒸发记录、snapshot 和反射谱输出。
+当配置 `capture_mode = true` 或 `run_mode = "Capture"` 时，模拟只关心捕获率：散射后若轨迹第一次满足 $E < 0$ 就立即停止并计为 captured，同时跳过 `bincount`、蒸发记录、snapshot 和反射谱输出。
 
 **效率影响**：普通模式保留完整统计用于后处理；Capture Mode 避免了被捕获粒子后续长时间束缚轨道模拟，适合快速扫描多个参数点的捕获率。
 
@@ -638,7 +638,7 @@ DaMaSCUS-SUN 实现了暗物质与太阳相互作用的完整物理图景：
                     │               │
                ┌────▼────┐    ┌────▼────┐
                │ 捕获粒子 │    │ 自由粒子 │
-               │ (E < 0)  │    │ (N=0)   │
+               │散射后E<0│    │完整逃逸N=0│
                └─────────┘    └─────────┘
 ```
 

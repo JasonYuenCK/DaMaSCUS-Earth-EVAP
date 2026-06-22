@@ -236,7 +236,7 @@ void Configuration::Import_Parameter_Scan_Parameter()
 	}
 	catch(const SettingNotFoundException& nfex)
 	{
-		snapshot_config.max_trajectory_wall_time_sec = 300.0;  // default: 300 s (5 min)
+		snapshot_config.max_trajectory_wall_time_sec = 0.0;  // default: unlimited
 	}
 
 	// Per-evaporation-mode ensemble bincounts (optional, default off).

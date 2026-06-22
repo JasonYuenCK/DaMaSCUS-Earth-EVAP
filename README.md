@@ -9,7 +9,7 @@ This project extends [DaMaSCUS-SUN](https://github.com/temken/DaMaSCUS-SUN) to s
 ## Key Features
 
 - **Online bincount accumulation**: Replaces trajectory file output with in-memory histogram accumulation (r-histogram and v²-histogram, 2000 bins from 0 to 2R☉)
-- **Capture detection**: Monitors particle energy at every integration step; particles with any negative energy are classified as captured
+- **Capture detection**: Marks first capture after a scattering event leaves the particle with negative total energy; later free-propagation checks update the last bound time
 - **Evaporation time**: Records positive gravitationally bound durations for captured particles, with truncation flags for censored data
 - **MPI parallelization**: Each rank independently targets `ceil(sample_size / N_ranks)` captured particles
 - **Safety valve**: `max_trajectories` parameter prevents infinite runtime for low capture-rate scenarios
@@ -66,16 +66,16 @@ evaporation_mode_include_truncated = false;
 
 For each parameter point, the main generated files are:
 
-- `bincount.txt` — Combined captured/not-captured time-weighted radial histogram with error estimates
-- `evaporation_summary.txt` — Positive evaporation durations, keyed by `rank` and rank-local `trajectory_id`, with the first-negative radius, energy, and previous-step energy difference; zero-duration captures are treated as non-evaporation and are not included in the statistics
+- `bincount.txt` — Combined captured/not-captured time-weighted radial histogram with error estimates; incomplete non-captured trajectories are excluded from the not-captured histogram
+- `evaporation_summary.txt` — Positive evaporation durations, keyed by `rank` and rank-local `trajectory_id`, with the post-scatter first-negative radius, energy, previous-step energy difference, truncation flag, and termination reason; zero-duration captures are treated as non-evaporation and are not included in the statistics
 - `evaporation_mode_summary.txt` — Counts and log10(t_evap/s) boundaries for each configured evaporation mode, when enabled
 - `evaporation_mode_bincount.txt` — Per-mode captured radial bincounts (`dt`, `v2dt`, and errors), when enabled
-- `computation_time_summary.txt` — Wall-clock time and RK45 step-count statistics
+- `computation_time_summary.txt` — Wall-clock time, RK45 step-count statistics, and trajectory termination-reason counts
 
 When `snapshot_enabled = true`, intermediate files are written under `snapshot/`:
 
 - `snapshot_{time}s.txt` — Cumulative snapshot report and bincount histogram. The rank diagnostic table combines the checkpoint source with the current `running`/`done` status.
-- `snapshot_{time}s_evaporation.txt` — Rank-aware positive evaporation-duration list for captured trajectories completed by that snapshot time, with the same first-negative diagnostics as `evaporation_summary.txt`.
+- `snapshot_{time}s_evaporation.txt` — Rank-aware positive evaporation-duration list for captured trajectories completed by that snapshot time, with the same first-negative and termination diagnostics as `evaporation_summary.txt`.
 
 ## References
 
