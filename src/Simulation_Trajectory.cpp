@@ -644,9 +644,21 @@ Trajectory_Result Trajectory_Simulator::Simulate(const Event& initial_condition,
 		double E_final_eV = In_Units(E_final, eV);
 		if(termination_reason == TrajectoryTerminationReason::OutwardEscape && E_final_eV >= 0.0)
 		{
-			current_bincount.boundary_escape_observed = true;
-			current_bincount.t_boundary_escape = current_bincount.t_termination;
-			current_bincount.event_observed = std::isfinite(current_bincount.t_final_unbinding_scatter);
+			if(std::isfinite(current_bincount.t_final_unbinding_scatter))
+			{
+				current_bincount.boundary_escape_observed = true;
+				current_bincount.t_boundary_escape = current_bincount.t_termination;
+				current_bincount.event_observed = true;
+			}
+			else
+			{
+				termination_reason = TrajectoryTerminationReason::EnergyDriftEscape;
+				current_bincount.termination_reason = termination_reason;
+				current_bincount.survival_valid = false;
+				current_bincount.numerically_invalid_escape = true;
+				current_bincount.boundary_escape_observed = false;
+				current_bincount.event_observed = false;
+			}
 		}
 		if(!current_bincount.event_observed)
 			current_bincount.t_final_unbinding_scatter = std::numeric_limits<double>::quiet_NaN();

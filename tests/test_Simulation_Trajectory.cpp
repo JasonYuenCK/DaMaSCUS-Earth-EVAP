@@ -127,6 +127,8 @@ TEST(TestSimulationTrajectory, TestTrajectoryBincountSurvivalDefaults)
 	EXPECT_FALSE(bincount.is_captured);
 	EXPECT_FALSE(bincount.event_observed);
 	EXPECT_FALSE(bincount.boundary_escape_observed);
+	EXPECT_TRUE(bincount.survival_valid);
+	EXPECT_FALSE(bincount.numerically_invalid_escape);
 	EXPECT_FALSE(bincount.truncated);
 	EXPECT_DOUBLE_EQ(bincount.t_first_negative, -1.0);
 	EXPECT_DOUBLE_EQ(bincount.t_last_negative, -1.0);
@@ -138,6 +140,8 @@ TEST(TestSimulationTrajectory, TestTrajectoryBincountSurvivalDefaults)
 	EXPECT_DOUBLE_EQ(bincount.max_free_energy_drift_eV, 0.0);
 	EXPECT_DOUBLE_EQ(bincount.max_free_energy_drift_rel, 0.0);
 	EXPECT_EQ(bincount.number_of_scatterings, 0UL);
+	EXPECT_EQ(TRAJECTORY_TERMINATION_REASON_COUNT, 11);
+	EXPECT_EQ(static_cast<int>(TrajectoryTerminationReason::EnergyDriftEscape), 10);
 }
 
 TEST(TestSimulationTrajectory, TestScatter)

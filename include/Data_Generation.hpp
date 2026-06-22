@@ -20,7 +20,7 @@ struct EvaporationRecord
 {
 	int rank = -1;
 	unsigned long int trajectory_id = 0;
-	double t_evap = 0.0;    // compatibility alias for observed_lifetime [seconds]
+	double t_evap = 0.0;    // finite only for observed unbinding events [seconds]
 	double t_capture = -1.0;
 	double t_final_unbinding_scatter = -1.0;
 	double t_boundary_escape = -1.0;
@@ -33,6 +33,8 @@ struct EvaporationRecord
 	double dE_first_negative_from_prev_eV = 0.0;
 	bool event_observed = false;
 	bool boundary_escape_observed = false;
+	bool survival_valid = true;
+	bool numerically_invalid_escape = false;
 	bool censored = true;
 	bool truncated = true; // compatibility alias for censored
 	TrajectoryTerminationReason termination_reason = TrajectoryTerminationReason::Unknown;
@@ -69,6 +71,7 @@ class Simulation_Data
 	unsigned long int number_of_captured_particles;
 	unsigned long int number_of_complete_evaporation_particles;
 	unsigned long int number_of_censored_captured_particles;
+	unsigned long int number_of_invalid_survival_captured_particles;
 	std::array<unsigned long int, TRAJECTORY_TERMINATION_REASON_COUNT> termination_reason_counts;
 	double average_number_of_scatterings;
 	double computing_time;

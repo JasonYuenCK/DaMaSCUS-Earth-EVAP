@@ -29,7 +29,7 @@ constexpr double BIN_MAX_KM = 2.0 * R_SUN_KM;  // 2 R_sun in km
 constexpr double BIN_WIDTH_KM = BIN_MAX_KM / NUM_BINS;  // ~695.7 km
 constexpr unsigned long int DEFAULT_MAXIMUM_FREE_TIME_STEPS = 1000000000000UL;
 constexpr unsigned long int DEFAULT_MAXIMUM_SCATTERINGS = 100000000000000UL;
-constexpr int TRAJECTORY_TERMINATION_REASON_COUNT = 10;
+constexpr int TRAJECTORY_TERMINATION_REASON_COUNT = 11;
 
 enum class TrajectoryTerminationReason
 {
@@ -42,7 +42,8 @@ enum class TrajectoryTerminationReason
 	NonFiniteState = 6,
 	SpeedLimit = 7,
 	NumericalFailure = 8,
-	CaptureMode = 9
+	CaptureMode = 9,
+	EnergyDriftEscape = 10
 };
 
 // Per-trajectory bincount result
@@ -65,6 +66,8 @@ struct TrajectoryBincount
 	double dE_first_negative_from_prev_eV = std::numeric_limits<double>::quiet_NaN();  // E_now - E_previous_step [eV]
 	bool event_observed = false;     // true if final unbinding was followed by outward escape
 	bool boundary_escape_observed = false;  // true if the captured particle escaped through R_max with E >= 0
+	bool survival_valid = true;      // false for captured trajectories invalid as survival samples
+	bool numerically_invalid_escape = false;
 	double max_free_energy_drift_eV = 0.0;
 	double max_free_energy_drift_rel = 0.0;
 	unsigned long int number_of_scatterings = 0;

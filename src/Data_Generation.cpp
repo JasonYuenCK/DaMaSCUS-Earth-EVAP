@@ -31,9 +31,7 @@ using namespace libphysica::natural_units;
 namespace
 {
 constexpr int SNAPSHOT_WALL_TIME_BINS = 120;
-constexpr double SNAPSHOT_WALL_TIME_LOG_MIN = -4.0;
 constexpr int SNAPSHOT_STEP_COUNT_BINS = 140;
-constexpr double SNAPSHOT_STEP_COUNT_LOG_MIN = 0.0;
 
 bool Has_Positive_Evaporation_Time(double t_evap)
 {
@@ -43,6 +41,14 @@ bool Has_Positive_Evaporation_Time(double t_evap)
 bool Has_Positive_Evaporation_Time(const EvaporationRecord& rec)
 {
 	return Has_Positive_Evaporation_Time(rec.observed_lifetime);
+}
+
+bool Is_Completed_Evaporation_Record(const EvaporationRecord& rec)
+{
+	return rec.survival_valid
+	    && rec.event_observed
+	    && std::isfinite(rec.lifetime_unbinding)
+	    && rec.lifetime_unbinding >= 0.0;
 }
 
 const char* TerminationReason_Name(TrajectoryTerminationReason reason)
@@ -58,6 +64,7 @@ const char* TerminationReason_Name(TrajectoryTerminationReason reason)
 		case TrajectoryTerminationReason::SpeedLimit: return "speed_limit";
 		case TrajectoryTerminationReason::NumericalFailure: return "numerical_failure";
 		case TrajectoryTerminationReason::CaptureMode: return "capture_mode";
+		case TrajectoryTerminationReason::EnergyDriftEscape: return "energy_drift_escape";
 		case TrajectoryTerminationReason::Unknown:
 		default: return "unknown";
 	}
@@ -123,16 +130,22 @@ bool Build_Evaporation_Record(const TrajectoryBincount& bincount, int mpi_rank, 
 	if(!bincount.is_captured || !std::isfinite(bincount.t_capture))
 		return false;
 
+	const bool numerically_invalid_escape =
+	    bincount.numerically_invalid_escape || bincount.termination_reason == TrajectoryTerminationReason::EnergyDriftEscape;
+	const bool survival_valid = bincount.survival_valid && !numerically_invalid_escape;
+	const bool event_observed = survival_valid && bincount.event_observed;
 	const double t_termination = std::isfinite(bincount.t_termination) ? bincount.t_termination : bincount.t_capture;
-	const double lifetime_unbinding = bincount.event_observed ? (bincount.t_final_unbinding_scatter - bincount.t_capture) : -1.0;
+	const double lifetime_unbinding = event_observed ? (bincount.t_final_unbinding_scatter - bincount.t_capture) : -1.0;
 	const double lifetime_boundary = bincount.boundary_escape_observed ? (bincount.t_boundary_escape - bincount.t_capture) : -1.0;
-	double observed_lifetime = bincount.event_observed ? lifetime_unbinding : (t_termination - bincount.t_capture);
-	if(!std::isfinite(observed_lifetime) || observed_lifetime < 0.0)
+	double observed_lifetime = event_observed ? lifetime_unbinding : (t_termination - bincount.t_capture);
+	if(!survival_valid)
+		observed_lifetime = std::numeric_limits<double>::quiet_NaN();
+	else if(!std::isfinite(observed_lifetime) || observed_lifetime < 0.0)
 		observed_lifetime = 0.0;
 
 	rec.rank = mpi_rank;
 	rec.trajectory_id = trajectory_id;
-	rec.t_evap = observed_lifetime;
+	rec.t_evap = event_observed ? lifetime_unbinding : std::numeric_limits<double>::quiet_NaN();
 	rec.t_capture = bincount.t_capture;
 	rec.t_final_unbinding_scatter = std::isfinite(bincount.t_final_unbinding_scatter) ? bincount.t_final_unbinding_scatter : -1.0;
 	rec.t_boundary_escape = std::isfinite(bincount.t_boundary_escape) ? bincount.t_boundary_escape : -1.0;
@@ -143,9 +156,11 @@ bool Build_Evaporation_Record(const TrajectoryBincount& bincount, int mpi_rank, 
 	rec.r_first_negative_km = bincount.r_first_negative_km;
 	rec.E_first_negative_eV = bincount.E_first_negative_eV;
 	rec.dE_first_negative_from_prev_eV = bincount.dE_first_negative_from_prev_eV;
-	rec.event_observed = bincount.event_observed;
-	rec.boundary_escape_observed = bincount.boundary_escape_observed;
-	rec.censored = !bincount.event_observed;
+	rec.event_observed = event_observed;
+	rec.boundary_escape_observed = survival_valid && bincount.boundary_escape_observed;
+	rec.survival_valid = survival_valid;
+	rec.numerically_invalid_escape = numerically_invalid_escape;
+	rec.censored = survival_valid && !event_observed;
 	rec.truncated = rec.censored;
 	rec.termination_reason = bincount.termination_reason;
 	rec.max_free_energy_drift_eV = bincount.max_free_energy_drift_eV;
@@ -190,7 +205,7 @@ struct Rank_Snapshot_State
 	std::array<uint64_t, SNAPSHOT_STEP_COUNT_BINS> step_count_hist_not_captured{};
 	uint64_t step_count_overflow_captured = 0;
 	uint64_t step_count_overflow_not_captured = 0;
-	std::vector<EvaporationRecord> evaporation_records;
+	std::vector<EvaporationRecord> completed_evaporation_records;
 };
 
 struct Snapshot_Report_State
@@ -221,8 +236,8 @@ struct Snapshot_Report_State
 	std::array<uint64_t, SNAPSHOT_STEP_COUNT_BINS> step_count_hist_not_captured{};
 	uint64_t step_count_overflow_captured = 0;
 	uint64_t step_count_overflow_not_captured = 0;
-	std::vector<EvaporationRecord> evaporation_records;
 	std::vector<Rank_Snapshot_State> rank_states;
+	std::vector<EvaporationRecord> completed_evaporation_records;
 };
 
 struct Snapshot_Load_Diagnostics
@@ -269,6 +284,93 @@ template<typename T, size_t N>
 void Read_Binary_Array(std::ifstream& file, std::array<T, N>& values)
 {
 	file.read(reinterpret_cast<char*>(values.data()), N * sizeof(T));
+}
+
+void Write_Evaporation_Record_Binary(std::ofstream& file, const EvaporationRecord& rec)
+{
+	const int32_t rank = static_cast<int32_t>(rec.rank);
+	const uint64_t trajectory_id = static_cast<uint64_t>(rec.trajectory_id);
+	const int32_t event_observed = rec.event_observed ? 1 : 0;
+	const int32_t boundary_escape_observed = rec.boundary_escape_observed ? 1 : 0;
+	const int32_t survival_valid = rec.survival_valid ? 1 : 0;
+	const int32_t numerically_invalid_escape = rec.numerically_invalid_escape ? 1 : 0;
+	const int32_t censored = rec.censored ? 1 : 0;
+	const int32_t truncated = rec.truncated ? 1 : 0;
+	const int32_t termination_reason = static_cast<int32_t>(TerminationReason_Index(rec.termination_reason));
+	const uint64_t number_of_scatterings = static_cast<uint64_t>(rec.number_of_scatterings);
+
+	Write_Binary_Value(file, rank);
+	Write_Binary_Value(file, trajectory_id);
+	Write_Binary_Value(file, rec.t_evap);
+	Write_Binary_Value(file, rec.t_capture);
+	Write_Binary_Value(file, rec.t_final_unbinding_scatter);
+	Write_Binary_Value(file, rec.t_boundary_escape);
+	Write_Binary_Value(file, rec.t_termination);
+	Write_Binary_Value(file, rec.observed_lifetime);
+	Write_Binary_Value(file, rec.lifetime_unbinding);
+	Write_Binary_Value(file, rec.lifetime_boundary);
+	Write_Binary_Value(file, rec.r_first_negative_km);
+	Write_Binary_Value(file, rec.E_first_negative_eV);
+	Write_Binary_Value(file, rec.dE_first_negative_from_prev_eV);
+	Write_Binary_Value(file, event_observed);
+	Write_Binary_Value(file, boundary_escape_observed);
+	Write_Binary_Value(file, survival_valid);
+	Write_Binary_Value(file, numerically_invalid_escape);
+	Write_Binary_Value(file, censored);
+	Write_Binary_Value(file, truncated);
+	Write_Binary_Value(file, termination_reason);
+	Write_Binary_Value(file, rec.max_free_energy_drift_eV);
+	Write_Binary_Value(file, rec.max_free_energy_drift_rel);
+	Write_Binary_Value(file, number_of_scatterings);
+}
+
+void Read_Evaporation_Record_Binary(std::ifstream& file, EvaporationRecord& rec)
+{
+	int32_t rank = 0;
+	uint64_t trajectory_id = 0;
+	int32_t event_observed = 0;
+	int32_t boundary_escape_observed = 0;
+	int32_t survival_valid = 0;
+	int32_t numerically_invalid_escape = 0;
+	int32_t censored = 0;
+	int32_t truncated = 0;
+	int32_t termination_reason = 0;
+	uint64_t number_of_scatterings = 0;
+
+	Read_Binary_Value(file, rank);
+	Read_Binary_Value(file, trajectory_id);
+	Read_Binary_Value(file, rec.t_evap);
+	Read_Binary_Value(file, rec.t_capture);
+	Read_Binary_Value(file, rec.t_final_unbinding_scatter);
+	Read_Binary_Value(file, rec.t_boundary_escape);
+	Read_Binary_Value(file, rec.t_termination);
+	Read_Binary_Value(file, rec.observed_lifetime);
+	Read_Binary_Value(file, rec.lifetime_unbinding);
+	Read_Binary_Value(file, rec.lifetime_boundary);
+	Read_Binary_Value(file, rec.r_first_negative_km);
+	Read_Binary_Value(file, rec.E_first_negative_eV);
+	Read_Binary_Value(file, rec.dE_first_negative_from_prev_eV);
+	Read_Binary_Value(file, event_observed);
+	Read_Binary_Value(file, boundary_escape_observed);
+	Read_Binary_Value(file, survival_valid);
+	Read_Binary_Value(file, numerically_invalid_escape);
+	Read_Binary_Value(file, censored);
+	Read_Binary_Value(file, truncated);
+	Read_Binary_Value(file, termination_reason);
+	Read_Binary_Value(file, rec.max_free_energy_drift_eV);
+	Read_Binary_Value(file, rec.max_free_energy_drift_rel);
+	Read_Binary_Value(file, number_of_scatterings);
+
+	rec.rank = static_cast<int>(rank);
+	rec.trajectory_id = static_cast<unsigned long int>(trajectory_id);
+	rec.event_observed = (event_observed != 0);
+	rec.boundary_escape_observed = (boundary_escape_observed != 0);
+	rec.survival_valid = (survival_valid != 0);
+	rec.numerically_invalid_escape = (numerically_invalid_escape != 0);
+	rec.censored = (censored != 0);
+	rec.truncated = (truncated != 0);
+	rec.termination_reason = static_cast<TrajectoryTerminationReason>(TerminationReason_Index(static_cast<TrajectoryTerminationReason>(termination_reason)));
+	rec.number_of_scatterings = static_cast<unsigned long int>(number_of_scatterings);
 }
 
 double Capture_Ratio_From_Counts(uint64_t total_trajectories, uint64_t captured_particles)
@@ -340,16 +442,22 @@ void Write_Evaporation_Record_List(std::ofstream& file, const std::vector<Evapor
 	size_t event_count = 0;
 	size_t censored_count = 0;
 	size_t boundary_escape_count = 0;
+	size_t survival_valid_count = 0;
+	size_t numerically_invalid_escape_count = 0;
 	size_t positive_observed_count = 0;
 	for(const auto& rec : records)
 	{
 		if(rec.event_observed)
 			event_count++;
-		else
+		else if(rec.censored)
 			censored_count++;
 		if(rec.boundary_escape_observed)
 			boundary_escape_count++;
-		if(Has_Positive_Evaporation_Time(rec))
+		if(rec.survival_valid)
+			survival_valid_count++;
+		if(rec.numerically_invalid_escape)
+			numerically_invalid_escape_count++;
+		if(rec.survival_valid && Has_Positive_Evaporation_Time(rec))
 			positive_observed_count++;
 	}
 
@@ -357,8 +465,11 @@ void Write_Evaporation_Record_List(std::ofstream& file, const std::vector<Evapor
 	file << "# evaporation_event_observed_count = " << event_count << "\n";
 	file << "# evaporation_censored_count = " << censored_count << "\n";
 	file << "# evaporation_boundary_escape_count = " << boundary_escape_count << "\n";
+	file << "# evaporation_survival_valid_count = " << survival_valid_count << "\n";
+	file << "# evaporation_numerically_invalid_escape_count = " << numerically_invalid_escape_count << "\n";
 	file << "# evaporation_positive_observed_lifetime_count = " << positive_observed_count << "\n";
-	file << "# rank  trajectory_id  t_evap[s]  observed_lifetime[s]  lifetime_unbinding[s]  lifetime_boundary[s]  t_capture[s]  t_final_unbinding_scatter[s]  t_boundary_escape[s]  t_termination[s]  event_observed(0/1)  boundary_escape_observed(0/1)  censored(0/1)  truncated(0/1)  r_capture[km]  E_capture[eV]  dE_capture_from_prev[eV]  termination_reason  max_free_energy_drift[eV]  max_free_energy_drift_rel  number_of_scatterings\n";
+	file << "# WARNING: t_evap is a physical event time only when event_observed=1; use observed_lifetime plus event_observed for survival analysis, and require survival_valid=1.\n";
+	file << "# rank  trajectory_id  t_evap[s]  observed_lifetime[s]  lifetime_unbinding[s]  lifetime_boundary[s]  t_capture[s]  t_final_unbinding_scatter[s]  t_boundary_escape[s]  t_termination[s]  event_observed(0/1)  boundary_escape_observed(0/1)  survival_valid(0/1)  numerically_invalid_escape(0/1)  censored(0/1)  truncated(0/1)  r_capture[km]  E_capture[eV]  dE_capture_from_prev[eV]  termination_reason  max_free_energy_drift[eV]  max_free_energy_drift_rel  number_of_scatterings\n";
 	for(const auto& rec : records)
 	{
 		file << rec.rank << "\t" << rec.trajectory_id << "\t" << std::scientific << std::setprecision(10)
@@ -366,6 +477,7 @@ void Write_Evaporation_Record_List(std::ofstream& file, const std::vector<Evapor
 		     << "\t" << rec.lifetime_boundary << "\t" << rec.t_capture << "\t" << rec.t_final_unbinding_scatter
 		     << "\t" << rec.t_boundary_escape << "\t" << rec.t_termination
 		     << "\t" << (rec.event_observed ? 1 : 0) << "\t" << (rec.boundary_escape_observed ? 1 : 0)
+		     << "\t" << (rec.survival_valid ? 1 : 0) << "\t" << (rec.numerically_invalid_escape ? 1 : 0)
 		     << "\t" << (rec.censored ? 1 : 0) << "\t" << (rec.truncated ? 1 : 0)
 		     << "\t" << rec.r_first_negative_km << "\t" << rec.E_first_negative_eV
 		     << "\t" << rec.dE_first_negative_from_prev_eV << "\t" << TerminationReason_Name(rec.termination_reason)
@@ -469,9 +581,15 @@ std::string Snapshot_Text_File_Path(const std::string& snapshot_root, int snapsh
 	return snapshot_root + "snapshot_" + std::to_string(Snapshot_Time_Label_Seconds(snapshot_index, interval_seconds)) + "s.txt";
 }
 
-std::string Snapshot_Evaporation_File_Path(const std::string& snapshot_root, int snapshot_index, double interval_seconds)
+std::string Snapshot_Completed_Evaporation_Diagnostic_File_Path(const std::string& snapshot_root, int snapshot_index, double interval_seconds)
 {
-	return snapshot_root + "snapshot_" + std::to_string(Snapshot_Time_Label_Seconds(snapshot_index, interval_seconds)) + "s_evaporation.txt";
+	return snapshot_root + "snapshot_" + std::to_string(Snapshot_Time_Label_Seconds(snapshot_index, interval_seconds)) + "s_completed_evaporation_diagnostic.txt";
+}
+
+void Remove_Stale_Snapshot_Evaporation_File(const std::string& snapshot_root, int snapshot_index, double interval_seconds)
+{
+	std::string path = snapshot_root + "snapshot_" + std::to_string(Snapshot_Time_Label_Seconds(snapshot_index, interval_seconds)) + "s_evaporation.txt";
+	std::remove(path.c_str());
 }
 
 void Write_Snapshot_Diagnostics(std::ofstream& file, int snapshot_index, double interval_seconds, int caller_rank, const Snapshot_Load_Diagnostics& diagnostics, bool merged)
@@ -595,41 +713,10 @@ bool Write_Rank_Snapshot_State(const std::string& path, const Rank_Snapshot_Stat
 	Write_Binary_Array(file, state.step_count_hist_not_captured);
 	Write_Binary_Value(file, state.step_count_overflow_captured);
 	Write_Binary_Value(file, state.step_count_overflow_not_captured);
-
-	uint64_t evaporation_count = static_cast<uint64_t>(state.evaporation_records.size());
-	Write_Binary_Value(file, evaporation_count);
-	for(const auto& rec : state.evaporation_records)
-	{
-		int32_t rank = static_cast<int32_t>(rec.rank);
-		uint64_t trajectory_id = static_cast<uint64_t>(rec.trajectory_id);
-		uint8_t event_observed = rec.event_observed ? 1 : 0;
-		uint8_t boundary_escape_observed = rec.boundary_escape_observed ? 1 : 0;
-		uint8_t censored = rec.censored ? 1 : 0;
-		uint8_t truncated = rec.truncated ? 1 : 0;
-		int32_t termination_reason = static_cast<int32_t>(rec.termination_reason);
-		uint64_t number_of_scatterings = static_cast<uint64_t>(rec.number_of_scatterings);
-		Write_Binary_Value(file, rank);
-		Write_Binary_Value(file, trajectory_id);
-		Write_Binary_Value(file, rec.t_evap);
-		Write_Binary_Value(file, rec.t_capture);
-		Write_Binary_Value(file, rec.t_final_unbinding_scatter);
-		Write_Binary_Value(file, rec.t_boundary_escape);
-		Write_Binary_Value(file, rec.t_termination);
-		Write_Binary_Value(file, rec.observed_lifetime);
-		Write_Binary_Value(file, rec.lifetime_unbinding);
-		Write_Binary_Value(file, rec.lifetime_boundary);
-		Write_Binary_Value(file, rec.r_first_negative_km);
-		Write_Binary_Value(file, rec.E_first_negative_eV);
-		Write_Binary_Value(file, rec.dE_first_negative_from_prev_eV);
-		Write_Binary_Value(file, event_observed);
-		Write_Binary_Value(file, boundary_escape_observed);
-		Write_Binary_Value(file, censored);
-		Write_Binary_Value(file, truncated);
-		Write_Binary_Value(file, termination_reason);
-		Write_Binary_Value(file, rec.max_free_energy_drift_eV);
-		Write_Binary_Value(file, rec.max_free_energy_drift_rel);
-		Write_Binary_Value(file, number_of_scatterings);
-	}
+	const uint64_t completed_evaporation_record_count = static_cast<uint64_t>(state.completed_evaporation_records.size());
+	Write_Binary_Value(file, completed_evaporation_record_count);
+	for(const auto& rec : state.completed_evaporation_records)
+		Write_Evaporation_Record_Binary(file, rec);
 	file.close();
 
 	if(!file.good())
@@ -687,79 +774,12 @@ bool Read_Rank_Snapshot_State(const std::string& path, uint64_t expected_run_id,
 	Read_Binary_Array(file, state.step_count_hist_not_captured);
 	Read_Binary_Value(file, state.step_count_overflow_captured);
 	Read_Binary_Value(file, state.step_count_overflow_not_captured);
-
-	uint64_t evaporation_count = 0;
-	Read_Binary_Value(file, evaporation_count);
-	state.evaporation_records.clear();
-	state.evaporation_records.reserve(static_cast<size_t>(evaporation_count));
-	for(uint64_t i = 0; i < evaporation_count; i++)
-	{
-		int32_t rank = -1;
-		uint64_t trajectory_id = 0;
-		double t_evap = 0.0;
-		double t_capture = -1.0;
-		double t_final_unbinding_scatter = -1.0;
-		double t_boundary_escape = -1.0;
-		double t_termination = -1.0;
-		double observed_lifetime = 0.0;
-		double lifetime_unbinding = -1.0;
-		double lifetime_boundary = -1.0;
-		double r_first_negative_km = -1.0;
-		double E_first_negative_eV = 0.0;
-		double dE_first_negative_from_prev_eV = 0.0;
-		uint8_t event_observed = 0;
-		uint8_t boundary_escape_observed = 0;
-		uint8_t censored = 1;
-		uint8_t truncated = 0;
-		int32_t termination_reason = 0;
-		double max_free_energy_drift_eV = 0.0;
-		double max_free_energy_drift_rel = 0.0;
-		uint64_t number_of_scatterings = 0;
-		Read_Binary_Value(file, rank);
-		Read_Binary_Value(file, trajectory_id);
-		Read_Binary_Value(file, t_evap);
-		Read_Binary_Value(file, t_capture);
-		Read_Binary_Value(file, t_final_unbinding_scatter);
-		Read_Binary_Value(file, t_boundary_escape);
-		Read_Binary_Value(file, t_termination);
-		Read_Binary_Value(file, observed_lifetime);
-		Read_Binary_Value(file, lifetime_unbinding);
-		Read_Binary_Value(file, lifetime_boundary);
-		Read_Binary_Value(file, r_first_negative_km);
-		Read_Binary_Value(file, E_first_negative_eV);
-		Read_Binary_Value(file, dE_first_negative_from_prev_eV);
-		Read_Binary_Value(file, event_observed);
-		Read_Binary_Value(file, boundary_escape_observed);
-		Read_Binary_Value(file, censored);
-		Read_Binary_Value(file, truncated);
-		Read_Binary_Value(file, termination_reason);
-		Read_Binary_Value(file, max_free_energy_drift_eV);
-		Read_Binary_Value(file, max_free_energy_drift_rel);
-		Read_Binary_Value(file, number_of_scatterings);
-		EvaporationRecord rec;
-		rec.rank = static_cast<int>(rank);
-		rec.trajectory_id = static_cast<unsigned long int>(trajectory_id);
-		rec.t_evap = t_evap;
-		rec.t_capture = t_capture;
-		rec.t_final_unbinding_scatter = t_final_unbinding_scatter;
-		rec.t_boundary_escape = t_boundary_escape;
-		rec.t_termination = t_termination;
-		rec.observed_lifetime = observed_lifetime;
-		rec.lifetime_unbinding = lifetime_unbinding;
-		rec.lifetime_boundary = lifetime_boundary;
-		rec.r_first_negative_km = r_first_negative_km;
-		rec.E_first_negative_eV = E_first_negative_eV;
-		rec.dE_first_negative_from_prev_eV = dE_first_negative_from_prev_eV;
-		rec.event_observed = (event_observed != 0);
-		rec.boundary_escape_observed = (boundary_escape_observed != 0);
-		rec.censored = (censored != 0);
-		rec.truncated = (truncated != 0);
-		rec.termination_reason = static_cast<TrajectoryTerminationReason>(TerminationReason_Index(static_cast<TrajectoryTerminationReason>(termination_reason)));
-		rec.max_free_energy_drift_eV = max_free_energy_drift_eV;
-		rec.max_free_energy_drift_rel = max_free_energy_drift_rel;
-		rec.number_of_scatterings = static_cast<unsigned long int>(number_of_scatterings);
-		state.evaporation_records.push_back(rec);
-	}
+	uint64_t completed_evaporation_record_count = 0;
+	Read_Binary_Value(file, completed_evaporation_record_count);
+	state.completed_evaporation_records.clear();
+	state.completed_evaporation_records.resize(static_cast<size_t>(completed_evaporation_record_count));
+	for(size_t i = 0; i < state.completed_evaporation_records.size(); i++)
+		Read_Evaporation_Record_Binary(file, state.completed_evaporation_records[i]);
 
 	if(!file)
 		return false;
@@ -772,6 +792,24 @@ bool Write_Snapshot_Text_Status(const std::string& snapshot_root, int snapshot_i
 	return Write_Text_File_Atomically(Snapshot_Text_File_Path(snapshot_root, snapshot_index, interval_seconds), snapshot_index * 1000 + caller_rank, [&](std::ofstream& file)
 	{
 		Write_Snapshot_Diagnostics(file, snapshot_index, interval_seconds, caller_rank, diagnostics, merged);
+	});
+}
+
+bool Write_Snapshot_Completed_Evaporation_Diagnostic_File(const std::string& snapshot_root, int snapshot_index, double interval_seconds, double mass_gev, double sigma_cm2, const Snapshot_Report_State& report, int caller_rank, const Snapshot_Load_Diagnostics& diagnostics)
+{
+	return Write_Text_File_Atomically(Snapshot_Completed_Evaporation_Diagnostic_File_Path(snapshot_root, snapshot_index, interval_seconds), snapshot_index * 1000 + caller_rank + 500000, [&](std::ofstream& file)
+	{
+		Write_Snapshot_Diagnostics(file, snapshot_index, interval_seconds, caller_rank, diagnostics, true);
+		file << "#\n";
+		file << "# DIAGNOSTIC_ONLY = 1\n";
+		file << "# NOT_FOR_SURVIVAL_ANALYSIS = 1\n";
+		file << "# record_selection = survival_valid && event_observed && lifetime_unbinding >= 0\n";
+		file << "# selection_bias = completed_by_snapshot_wall_time; unfinished long-lived trajectories are absent\n";
+		file << "# final_survival_input = evaporation_summary.txt\n";
+		Write_Report_Header(file, mass_gev, sigma_cm2, report.total_trajectories, report.captured_particles, false, report.snapshot_time_label, report.snapshot_interval_seconds);
+		file << "# snapshot_completed_evaporation_record_count = " << report.completed_evaporation_records.size() << "\n";
+		file << "# Use this file only to inspect already completed evaporation times during a running simulation.\n";
+		Write_Evaporation_Record_List(file, report.completed_evaporation_records);
 	});
 }
 
@@ -789,6 +827,9 @@ void Accumulate_Snapshot_Report_State(Snapshot_Report_State& report, const Rank_
 	report.wall_time_overflow_not_captured += state.wall_time_overflow_not_captured;
 	report.step_count_overflow_captured += state.step_count_overflow_captured;
 	report.step_count_overflow_not_captured += state.step_count_overflow_not_captured;
+	report.completed_evaporation_records.insert(report.completed_evaporation_records.end(),
+	                                           state.completed_evaporation_records.begin(),
+	                                           state.completed_evaporation_records.end());
 
 	for(int bin = 0; bin < NUM_BINS; bin++)
 	{
@@ -840,7 +881,6 @@ void Accumulate_Snapshot_Report_State(Snapshot_Report_State& report, const Rank_
 		report.step_count_hist_not_captured[bin] += state.step_count_hist_not_captured[bin];
 	}
 
-	report.evaporation_records.insert(report.evaporation_records.end(), state.evaporation_records.begin(), state.evaporation_records.end());
 }
 
 bool Load_Snapshot_Report_State(const std::string& rank_snapshot_dir, int snapshot_index, double interval_seconds, int mpi_processes, uint64_t run_id, Snapshot_Report_State& report, Snapshot_Load_Diagnostics* diagnostics = NULL)
@@ -918,21 +958,9 @@ bool Load_Snapshot_Report_State(const std::string& rank_snapshot_dir, int snapsh
 	return all_ranks_ready;
 }
 
-bool Write_Snapshot_Evaporation_File(const std::string& snapshot_root, int snapshot_index, double interval_seconds, const Snapshot_Report_State& report, int caller_rank)
-{
-	return Write_Text_File_Atomically(Snapshot_Evaporation_File_Path(snapshot_root, snapshot_index, interval_seconds), snapshot_index * 1000 + caller_rank, [&](std::ofstream& file)
-	{
-		file << "# Snapshot evaporation time list\n";
-		file << "# snapshot_target_wall_time_s = " << report.snapshot_time_label << "\n";
-		file << "# snapshot_interval_s = " << std::fixed << std::setprecision(3) << report.snapshot_interval_seconds << "\n";
-		Write_Evaporation_Record_List(file, report.evaporation_records);
-	});
-}
-
 bool Write_Snapshot_Report_File(const std::string& snapshot_root, int snapshot_index, double interval_seconds, double mass_gev, double sigma_cm2, const Snapshot_Report_State& report, int caller_rank, const Snapshot_Load_Diagnostics& diagnostics)
 {
-	if(!Write_Snapshot_Evaporation_File(snapshot_root, snapshot_index, interval_seconds, report, caller_rank))
-		return false;
+	Remove_Stale_Snapshot_Evaporation_File(snapshot_root, snapshot_index, interval_seconds);
 
 	if(!Write_Text_File_Atomically(Snapshot_Text_File_Path(snapshot_root, snapshot_index, interval_seconds), snapshot_index, [&](std::ofstream& file)
 	{
@@ -980,6 +1008,9 @@ bool Write_Snapshot_Report_File(const std::string& snapshot_root, int snapshot_i
 	}))
 		return false;
 
+	if(!Write_Snapshot_Completed_Evaporation_Diagnostic_File(snapshot_root, snapshot_index, interval_seconds, mass_gev, sigma_cm2, report, caller_rank, diagnostics))
+		return false;
+
 	return true;
 }
 
@@ -998,6 +1029,7 @@ std::string Format_Rank_Status(const Rank_Snapshot_State& state)
 
 	stream << " (captured=" << state.local_captured
 	       << ", completed=" << state.local_total
+	       << ", completed_evap=" << state.completed_evaporation_records.size()
 	       << ", rank_wall=" << state.rank_elapsed_wall_sec << "s";
 
 	if(state.trajectory_in_progress)
@@ -1043,6 +1075,7 @@ bool Try_Write_Merged_Snapshot(const std::string& snapshot_root, const std::stri
 Simulation_Data::Simulation_Data(unsigned int sample_size, unsigned int max_trajectories, double u_min, unsigned int iso_rings)
 : number_of_trajectories(0), number_of_free_particles(0), number_of_reflected_particles(0), number_of_captured_particles(0),
   number_of_complete_evaporation_particles(0), number_of_censored_captured_particles(0),
+  number_of_invalid_survival_captured_particles(0),
   average_number_of_scatterings(0.0), computing_time(0.0), early_stopped(false),
   total_wall_time_captured(0.0), total_wall_time_not_captured(0.0),
   wall_time_overflow_captured(0), wall_time_overflow_not_captured(0),
@@ -1200,7 +1233,12 @@ void Simulation_Data::Generate_Data(obscura::DM_Particle& DM, Solar_Model& solar
 		std::copy(step_count_hist_not_captured.begin(), step_count_hist_not_captured.end(), state.step_count_hist_not_captured.begin());
 		state.step_count_overflow_captured = static_cast<uint64_t>(step_count_overflow_captured);
 		state.step_count_overflow_not_captured = static_cast<uint64_t>(step_count_overflow_not_captured);
-		state.evaporation_records = evaporation_records;
+		state.completed_evaporation_records.reserve(evaporation_records.size());
+		for(const auto& rec : evaporation_records)
+		{
+			if(Is_Completed_Evaporation_Record(rec))
+				state.completed_evaporation_records.push_back(rec);
+		}
 		return state;
 	};
 
@@ -1270,6 +1308,8 @@ void Simulation_Data::Generate_Data(obscura::DM_Particle& DM, Solar_Model& solar
 			local_captured++;
 			if(trajectory.bincount.event_observed)
 				number_of_complete_evaporation_particles++;
+			else if(!trajectory.bincount.survival_valid)
+				number_of_invalid_survival_captured_particles++;
 			else
 				number_of_censored_captured_particles++;
 
@@ -1290,10 +1330,11 @@ void Simulation_Data::Generate_Data(obscura::DM_Particle& DM, Solar_Model& solar
 				{
 					evaporation_records.push_back(rec);
 					if(evaporation_mode_bincount_enabled
-						&& Has_Positive_Evaporation_Time(rec)
-						&& (evaporation_mode_include_truncated || !rec.censored))
+						&& rec.survival_valid
+						&& rec.event_observed
+						&& Has_Positive_Evaporation_Time(rec.lifetime_unbinding))
 					{
-						int mode = Classify_Evaporation_Mode(log10(rec.observed_lifetime), evaporation_mode_boundaries_log10_s);
+						int mode = Classify_Evaporation_Mode(log10(rec.lifetime_unbinding), evaporation_mode_boundaries_log10_s);
 						if(mode >= 0 && mode < static_cast<int>(evaporation_mode_bincounts.size()))
 							Accumulate_Mode_Bincount(evaporation_mode_bincounts[mode], trajectory.bincount);
 					}
@@ -1407,6 +1448,7 @@ void Simulation_Data::Perform_MPI_Reductions()
 	MPI_Allreduce(MPI_IN_PLACE, &number_of_captured_particles, 1, MPI_UNSIGNED_LONG, MPI_SUM, MPI_COMM_WORLD);
 	MPI_Allreduce(MPI_IN_PLACE, &number_of_complete_evaporation_particles, 1, MPI_UNSIGNED_LONG, MPI_SUM, MPI_COMM_WORLD);
 	MPI_Allreduce(MPI_IN_PLACE, &number_of_censored_captured_particles, 1, MPI_UNSIGNED_LONG, MPI_SUM, MPI_COMM_WORLD);
+	MPI_Allreduce(MPI_IN_PLACE, &number_of_invalid_survival_captured_particles, 1, MPI_UNSIGNED_LONG, MPI_SUM, MPI_COMM_WORLD);
 	MPI_Allreduce(MPI_IN_PLACE, termination_reason_counts.data(), TRAJECTORY_TERMINATION_REASON_COUNT, MPI_UNSIGNED_LONG, MPI_SUM, MPI_COMM_WORLD);
 	MPI_Allreduce(MPI_IN_PLACE, &average_number_of_scatterings, 1, MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
 	average_number_of_scatterings /= number_of_trajectories;
@@ -1446,7 +1488,7 @@ void Simulation_Data::Perform_MPI_Reductions()
 	int total_evap = std::accumulate(evap_counts.begin(), evap_counts.end(), 0);
 
 	// Pack local evaporation data. Use doubles for MPI transfer; the textual output documents the field meanings.
-	constexpr int EVAPORATION_MPI_FIELDS = 21;
+	constexpr int EVAPORATION_MPI_FIELDS = 23;
 	std::vector<double> local_evap_data(local_evap_count * EVAPORATION_MPI_FIELDS);
 	for(int i = 0; i < local_evap_count; i++)
 	{
@@ -1463,14 +1505,16 @@ void Simulation_Data::Perform_MPI_Reductions()
 		local_evap_data[EVAPORATION_MPI_FIELDS*i + 10] = evaporation_records[i].r_first_negative_km;
 		local_evap_data[EVAPORATION_MPI_FIELDS*i + 11] = evaporation_records[i].E_first_negative_eV;
 		local_evap_data[EVAPORATION_MPI_FIELDS*i + 12] = evaporation_records[i].dE_first_negative_from_prev_eV;
-		local_evap_data[EVAPORATION_MPI_FIELDS*i + 13] = evaporation_records[i].truncated ? 1.0 : 0.0;
-		local_evap_data[EVAPORATION_MPI_FIELDS*i + 14] = evaporation_records[i].event_observed ? 1.0 : 0.0;
-		local_evap_data[EVAPORATION_MPI_FIELDS*i + 15] = evaporation_records[i].boundary_escape_observed ? 1.0 : 0.0;
-		local_evap_data[EVAPORATION_MPI_FIELDS*i + 16] = evaporation_records[i].censored ? 1.0 : 0.0;
-		local_evap_data[EVAPORATION_MPI_FIELDS*i + 17] = static_cast<double>(static_cast<int>(evaporation_records[i].termination_reason));
-		local_evap_data[EVAPORATION_MPI_FIELDS*i + 18] = evaporation_records[i].max_free_energy_drift_eV;
-		local_evap_data[EVAPORATION_MPI_FIELDS*i + 19] = evaporation_records[i].max_free_energy_drift_rel;
-		local_evap_data[EVAPORATION_MPI_FIELDS*i + 20] = static_cast<double>(evaporation_records[i].number_of_scatterings);
+		local_evap_data[EVAPORATION_MPI_FIELDS*i + 13] = evaporation_records[i].event_observed ? 1.0 : 0.0;
+		local_evap_data[EVAPORATION_MPI_FIELDS*i + 14] = evaporation_records[i].boundary_escape_observed ? 1.0 : 0.0;
+		local_evap_data[EVAPORATION_MPI_FIELDS*i + 15] = evaporation_records[i].survival_valid ? 1.0 : 0.0;
+		local_evap_data[EVAPORATION_MPI_FIELDS*i + 16] = evaporation_records[i].numerically_invalid_escape ? 1.0 : 0.0;
+		local_evap_data[EVAPORATION_MPI_FIELDS*i + 17] = evaporation_records[i].censored ? 1.0 : 0.0;
+		local_evap_data[EVAPORATION_MPI_FIELDS*i + 18] = evaporation_records[i].truncated ? 1.0 : 0.0;
+		local_evap_data[EVAPORATION_MPI_FIELDS*i + 19] = static_cast<double>(static_cast<int>(evaporation_records[i].termination_reason));
+		local_evap_data[EVAPORATION_MPI_FIELDS*i + 20] = evaporation_records[i].max_free_energy_drift_eV;
+		local_evap_data[EVAPORATION_MPI_FIELDS*i + 21] = evaporation_records[i].max_free_energy_drift_rel;
+		local_evap_data[EVAPORATION_MPI_FIELDS*i + 22] = static_cast<double>(evaporation_records[i].number_of_scatterings);
 	}
 
 	std::vector<int> recv_counts(mpi_processes), displacements(mpi_processes);
@@ -1502,14 +1546,16 @@ void Simulation_Data::Perform_MPI_Reductions()
 		evaporation_records[i].r_first_negative_km = global_evap_data[EVAPORATION_MPI_FIELDS*i + 10];
 		evaporation_records[i].E_first_negative_eV = global_evap_data[EVAPORATION_MPI_FIELDS*i + 11];
 		evaporation_records[i].dE_first_negative_from_prev_eV = global_evap_data[EVAPORATION_MPI_FIELDS*i + 12];
-		evaporation_records[i].truncated = (global_evap_data[EVAPORATION_MPI_FIELDS*i + 13] > 0.5);
-		evaporation_records[i].event_observed = (global_evap_data[EVAPORATION_MPI_FIELDS*i + 14] > 0.5);
-		evaporation_records[i].boundary_escape_observed = (global_evap_data[EVAPORATION_MPI_FIELDS*i + 15] > 0.5);
-		evaporation_records[i].censored = (global_evap_data[EVAPORATION_MPI_FIELDS*i + 16] > 0.5);
-		evaporation_records[i].termination_reason = static_cast<TrajectoryTerminationReason>(TerminationReason_Index(static_cast<TrajectoryTerminationReason>(static_cast<int>(global_evap_data[EVAPORATION_MPI_FIELDS*i + 17]))));
-		evaporation_records[i].max_free_energy_drift_eV = global_evap_data[EVAPORATION_MPI_FIELDS*i + 18];
-		evaporation_records[i].max_free_energy_drift_rel = global_evap_data[EVAPORATION_MPI_FIELDS*i + 19];
-		evaporation_records[i].number_of_scatterings = static_cast<unsigned long int>(global_evap_data[EVAPORATION_MPI_FIELDS*i + 20]);
+		evaporation_records[i].event_observed = (global_evap_data[EVAPORATION_MPI_FIELDS*i + 13] > 0.5);
+		evaporation_records[i].boundary_escape_observed = (global_evap_data[EVAPORATION_MPI_FIELDS*i + 14] > 0.5);
+		evaporation_records[i].survival_valid = (global_evap_data[EVAPORATION_MPI_FIELDS*i + 15] > 0.5);
+		evaporation_records[i].numerically_invalid_escape = (global_evap_data[EVAPORATION_MPI_FIELDS*i + 16] > 0.5);
+		evaporation_records[i].censored = (global_evap_data[EVAPORATION_MPI_FIELDS*i + 17] > 0.5);
+		evaporation_records[i].truncated = (global_evap_data[EVAPORATION_MPI_FIELDS*i + 18] > 0.5);
+		evaporation_records[i].termination_reason = static_cast<TrajectoryTerminationReason>(TerminationReason_Index(static_cast<TrajectoryTerminationReason>(static_cast<int>(global_evap_data[EVAPORATION_MPI_FIELDS*i + 19]))));
+		evaporation_records[i].max_free_energy_drift_eV = global_evap_data[EVAPORATION_MPI_FIELDS*i + 20];
+		evaporation_records[i].max_free_energy_drift_rel = global_evap_data[EVAPORATION_MPI_FIELDS*i + 21];
+		evaporation_records[i].number_of_scatterings = static_cast<unsigned long int>(global_evap_data[EVAPORATION_MPI_FIELDS*i + 22]);
 	}
 
 	MPI_Allreduce(MPI_IN_PLACE, &computing_time, 1, MPI_DOUBLE, MPI_MAX, MPI_COMM_WORLD);
@@ -1594,12 +1640,14 @@ void Simulation_Data::Write_Output_Files(const std::string& output_dir, obscura:
 		std::ofstream f(output_dir + "/evaporation_mode_summary.txt");
 		write_header(f);
 		f << "# evaporation_mode_include_truncated = " << (evaporation_mode_include_truncated ? 1 : 0) << "\n";
+		f << "# evaporation_mode_include_truncated_status = deprecated_ignored\n";
+		f << "# mode_assignment = event_observed && survival_valid && lifetime_unbinding > 0\n";
 		f << "# mode_count = " << evaporation_mode_bincounts.size() << "\n";
 		f << "# boundary_count = " << evaporation_mode_boundaries_log10_s.size() << "\n";
 		f << "# boundaries_log10_s";
-		for(double boundary : evaporation_mode_boundaries_log10_s)
-			f << " " << std::scientific << std::setprecision(10) << boundary;
-		f << "\n";
+			for(double boundary : evaporation_mode_boundaries_log10_s)
+				f << " " << std::scientific << std::setprecision(10) << boundary;
+			f << "\n";
 			f << "# mode_index  label  log10_t_lower  log10_t_upper  count  censored_count\n";
 		for(size_t mode = 0; mode < evaporation_mode_bincounts.size(); mode++)
 		{
@@ -1657,6 +1705,7 @@ void Simulation_Data::Write_Output_Files(const std::string& output_dir, obscura:
 		f << "# ever_captured_count = " << number_of_captured_particles << "\n";
 		f << "# complete_evaporation_count = " << number_of_complete_evaporation_particles << "\n";
 		f << "# censored_captured_count = " << number_of_censored_captured_particles << "\n";
+		f << "# invalid_survival_captured_count = " << number_of_invalid_survival_captured_particles << "\n";
 		f << "# evaporation_record_count = " << evaporation_records.size() << "\n";
 		f << "#\n";
 		f << "# total_wall_time_captured_sec = " << std::scientific << std::setprecision(6) << total_wall_time_captured << "\n";
@@ -1826,7 +1875,8 @@ void Simulation_Data::Print_Summary(unsigned int mpi_rank)
 				  << "Captured particles [%]:\t\t" << libphysica::Round(100.0 * Capture_Ratio()) << std::endl
 				  << "Captured count:\t\t\t" << number_of_captured_particles << std::endl
 				  << "Complete evaporation count:\t" << number_of_complete_evaporation_particles << std::endl
-				  << "Censored captured count:\t" << number_of_censored_captured_particles << std::endl;
+				  << "Censored captured count:\t" << number_of_censored_captured_particles << std::endl
+				  << "Invalid survival count:\t\t" << number_of_invalid_survival_captured_particles << std::endl;
 		std::cout << "Termination reasons:" << std::endl;
 		for(int reason_index = 0; reason_index < TRAJECTORY_TERMINATION_REASON_COUNT; reason_index++)
 		{
@@ -1869,8 +1919,8 @@ void Simulation_Data::Print_Summary(unsigned int mpi_rank)
 		std::vector<double> observed_unbinding_lifetimes;
 		for(const auto& rec : evaporation_records)
 		{
-			if(rec.event_observed && Has_Positive_Evaporation_Time(rec))
-				observed_unbinding_lifetimes.push_back(rec.observed_lifetime);
+			if(rec.survival_valid && rec.event_observed && Has_Positive_Evaporation_Time(rec.lifetime_unbinding))
+				observed_unbinding_lifetimes.push_back(rec.lifetime_unbinding);
 		}
 		if(!observed_unbinding_lifetimes.empty())
 		{
