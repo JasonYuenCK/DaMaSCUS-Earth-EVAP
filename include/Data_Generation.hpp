@@ -15,17 +15,30 @@
 namespace DaMaSCUS_SUN
 {
 
-// Evaporation time record for a captured trajectory with positive bound duration
+// Survival-analysis record for every captured trajectory.
 struct EvaporationRecord
 {
 	int rank = -1;
 	unsigned long int trajectory_id = 0;
-	double t_evap = 0.0;    // seconds
+	double t_evap = 0.0;    // compatibility alias for observed_lifetime [seconds]
+	double t_capture = -1.0;
+	double t_final_unbinding_scatter = -1.0;
+	double t_boundary_escape = -1.0;
+	double t_termination = -1.0;
+	double observed_lifetime = 0.0;
+	double lifetime_unbinding = -1.0;
+	double lifetime_boundary = -1.0;
 	double r_first_negative_km = -1.0;
 	double E_first_negative_eV = 0.0;
 	double dE_first_negative_from_prev_eV = 0.0;
-	bool truncated = false; // true if trajectory did not end as a complete outward escape
+	bool event_observed = false;
+	bool boundary_escape_observed = false;
+	bool censored = true;
+	bool truncated = true; // compatibility alias for censored
 	TrajectoryTerminationReason termination_reason = TrajectoryTerminationReason::Unknown;
+	double max_free_energy_drift_eV = 0.0;
+	double max_free_energy_drift_rel = 0.0;
+	unsigned long int number_of_scatterings = 0;
 };
 
 struct EvaporationModeBincount
@@ -54,6 +67,8 @@ class Simulation_Data
 	unsigned long int number_of_free_particles;
 	unsigned long int number_of_reflected_particles;
 	unsigned long int number_of_captured_particles;
+	unsigned long int number_of_complete_evaporation_particles;
+	unsigned long int number_of_censored_captured_particles;
 	std::array<unsigned long int, TRAJECTORY_TERMINATION_REASON_COUNT> termination_reason_counts;
 	double average_number_of_scatterings;
 	double computing_time;

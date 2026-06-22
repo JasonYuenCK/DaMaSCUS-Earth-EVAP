@@ -121,6 +121,25 @@ TEST(TestSimulationTrajectory, TestDefaultTrajectoryWallTimeIsUnlimited)
 	EXPECT_DOUBLE_EQ(simulator.max_trajectory_wall_time_sec, 0.0);
 }
 
+TEST(TestSimulationTrajectory, TestTrajectoryBincountSurvivalDefaults)
+{
+	TrajectoryBincount bincount;
+	EXPECT_FALSE(bincount.is_captured);
+	EXPECT_FALSE(bincount.event_observed);
+	EXPECT_FALSE(bincount.boundary_escape_observed);
+	EXPECT_FALSE(bincount.truncated);
+	EXPECT_DOUBLE_EQ(bincount.t_first_negative, -1.0);
+	EXPECT_DOUBLE_EQ(bincount.t_last_negative, -1.0);
+	EXPECT_DOUBLE_EQ(bincount.t_capture, -1.0);
+	EXPECT_DOUBLE_EQ(bincount.t_last_bound, -1.0);
+	EXPECT_DOUBLE_EQ(bincount.t_termination, -1.0);
+	EXPECT_TRUE(std::isnan(bincount.t_final_unbinding_scatter));
+	EXPECT_TRUE(std::isnan(bincount.t_boundary_escape));
+	EXPECT_DOUBLE_EQ(bincount.max_free_energy_drift_eV, 0.0);
+	EXPECT_DOUBLE_EQ(bincount.max_free_energy_drift_rel, 0.0);
+	EXPECT_EQ(bincount.number_of_scatterings, 0UL);
+}
+
 TEST(TestSimulationTrajectory, TestScatter)
 {
 	// ARRANGE

@@ -27,6 +27,7 @@ constexpr double RK45_MAX_STEP_FACTOR = 4.0;
 // 在正常物理场景下 <100 次即可收敛；设为 2000 是为了在极端数值情形下
 // 保证外层循环一定能在有限时间内拿回控制权，从而触发 snapshot 回调。
 constexpr int RK45_MAX_INNER_RETRIES = 2000;
+constexpr double FREE_ENERGY_DRIFT_REL_E_SCALE_EV = 1.0e-30;
 
 double RK45_Absolute_Max_Time_Step()
 {
@@ -172,7 +173,7 @@ void Trajectory_Result::Print_Summary(Solar_Model& solar_model, unsigned int mpi
 
 // 2. Simulator
 Trajectory_Simulator::Trajectory_Simulator(const Solar_Model& model, unsigned long int max_time_steps, unsigned long int max_scatterings, double max_distance)
-: solar_model(model), current_physical_bound_state(false), terminate_on_capture(false), total_rk45_steps_current_traj(0), trajectory_in_progress(false), current_trajectory_physical_time_sec(0.0), maximum_time_steps(max_time_steps), maximum_scatterings(max_scatterings), maximum_distance(max_distance), current_mpi_rank(0), current_trajectory_id(0)
+: solar_model(model), free_flight_reference_energy_eV(std::numeric_limits<double>::quiet_NaN()), current_physical_bound_state(false), terminate_on_capture(false), total_rk45_steps_current_traj(0), trajectory_in_progress(false), current_trajectory_physical_time_sec(0.0), maximum_time_steps(max_time_steps), maximum_scatterings(max_scatterings), maximum_distance(max_distance), current_mpi_rank(0), current_trajectory_id(0)
 {
 	std::random_device rd;
 	PRNG.seed(rd());
@@ -250,25 +251,57 @@ bool Trajectory_Simulator::Update_Capture_State(double radius, double speed, dou
 		dE_from_prev_eV = E_eV - previous_capture_energy_eV;
 	previous_capture_energy_eV = E_eV;
 	bool negative_energy = E_eV < 0.0;
+	double t_now_sec = In_Units(time, sec);
 
-	if(allow_new_capture)
-		current_physical_bound_state = negative_energy;
-
-	if(negative_energy && (allow_new_capture || current_physical_bound_state))
+	if(!allow_new_capture)
 	{
-		double t_now_sec = In_Units(time, sec);
+		if(current_bincount.is_captured && std::isfinite(free_flight_reference_energy_eV))
+		{
+			double drift_eV = std::fabs(E_eV - free_flight_reference_energy_eV);
+			if(std::isfinite(drift_eV) && drift_eV > current_bincount.max_free_energy_drift_eV)
+				current_bincount.max_free_energy_drift_eV = drift_eV;
+			double scale_eV = std::max(std::fabs(free_flight_reference_energy_eV), FREE_ENERGY_DRIFT_REL_E_SCALE_EV);
+			double drift_rel = drift_eV / scale_eV;
+			if(std::isfinite(drift_rel) && drift_rel > current_bincount.max_free_energy_drift_rel)
+				current_bincount.max_free_energy_drift_rel = drift_rel;
+		}
+
+		if(current_physical_bound_state && current_bincount.is_captured)
+		{
+			current_bincount.t_last_bound = t_now_sec;
+			current_bincount.t_last_negative = t_now_sec;
+		}
+		return false;
+	}
+
+	bool was_bound = current_physical_bound_state;
+	current_physical_bound_state = negative_energy;
+	free_flight_reference_energy_eV = E_eV;
+
+	if(negative_energy)
+	{
 		if(!current_bincount.is_captured)
 		{
-			if(!allow_new_capture)
-				return false;
 			current_bincount.is_captured = true;
+			current_bincount.t_capture = t_now_sec;
 			current_bincount.t_first_negative = t_now_sec;
+			current_bincount.t_last_bound = t_now_sec;
 			current_bincount.r_first_negative_km = In_Units(radius, km);
 			current_bincount.E_first_negative_eV = E_eV;
 			current_bincount.dE_first_negative_from_prev_eV = dE_from_prev_eV;
 		}
+		else if(!was_bound)
+		{
+			current_bincount.t_final_unbinding_scatter = std::numeric_limits<double>::quiet_NaN();
+		}
+		current_bincount.t_last_bound = t_now_sec;
 		current_bincount.t_last_negative = t_now_sec;
 		return true;
+	}
+
+	if(was_bound && current_bincount.is_captured)
+	{
+		current_bincount.t_final_unbinding_scatter = t_now_sec;
 	}
 
 	return false;
@@ -562,6 +595,7 @@ Trajectory_Result Trajectory_Simulator::Simulate(const Event& initial_condition,
 	prev_v2_km2s2 = 0.0;
 	prev_dt_sec = 0.0;
 	previous_capture_energy_eV = Capture_Energy_eV(current_event.Radius(), current_event.Speed(), DM);
+	free_flight_reference_energy_eV = std::numeric_limits<double>::quiet_NaN();
 	current_physical_bound_state = false;
 	current_mpi_rank = mpi_rank;
 	current_trajectory_id++;
@@ -598,17 +632,25 @@ Trajectory_Result Trajectory_Simulator::Simulate(const Event& initial_condition,
 
 	trajectory_in_progress = false;
 	current_bincount.termination_reason = termination_reason;
+	current_bincount.number_of_scatterings = number_of_scatterings;
+	current_bincount.t_termination = In_Units(current_event.time, sec);
 
-	// A captured lifetime is complete only when the trajectory reaches the outward escape boundary.
 	if(current_bincount.is_captured)
 	{
-		// Compute energy at the final event
 		double r_final = current_event.Radius();
 		double v_final = current_event.Speed();
 		double vesc_final = solar_model.Local_Escape_Speed(r_final);
 		double E_final = 0.5 * DM.mass * (v_final * v_final - vesc_final * vesc_final);
-		if(termination_reason != TrajectoryTerminationReason::OutwardEscape || In_Units(E_final, eV) < 0.0)
-			current_bincount.truncated = true;
+		double E_final_eV = In_Units(E_final, eV);
+		if(termination_reason == TrajectoryTerminationReason::OutwardEscape && E_final_eV >= 0.0)
+		{
+			current_bincount.boundary_escape_observed = true;
+			current_bincount.t_boundary_escape = current_bincount.t_termination;
+			current_bincount.event_observed = std::isfinite(current_bincount.t_final_unbinding_scatter);
+		}
+		if(!current_bincount.event_observed)
+			current_bincount.t_final_unbinding_scatter = std::numeric_limits<double>::quiet_NaN();
+		current_bincount.truncated = !current_bincount.event_observed;
 	}
 
 	return Trajectory_Result(initial_condition, current_event, number_of_scatterings, total_rk45_steps_current_traj, current_bincount);

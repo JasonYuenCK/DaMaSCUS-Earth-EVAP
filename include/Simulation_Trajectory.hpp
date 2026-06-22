@@ -53,12 +53,22 @@ struct TrajectoryBincount
 
 	// Capture/evaporation info
 	bool is_captured = false;
-	double t_first_negative = -1.0;  // first time E <= 0 [seconds]
-	double t_last_negative  = -1.0;  // last time E <= 0 [seconds]
+	double t_first_negative = -1.0;  // compatibility alias for t_capture [seconds]
+	double t_last_negative  = -1.0;  // compatibility alias for t_last_bound [seconds]
+	double t_capture = -1.0;         // first post-scatter transition to E < 0 [seconds]
+	double t_last_bound = -1.0;      // latest time physically bound during free flight [seconds]
+	double t_final_unbinding_scatter = std::numeric_limits<double>::quiet_NaN();  // scatter that unbound the particle before a successful escape [seconds]
+	double t_boundary_escape = std::numeric_limits<double>::quiet_NaN();          // outward escape boundary crossing [seconds]
+	double t_termination = -1.0;     // final simulated time, event or censoring time [seconds]
 	double r_first_negative_km = -1.0;  // radius when E first becomes negative [km]
 	double E_first_negative_eV = std::numeric_limits<double>::quiet_NaN();  // first negative energy [eV]
 	double dE_first_negative_from_prev_eV = std::numeric_limits<double>::quiet_NaN();  // E_now - E_previous_step [eV]
-	bool truncated = false;          // true if trajectory did not end as a complete outward escape
+	bool event_observed = false;     // true if final unbinding was followed by outward escape
+	bool boundary_escape_observed = false;  // true if the captured particle escaped through R_max with E >= 0
+	double max_free_energy_drift_eV = 0.0;
+	double max_free_energy_drift_rel = 0.0;
+	unsigned long int number_of_scatterings = 0;
+	bool truncated = false;          // compatibility alias for right-censored unbinding lifetime
 	TrajectoryTerminationReason termination_reason = TrajectoryTerminationReason::Unknown;
 
 	TrajectoryBincount()
@@ -110,6 +120,7 @@ class Trajectory_Simulator
 	double prev_v2_km2s2;       // previous step v² in (km/s)²
 	double prev_dt_sec;         // previous step dt in seconds (for last-step accumulation)
 	double previous_capture_energy_eV;
+	double free_flight_reference_energy_eV;
 	bool current_physical_bound_state;
 	bool terminate_on_capture;
 
