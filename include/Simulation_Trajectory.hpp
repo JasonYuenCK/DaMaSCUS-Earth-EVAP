@@ -46,6 +46,8 @@ enum class TrajectoryTerminationReason
 	EnergyDriftEscape = 10
 };
 
+bool TrajectoryTerminationInvalidatesSurvival(TrajectoryTerminationReason reason);
+
 // Per-trajectory bincount result
 struct TrajectoryBincount
 {

@@ -962,6 +962,9 @@ bool Write_Snapshot_Report_File(const std::string& snapshot_root, int snapshot_i
 {
 	Remove_Stale_Snapshot_Evaporation_File(snapshot_root, snapshot_index, interval_seconds);
 
+	if(!Write_Snapshot_Completed_Evaporation_Diagnostic_File(snapshot_root, snapshot_index, interval_seconds, mass_gev, sigma_cm2, report, caller_rank, diagnostics))
+		return false;
+
 	if(!Write_Text_File_Atomically(Snapshot_Text_File_Path(snapshot_root, snapshot_index, interval_seconds), snapshot_index, [&](std::ofstream& file)
 	{
 		Write_Snapshot_Diagnostics(file, snapshot_index, interval_seconds, caller_rank, diagnostics, true);
@@ -1008,9 +1011,6 @@ bool Write_Snapshot_Report_File(const std::string& snapshot_root, int snapshot_i
 	}))
 		return false;
 
-	if(!Write_Snapshot_Completed_Evaporation_Diagnostic_File(snapshot_root, snapshot_index, interval_seconds, mass_gev, sigma_cm2, report, caller_rank, diagnostics))
-		return false;
-
 	return true;
 }
 
@@ -1050,7 +1050,9 @@ std::string Format_Rank_Status(const Rank_Snapshot_State& state)
 
 bool Try_Write_Merged_Snapshot(const std::string& snapshot_root, const std::string& rank_snapshot_dir, int snapshot_index, double interval_seconds, int mpi_processes, uint64_t run_id, double mass_gev, double sigma_cm2, int caller_rank)
 {
-	if(Snapshot_Text_File_Is_Merged(Snapshot_Text_File_Path(snapshot_root, snapshot_index, interval_seconds)))
+	const std::string snapshot_text_path = Snapshot_Text_File_Path(snapshot_root, snapshot_index, interval_seconds);
+	const std::string completed_evaporation_path = Snapshot_Completed_Evaporation_Diagnostic_File_Path(snapshot_root, snapshot_index, interval_seconds);
+	if(Snapshot_Text_File_Is_Merged(snapshot_text_path) && Path_Exists(completed_evaporation_path))
 	{
 		Cleanup_Snapshot_Checkpoints(rank_snapshot_dir, snapshot_index, interval_seconds, mpi_processes);
 		return true;

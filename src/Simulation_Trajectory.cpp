@@ -109,6 +109,21 @@ double RK45_Next_Step_Size(double current_step, const double errors[3], const do
 }
 
 // 1. Result of one trajectory
+bool TrajectoryTerminationInvalidatesSurvival(TrajectoryTerminationReason reason)
+{
+	switch(reason)
+	{
+		case TrajectoryTerminationReason::EnergyDriftEscape:
+		case TrajectoryTerminationReason::NumericalFailure:
+		case TrajectoryTerminationReason::NonFiniteState:
+		case TrajectoryTerminationReason::SpeedLimit:
+		case TrajectoryTerminationReason::Unknown:
+			return true;
+		default:
+			return false;
+	}
+}
+
 Trajectory_Result::Trajectory_Result(const Event& event_ini, const Event& event_final, unsigned long int nScat, unsigned long int rk45_steps, TrajectoryBincount bc)
 : initial_event(event_ini), final_event(event_final), number_of_scatterings(nScat), total_rk45_steps(rk45_steps), bincount(std::move(bc))
 {
@@ -664,6 +679,9 @@ Trajectory_Result Trajectory_Simulator::Simulate(const Event& initial_condition,
 			current_bincount.t_final_unbinding_scatter = std::numeric_limits<double>::quiet_NaN();
 		current_bincount.truncated = !current_bincount.event_observed;
 	}
+
+	if(TrajectoryTerminationInvalidatesSurvival(termination_reason))
+		current_bincount.survival_valid = false;
 
 	return Trajectory_Result(initial_condition, current_event, number_of_scatterings, total_rk45_steps_current_traj, current_bincount);
 }  
