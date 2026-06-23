@@ -305,9 +305,9 @@ mpirun -n 32 ./DaMaSCUS-SUN config_Lingyu.cfg
 - 暗物质属性：质量 $m_\chi$，自旋，截面 $\sigma_p$（或 $\sigma_e$），相互作用类型（SI/SD/暗光子）
 - 运行参数：样本大小，最大轨迹数，输出目录，等反射环数
 - 暗光子专属参数：$\epsilon$（动能混合），$\alpha_D$（暗规范耦合），$m_{A'}$（介质子质量），形因子类型
-- 可选数值模拟参数：`max_trajectories`（未设置时默认为 `sample_size * 1000`）、`snapshot_enabled`、`snapshot_interval`、`max_trajectory_wall_time_sec`
+- 可选数值模拟参数：`max_trajectories`（未设置时默认为 `sample_size * 1000`）、`snapshot_enabled`、`snapshot_interval`、`snapshot_evaporation_log_enabled`、`max_trajectory_wall_time_sec`
 - 分峰径向统计参数：`evaporation_mode_bincount_enabled`、`evaporation_mode_boundaries_log10_s`、`evaporation_mode_labels`、`evaporation_mode_include_truncated`。默认关闭；开启后按 `log10(lifetime_unbinding/s)` 分组累积 captured 轨迹已有的在线 bincount。`evaporation_mode_include_truncated` 仅为兼容旧配置保留，当前分峰始终只使用 `event_observed=1` 且 `survival_valid=1` 的完整事件。
-- 蒸发诊断参数：`evaporation_diagnostics_enabled`，默认关闭。关闭时 `evaporation_times.txt` 只输出完整、有效、未删失的真实蒸发时间序列；开启后额外写完整 survival/数值诊断信息。
+- 蒸发诊断参数：`snapshot_evaporation_log_enabled` 与 `evaporation_diagnostics_enabled` 已拆分。前者在 `snapshot_enabled=true` 时默认开启，把 snapshot evaporation/survival delta 追加到单个 `evaporation_times.txt`；后者默认关闭，只控制最终 `evaporation_summary.txt` 的完整 survival/数值诊断输出。
 - 快速捕获率参数：`capture_mode = true`（也可使用 `run_mode = "Capture"`）。该模式只用于估计捕获率，散射后若 $E < 0$ 则立即停止当前轨迹，不写模拟输出文件。
 
 示例：
@@ -403,8 +403,8 @@ $$\sum \Delta t,\qquad \sum v^2 \Delta t$$
 
 1. **独立采样**：各 rank 独立生成轨迹，直到达到本 rank 的目标捕获数或最大轨迹数。
 2. **全局聚合**：`MPI_Allreduce` 汇总轨迹数、捕获数、bincount、计算时间、RK45步数和 early-stop 标记。
-3. **蒸发记录收集**：普通模式用 `MPI_Allgather` / `MPI_Allgatherv` 汇总各 rank 的 `EvaporationRecord`。
-4. **Snapshot 合并**：启用 snapshot 时，各 rank 写 checkpoint，任意 rank 可尝试合并已就绪的 snapshot 报告。
+3. **蒸发记录收集**：普通模式只用 `MPI_Gather` / `MPI_Gatherv` 将蒸发记录汇总到 rank 0；diagnostics 关闭时只传紧凑三列完整事件，开启时才传完整 `EvaporationRecord`。
+4. **Snapshot 合并**：启用 snapshot 时，各 rank 写 checkpoint，rank 0 按 snapshot 编号顺序合并已就绪的报告并追加单个 `evaporation_times.txt`。
 
 ### 5.5 Phase 5: 反射谱构建
 
@@ -472,7 +472,7 @@ $$\int \sum_i n_i \frac{m_\chi m_i}{(m_\chi + m_i)^2} \langle v_\text{rel} \rang
 普通 `Parameter point` 模式直接在 `Data_Generation.cpp` 中输出三类文件：
 
 - `bincount.txt`：captured 与 not_captured 的径向占据时间 $\sum \Delta t$、速度二阶矩 $\sum v^2\Delta t$，以及逐 bin 误差估计。
-- `evaporation_times.txt`：默认 final 蒸发时间序列。`evaporation_diagnostics_enabled=false` 时只写完整、有效、未删失的真实蒸发事件，列为 `rank trajectory_id t_evap_s`。`evaporation_diagnostics_enabled=true` 时，该文件改为 snapshot/final append log，会保留右删失标志并计数数值无效记录。
+- `evaporation_times.txt`：未启用 snapshot 日志时，默认 final 蒸发时间序列只写完整、有效、未删失的真实蒸发事件，列为 `rank trajectory_id t_evap_s`。启用 `snapshot_evaporation_log_enabled` 或 `evaporation_diagnostics_enabled` 时，该文件使用按 snapshot/final 顺序追加的 block 日志，保留右删失标志并计数数值无效记录。
 - `evaporation_summary.txt`：仅当 `evaporation_diagnostics_enabled=true` 时写出。每条 captured 轨迹都会写入一条 survival-analysis record，包括 `rank`、rank 内 `trajectory_id`、捕获时间 `t_capture`、最终上散射解绑时间 `t_final_unbinding_scatter`、边界逃逸时间 `t_boundary_escape`、轨迹终止时间 `t_termination`、`observed_lifetime`、`lifetime_unbinding`、`lifetime_boundary`、`event_observed`、`boundary_escape_observed`、`survival_valid`、`numerically_invalid_escape`、`censored`、`termination_reason`、首次散射后能量变负时的半径与能量诊断，以及自由传播段最大能量漂移 `max_free_energy_drift[eV]` / `max_free_energy_drift_rel`。
 - `evaporation_mode_summary.txt`：开启 `evaporation_mode_bincount_enabled` 后输出每个 evaporation mode 的 `log10(lifetime_unbinding/s)` 区间、标签和样本数；分峰始终只使用完整、有效的解绑事件，不使用右删失 lower bound。
 - `evaporation_mode_bincount.txt`：开启 `evaporation_mode_bincount_enabled` 后输出按 evaporation mode 拆分的 captured 径向统计，列为每个 mode 的 $\sum\Delta t$、$\sum v^2\Delta t$ 及对应误差。默认边界 `(4.5, 11.1)` 与标签 `("P1_fast", "P2_theory", "P3_tail")` 可直接用于三峰 ensemble 图。
@@ -485,16 +485,16 @@ $$\int \sum_i n_i \frac{m_\chi m_i}{(m_\chi + m_i)^2} \langle v_\text{rel} \rang
 若设置 `snapshot_enabled = true`，代码按 wall-clock 间隔输出累计 snapshot。相关参数为：
 
 - `snapshot_interval`：snapshot 间隔，默认 `60 s`。
+- `snapshot_evaporation_log_enabled`：snapshot 蒸发/删失 delta 单文件追加日志开关；当 `snapshot_enabled=true` 时默认开启。
 - `max_trajectory_wall_time_sec`：单条轨迹 wall-clock 上限，默认 `0` 表示不限制；若启用 snapshot 且希望避免某个 MPI rank 卡在单条轨迹上，可显式设为有限正值。
 
 Snapshot 会合并各 rank 的当前进度，包括已完成轨迹的 captured / not_captured bincount，以及正在运行轨迹的临时 bincount。Capture Mode 会强制关闭 snapshot，因为该模式只需要终端捕获率。
 
-每个 snapshot 时间点在 `snapshot/` 目录下生成两个诊断文件：
+每个 snapshot 时间点在 `snapshot/` 目录下生成主诊断文件：
 
 - `snapshot_{time}s.txt`：主 snapshot 报告，开头的 rank 诊断表会把 checkpoint/final/wait reason 与该 rank 的 `running`/`done` 状态写在同一行，随后输出累计统计和 bincount histogram。
-- `snapshot_{time}s_completed_evaporation_diagnostic.txt`：仅当 `evaporation_diagnostics_enabled=true` 时生成。只列出截至该 wall-clock snapshot 已经完成蒸发的轨迹，即 `survival_valid=1,event_observed=1,lifetime_unbinding>=0` 的记录，列格式复用诊断用 `evaporation_summary.txt`。该文件用于长任务运行中查看已完成样本的 `t_evap` / `lifetime_unbinding`，不是 survival-analysis 输入。
 
-Snapshot 不再输出旧名 `snapshot_*_evaporation.txt`。`snapshot_*_completed_evaporation_diagnostic.txt` 对长寿命轨迹存在完成时间选择偏差，只能作为运行诊断；默认模式下 snapshot 不追加 `evaporation_times.txt`，最终蒸发时间序列使用 final `evaporation_times.txt`，需要完整 survival/右删失分析和 snapshot 蒸发日志时启用 `evaporation_diagnostics_enabled=true` 并使用 `evaporation_summary.txt`。
+Snapshot 不再输出旧名 `snapshot_*_evaporation.txt`，也不再生成 `snapshot_*_completed_evaporation_diagnostic.txt`。所有 snapshot 蒸发信息只追加到 `evaporation_times.txt`，并按轨迹完成 wall time 严格归入 `(T_{k-1}, T_k]` 区间；完整 survival/数值诊断只在最终 `evaporation_summary.txt` 中可选输出一次。
 
 各 rank 的二进制 checkpoint 临时文件位于 `snapshot/rank_snapshot/`，只用于合并中间状态；snapshot 合并成功后会清理对应 checkpoint。
 
@@ -557,7 +557,7 @@ Snapshot 不再输出旧名 `snapshot_*_evaporation.txt`。`snapshot_*_completed
 
 ### 7.8 MPI 合并与负载分配
 
-每个 MPI rank 独立生成轨迹，目标捕获数为 `ceil(sample_size / N_ranks)`，最大轨迹数为 `ceil(max_trajectories / N_ranks)`。模拟完成后通过 `MPI_Allreduce` 合并轨迹数、捕获数、bincount、计算时间和 RK45 步数；蒸发记录通过 `MPI_Allgather` / `MPI_Allgatherv` 汇总，保留产生该轨迹的 `rank`，因此 `(rank, trajectory_id)` 可唯一定位一条轨迹。
+每个 MPI rank 独立生成轨迹，目标捕获数为 `ceil(sample_size / N_ranks)`，最大轨迹数为 `ceil(max_trajectories / N_ranks)`。模拟完成后通过 `MPI_Allreduce` 合并轨迹数、捕获数、bincount、计算时间和 RK45 步数；蒸发记录通过 root-only `MPI_Gather` / `MPI_Gatherv` 汇总到 rank 0，保留产生该轨迹的 `rank`，因此 `(rank, trajectory_id)` 可唯一定位一条轨迹。
 
 Snapshot 模式额外使用每 rank 的二进制 checkpoint 文件来合并中间进度，避免长时间运行时只能等最终 `MPI_Allreduce`。
 

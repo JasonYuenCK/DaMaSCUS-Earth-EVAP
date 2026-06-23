@@ -227,6 +227,15 @@ void Configuration::Import_Parameter_Scan_Parameter()
 			snapshot_config.interval_seconds = 60.0;  // default: 60 seconds
 		}
 	}
+	snapshot_config.snapshot_evaporation_log_enabled = snapshot_config.enabled;
+	try
+	{
+		bool snapshot_evap_log = config.lookup("snapshot_evaporation_log_enabled");
+		snapshot_config.snapshot_evaporation_log_enabled = snapshot_evap_log;
+	}
+	catch(const SettingNotFoundException& nfex)
+	{
+	}
 
 	// Per-trajectory wall-time budget (seconds). 0 = unlimited. Optional in cfg.
 	try
@@ -441,6 +450,8 @@ void Configuration::Print_Summary(int mpi_rank)
 				  << "\tSc. rate interpolation:\t\t" << ((interpolation_points > 0) ? "[x] (Grid: " + std::to_string(interpolation_points) + "×" + std::to_string(interpolation_points) + ")" : "[ ]") << std::endl;
 		if(evaporation_mode_bincount_enabled)
 			std::cout << "\tEvap. mode bincount:\t\t" << "[x]" << std::endl;
+		if(snapshot_config.enabled && snapshot_config.snapshot_evaporation_log_enabled)
+			std::cout << "\tSnapshot evap. log:\t\t" << "[x]" << std::endl;
 		if(evaporation_diagnostics_enabled)
 			std::cout << "\tEvap. diagnostics:\t\t" << "[x]" << std::endl;
 		if(run_mode == "Parameter point" && isoreflection_rings > 1)

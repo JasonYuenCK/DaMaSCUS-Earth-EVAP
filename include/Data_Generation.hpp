@@ -20,6 +20,7 @@ struct EvaporationRecord
 {
 	int rank = -1;
 	unsigned long int trajectory_id = 0;
+	double completion_wall_time_sec = 0.0; // rank-local wall time when the trajectory finished [seconds]
 	double t_evap = 0.0;    // finite only for observed unbinding events [seconds]
 	double t_capture = -1.0;
 	double t_final_unbinding_scatter = -1.0;
@@ -97,6 +98,7 @@ class Simulation_Data
 	bool evaporation_mode_include_truncated = false;
 	std::vector<EvaporationModeBincount> evaporation_mode_bincounts;
 	bool evaporation_diagnostics_enabled = false;
+	bool snapshot_evaporation_log_enabled = false;
 
 	// --- Per-trajectory computation time statistics ---
 	double total_wall_time_captured;

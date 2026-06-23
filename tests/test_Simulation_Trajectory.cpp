@@ -114,6 +114,8 @@ TEST(TestSimulationTrajectory, TestParticleCaptured)
 TEST(TestSimulationTrajectory, TestDefaultTrajectoryWallTimeIsUnlimited)
 {
 	SnapshotConfig cfg;
+	EXPECT_FALSE(cfg.enabled);
+	EXPECT_TRUE(cfg.snapshot_evaporation_log_enabled);
 	EXPECT_DOUBLE_EQ(cfg.max_trajectory_wall_time_sec, 0.0);
 
 	Solar_Model SSM;

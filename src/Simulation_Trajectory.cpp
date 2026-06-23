@@ -188,7 +188,7 @@ void Trajectory_Result::Print_Summary(Solar_Model& solar_model, unsigned int mpi
 
 // 2. Simulator
 Trajectory_Simulator::Trajectory_Simulator(const Solar_Model& model, unsigned long int max_time_steps, unsigned long int max_scatterings, double max_distance)
-: solar_model(model), free_flight_reference_energy_eV(std::numeric_limits<double>::quiet_NaN()), current_physical_bound_state(false), terminate_on_capture(false), total_rk45_steps_current_traj(0), trajectory_in_progress(false), current_trajectory_physical_time_sec(0.0), maximum_time_steps(max_time_steps), maximum_scatterings(max_scatterings), maximum_distance(max_distance), current_mpi_rank(0), current_trajectory_id(0)
+: solar_model(model), free_flight_reference_energy_eV(std::numeric_limits<double>::quiet_NaN()), current_physical_bound_state(false), terminate_on_capture(false), total_rk45_steps_current_traj(0), trajectory_in_progress(false), current_trajectory_physical_time_sec(0.0), accumulated_snapshot_overhead_sec(0.0), maximum_time_steps(max_time_steps), maximum_scatterings(max_scatterings), maximum_distance(max_distance), current_mpi_rank(0), current_trajectory_id(0)
 {
 	std::random_device rd;
 	PRNG.seed(rd());
@@ -198,7 +198,13 @@ Trajectory_Simulator::Trajectory_Simulator(const Solar_Model& model, unsigned lo
 void Trajectory_Simulator::Publish_Snapshot_Progress() const
 {
 	if(snapshot_progress_callback)
+	{
+		const auto callback_start = std::chrono::steady_clock::now();
 		snapshot_progress_callback(*this);
+		const auto callback_end = std::chrono::steady_clock::now();
+		if(trajectory_in_progress)
+			accumulated_snapshot_overhead_sec += 1.0e-9 * std::chrono::duration_cast<std::chrono::nanoseconds>(callback_end - callback_start).count();
+	}
 }
 
 void Trajectory_Simulator::Set_Snapshot_Progress_Callback(std::function<void(const Trajectory_Simulator&)> callback)
@@ -226,7 +232,8 @@ double Trajectory_Simulator::Current_Trajectory_Wall_Time_Seconds() const
 	if(!trajectory_in_progress)
 		return 0.0;
 
-	return 1.0e-9 * std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - current_trajectory_wall_start).count();
+	const double total_wall_time_sec = 1.0e-9 * std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - current_trajectory_wall_start).count();
+	return std::max(0.0, total_wall_time_sec - accumulated_snapshot_overhead_sec);
 }
 
 double Trajectory_Simulator::Current_Trajectory_Physical_Time_Seconds() const
@@ -431,7 +438,8 @@ TrajectoryTerminationReason Trajectory_Simulator::Propagate_Freely(Event& curren
 		bool captured_now = Update_Capture_State(r_after, v_after, particle_propagator.Current_Time(), DM, false);
 
 		current_trajectory_physical_time_sec = t_now_sec;
-		Publish_Snapshot_Progress();
+		if((time_steps & 0xFFu) == 0u)
+			Publish_Snapshot_Progress();
 
 		if(terminate_on_capture && captured_now)
 		{
@@ -618,6 +626,7 @@ Trajectory_Result Trajectory_Simulator::Simulate(const Event& initial_condition,
 	trajectory_in_progress = true;
 	current_trajectory_physical_time_sec = In_Units(current_event.time, sec);
 	current_trajectory_wall_start = std::chrono::steady_clock::now();
+	accumulated_snapshot_overhead_sec = 0.0;
 	Publish_Snapshot_Progress();
 
 	TrajectoryTerminationReason termination_reason = TrajectoryTerminationReason::Unknown;

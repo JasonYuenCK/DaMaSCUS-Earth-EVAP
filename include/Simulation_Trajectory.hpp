@@ -88,6 +88,7 @@ struct SnapshotConfig
 {
 	bool enabled = false;
 	double interval_seconds = 60.0;  // wall-clock seconds between snapshots
+	bool snapshot_evaporation_log_enabled = true; // when snapshots are enabled, append snapshot evaporation deltas by default
 	// 单条轨迹最长允许的 wall-clock 时间（秒）；超过即中止该轨迹。
 	// 用于防止单条病态轨迹把整个 rank 卡死，从而导致 snapshot/MPI_Barrier 死锁。
 	// 0 表示不限制。正式统计默认不限制。
@@ -139,6 +140,7 @@ class Trajectory_Simulator
 	bool trajectory_in_progress;
 	double current_trajectory_physical_time_sec;
 	std::chrono::steady_clock::time_point current_trajectory_wall_start;
+	mutable double accumulated_snapshot_overhead_sec;
 
 	void Publish_Snapshot_Progress() const;
 
