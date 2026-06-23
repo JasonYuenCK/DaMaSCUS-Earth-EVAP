@@ -52,6 +52,7 @@ Key parameters in the `.cfg` file:
 | `DM_cross_section_nucleon` | DM-nucleon cross section in cm² |
 | `run_mode` | "Parameter point" or "Parameter scan" |
 | `evaporation_mode_bincount_enabled` | Optional split of captured bincounts by evaporation-time peaks |
+| `evaporation_diagnostics_enabled` | Optional full evaporation survival/diagnostic output; default `false` |
 
 Optional evaporation-mode settings:
 
@@ -69,7 +70,8 @@ evaporation_mode_include_truncated = false;
 For each parameter point, the main generated files are:
 
 - `bincount.txt` — Combined captured/not-captured time-weighted radial histogram with error estimates; incomplete non-captured trajectories are excluded from the not-captured histogram
-- `evaporation_summary.txt` — One survival-analysis record for every captured trajectory, keyed by `rank` and rank-local `trajectory_id`; includes capture time, final unbinding-scatter time, boundary escape time, termination time, observed/censored/validity flags, unbinding and boundary lifetimes, termination reason, and maximum free-flight energy drift diagnostics. `t_evap` is finite only for observed evaporation events; survival analysis should use `(observed_lifetime, event_observed)` with `survival_valid = 1`.
+- `evaporation_times.txt` — Default final evaporation-time sequence. With `evaporation_diagnostics_enabled = false`, it is a compact table of complete valid evaporation events: `rank trajectory_id t_evap_s`. With diagnostics enabled, it becomes an append log with snapshot/final blocks and right-censoring flags.
+- `evaporation_summary.txt` — Only written when `evaporation_diagnostics_enabled = true`; one full survival-analysis record for every captured trajectory, including right-censoring and numerical diagnostics.
 - `evaporation_mode_summary.txt` — Counts and log10(lifetime_unbinding/s) boundaries for each configured evaporation mode, using only valid observed unbinding events, when enabled
 - `evaporation_mode_bincount.txt` — Per-mode captured radial bincounts (`dt`, `v2dt`, and errors), when enabled
 - `computation_time_summary.txt` — Wall-clock time, RK45 step-count statistics, captured/complete/censored/invalid-survival counts, and trajectory termination-reason counts
@@ -77,9 +79,9 @@ For each parameter point, the main generated files are:
 When `snapshot_enabled = true`, intermediate files are written under `snapshot/`:
 
 - `snapshot_{time}s.txt` — Cumulative snapshot report and bincount histogram. The rank diagnostic table combines the checkpoint source with the current `running`/`done` status.
-- `snapshot_{time}s_completed_evaporation_diagnostic.txt` — Diagnostic-only list of evaporation records that have already completed by this snapshot. It is useful for inspecting current completed evaporation times during a long run, but it excludes unfinished long-lived trajectories and must not be used as the final survival-analysis sample.
+- `snapshot_{time}s_completed_evaporation_diagnostic.txt` — Only written when `evaporation_diagnostics_enabled = true`; diagnostic-only list of evaporation records that have already completed by this snapshot.
 
-Snapshot output is for runtime diagnostics only; final survival analysis should use the final `evaporation_summary.txt`.
+Snapshot output is for runtime diagnostics only. In the default mode, snapshots do not append to `evaporation_times.txt`; enable `evaporation_diagnostics_enabled = true` when full survival/right-censoring diagnostics and snapshot evaporation log blocks are needed.
 
 ## References
 

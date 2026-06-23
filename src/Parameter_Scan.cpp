@@ -294,6 +294,16 @@ void Configuration::Import_Parameter_Scan_Parameter()
 	{
 	}
 
+	evaporation_diagnostics_enabled = false;
+	try
+	{
+		bool diagnostics_enabled = config.lookup("evaporation_diagnostics_enabled");
+		evaporation_diagnostics_enabled = diagnostics_enabled;
+	}
+	catch(const SettingNotFoundException& nfex)
+	{
+	}
+
 	if(run_mode != "Parameter point" && run_mode != "Parameter scan" && run_mode != "Custom" && run_mode != "Capture")
 	{
 		std::cerr << "Error in Configuration::Import_Parameter_Scan_Parameter(): Run mode " << run_mode << " not recognized." << std::endl;
@@ -431,6 +441,8 @@ void Configuration::Print_Summary(int mpi_rank)
 				  << "\tSc. rate interpolation:\t\t" << ((interpolation_points > 0) ? "[x] (Grid: " + std::to_string(interpolation_points) + "×" + std::to_string(interpolation_points) + ")" : "[ ]") << std::endl;
 		if(evaporation_mode_bincount_enabled)
 			std::cout << "\tEvap. mode bincount:\t\t" << "[x]" << std::endl;
+		if(evaporation_diagnostics_enabled)
+			std::cout << "\tEvap. diagnostics:\t\t" << "[x]" << std::endl;
 		if(run_mode == "Parameter point" && isoreflection_rings > 1)
 			std::cout << "\tIsoreflection rings:\t\t" << isoreflection_rings << std::endl;
 		else if(run_mode == "Parameter scan")

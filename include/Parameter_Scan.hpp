@@ -35,6 +35,7 @@ class Configuration : public obscura::Configuration
 	std::vector<double> evaporation_mode_boundaries_log10_s;
 	std::vector<std::string> evaporation_mode_labels;
 	bool evaporation_mode_include_truncated;
+	bool evaporation_diagnostics_enabled;
 	double cross_section_min, cross_section_max;
 	bool compute_halo_constraints, perform_full_scan, capture_mode;
 	explicit Configuration(std::string cfg_filename, int MPI_rank = 0);
