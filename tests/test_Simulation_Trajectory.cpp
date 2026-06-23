@@ -154,9 +154,9 @@ TEST(TestSimulationTrajectory, TestSurvivalInvalidTerminationReasons)
 	EXPECT_TRUE(TrajectoryTerminationInvalidatesSurvival(TrajectoryTerminationReason::SpeedLimit));
 	EXPECT_TRUE(TrajectoryTerminationInvalidatesSurvival(TrajectoryTerminationReason::Unknown));
 
-	EXPECT_FALSE(TrajectoryTerminationInvalidatesSurvival(TrajectoryTerminationReason::WallTimeLimit));
-	EXPECT_FALSE(TrajectoryTerminationInvalidatesSurvival(TrajectoryTerminationReason::MaxFreeSteps));
-	EXPECT_FALSE(TrajectoryTerminationInvalidatesSurvival(TrajectoryTerminationReason::MaxScatterings));
+	EXPECT_TRUE(TrajectoryTerminationInvalidatesSurvival(TrajectoryTerminationReason::WallTimeLimit));
+	EXPECT_TRUE(TrajectoryTerminationInvalidatesSurvival(TrajectoryTerminationReason::MaxFreeSteps));
+	EXPECT_TRUE(TrajectoryTerminationInvalidatesSurvival(TrajectoryTerminationReason::MaxScatterings));
 	EXPECT_FALSE(TrajectoryTerminationInvalidatesSurvival(TrajectoryTerminationReason::OutwardEscape));
 }
 
@@ -194,7 +194,7 @@ TEST(TestSimulationTrajectory, TestMaxFreeStepsTerminationReason)
 
 	EXPECT_EQ(result.bincount.termination_reason, TrajectoryTerminationReason::MaxFreeSteps);
 	EXPECT_FALSE(result.bincount.truncated);
-	EXPECT_TRUE(result.bincount.survival_valid);
+	EXPECT_FALSE(result.bincount.survival_valid);
 	EXPECT_FALSE(result.Particle_Free());
 	EXPECT_FALSE(result.Particle_Reflected());
 }

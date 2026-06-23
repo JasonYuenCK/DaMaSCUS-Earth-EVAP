@@ -117,6 +117,9 @@ bool TrajectoryTerminationInvalidatesSurvival(TrajectoryTerminationReason reason
 		case TrajectoryTerminationReason::NumericalFailure:
 		case TrajectoryTerminationReason::NonFiniteState:
 		case TrajectoryTerminationReason::SpeedLimit:
+		case TrajectoryTerminationReason::WallTimeLimit:
+		case TrajectoryTerminationReason::MaxFreeSteps:
+		case TrajectoryTerminationReason::MaxScatterings:
 		case TrajectoryTerminationReason::Unknown:
 			return true;
 		default:
@@ -601,7 +604,7 @@ void Trajectory_Simulator::Scatter(Event& current_event, obscura::DM_Particle& D
 	current_event.velocity = New_DM_Velocity(cos_alpha, DM.mass, target_mass, current_event.velocity, vel_target);
 }
 
-void Trajectory_Simulator::Fix_PRNG_Seed(int fixed_seed)
+void Trajectory_Simulator::Fix_PRNG_Seed(unsigned int fixed_seed)
 {
 	PRNG.seed(fixed_seed);
 }

@@ -130,7 +130,7 @@ $$\frac{dr}{dt} = v_r, \quad \frac{dv_r}{dt} = \frac{J^2}{r^3} - \frac{G_N M(r)}
 - 在太阳外传播时，步长还会受单步跨越距离和局域 Kepler 动力学时间限制，避免一步跳过 `2R_\odot` 边界并产生非物理巨大半径。
 - **太阳内部**：步长还受散射率约束，$\delta t \leq 0.1 / \Gamma_\text{total}(r, v)$。
 - **太阳外部**：无散射事件，RK45 步长只由轨道误差控制；从 `1000 AU` 到 `2R_\odot` 的入射段，以及逃逸后到 `1 AU` 的传播，可用 `Hyperbolic_Kepler_Shift()` 做解析 Kepler 推进。
-- **单轨迹 wall-time 保护**：`max_trajectory_wall_time_sec` 默认 `0`，表示不限制；若显式设为正值，则每 `256` 个 RK45 步检查一次，超过后中止该轨迹并记录终止原因为 `wall_time_limit`。
+- **单轨迹 wall-time 保护**：`max_trajectory_wall_time_sec` 默认 `0`，表示不限制；若显式设为正值，则每 `256` 个 RK45 步检查一次，超过后中止该轨迹并记录终止原因为 `wall_time_limit`。`wall_time_limit`、`max_free_steps`、`max_scatterings` 都属于计算截断，不能作为正常物理右删失样本，代码会将对应 captured 轨迹标记为 `survival_valid=false`。
 
 ### 3.2 弹性散射的蒙特卡洛采样
 
@@ -375,7 +375,7 @@ while (未终止):
 - `maximum_free_time_steps = 1000000000000`，即每段自由传播最多 `1e12` 个 RK45 步。
 - `R_max = 2 R_sun`，即传播逃逸边界和 bincount 半径截断均为 `2R_sun`。
 - `max_trajectory_wall_time_sec = 0`，默认不限制；配置文件可设为正值来启用单轨迹 wall-clock 保护。
-- 没有独立的物理模拟时间上限；物理时间由散射次数、自由传播步数、RK45 步长上限、逃逸边界和 wall-clock 保护共同间接限制。
+- 没有独立的物理模拟时间上限；物理时间由散射次数、自由传播步数、RK45 步长上限、逃逸边界和 wall-clock 保护共同间接限制。正式蒸发寿命统计应尽量关闭 wall-time limit，并增大 `max_free_steps` / `max_scatterings` 直到中位数、长尾比例、完整蒸发事件比例和平均散射次数收敛。
 
 **在线统计与输出策略**：
 
@@ -401,7 +401,7 @@ $$\sum \Delta t,\qquad \sum v^2 \Delta t$$
 
 **Data_Generation.cpp** 的 MPI 汇总方式：
 
-1. **独立采样**：各 rank 独立生成轨迹，直到达到本 rank 的目标捕获数或最大轨迹数。
+1. **独立采样**：各 rank 独立生成轨迹，直到达到本 rank 的目标捕获数或最大轨迹数。若使用固定随机种子，rank 内实际种子为 `base_seed + 1000003 * mpi_rank`，避免不同 rank 生成重复轨迹。
 2. **全局聚合**：`MPI_Allreduce` 汇总轨迹数、捕获数、bincount、计算时间、RK45步数和 early-stop 标记。
 3. **蒸发记录收集**：普通模式只用 `MPI_Gather` / `MPI_Gatherv` 将蒸发记录汇总到 rank 0；diagnostics 关闭时只传紧凑三列完整事件，开启时才传完整 `EvaporationRecord`。
 4. **Snapshot 合并**：启用 snapshot 时，各 rank 写 checkpoint，rank 0 按 snapshot 编号顺序合并已就绪的报告并追加单个 `evaporation_times.txt`。
@@ -489,6 +489,8 @@ $$\int \sum_i n_i \frac{m_\chi m_i}{(m_\chi + m_i)^2} \langle v_\text{rel} \rang
 - `max_trajectory_wall_time_sec`：单条轨迹 wall-clock 上限，默认 `0` 表示不限制；若启用 snapshot 且希望避免某个 MPI rank 卡在单条轨迹上，可显式设为有限正值。
 
 Snapshot 会合并各 rank 的当前进度，包括已完成轨迹的 captured / not_captured bincount，以及正在运行轨迹的临时 bincount。Capture Mode 会强制关闭 snapshot，因为该模式只需要终端捕获率。
+
+正式运行前还应验证散射率插值收敛：至少比较 `interpolation_points = 0`、`1000`、`2000`，检查蒸发时间中位数、长尾比例、完整蒸发事件比例和平均散射次数是否在统计误差内一致。若差异不可忽略，应提高插值网格或关闭插值生成基准结果。
 
 每个 snapshot 时间点在 `snapshot/` 目录下生成主诊断文件：
 

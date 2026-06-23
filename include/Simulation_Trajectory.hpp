@@ -167,7 +167,7 @@ class Trajectory_Simulator
 
 	Trajectory_Simulator(const Solar_Model& model, unsigned long int max_time_steps = DEFAULT_MAXIMUM_FREE_TIME_STEPS, unsigned long int max_scatterings = DEFAULT_MAXIMUM_SCATTERINGS, double max_distance = 2.0 * libphysica::natural_units::rSun);
 
-	void Fix_PRNG_Seed(int fixed_seed);
+	void Fix_PRNG_Seed(unsigned int fixed_seed);
 	void Set_Snapshot_Progress_Callback(std::function<void(const Trajectory_Simulator&)> callback);
 	void Enable_Capture_Mode(bool enabled);
 

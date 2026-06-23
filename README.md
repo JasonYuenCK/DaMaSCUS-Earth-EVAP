@@ -66,6 +66,8 @@ evaporation_mode_include_truncated = false;
 
 `evaporation_mode_include_truncated` is retained for config compatibility, but mode assignment uses only valid observed unbinding events.
 
+For reproducible MPI runs, a nonzero fixed seed is treated as a base seed; each rank uses `base_seed + 1000003 * mpi_rank` to avoid duplicate trajectories. Computational cutoffs (`wall_time_limit`, `max_free_steps`, `max_scatterings`) are marked invalid for survival analysis rather than normal right-censoring. Before production evaporation runs, compare `interpolation_points = 0`, `1000`, and `2000` for median lifetime, tail fraction, complete-event fraction, and mean scatterings.
+
 ### Output Files
 
 For each parameter point, the main generated files are:

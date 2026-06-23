@@ -1653,7 +1653,10 @@ void Simulation_Data::Generate_Data(obscura::DM_Particle& DM, Solar_Model& solar
 	simulator.max_trajectory_wall_time_sec = snapshot_cfg.max_trajectory_wall_time_sec;
 	simulator.Enable_Capture_Mode(capture_mode);
 	if(fixed_seed != 0)
-		simulator.Fix_PRNG_Seed(fixed_seed);
+	{
+		const uint64_t rank_seed = static_cast<uint64_t>(fixed_seed) + 1000003ULL * static_cast<uint64_t>(mpi_rank);
+		simulator.Fix_PRNG_Seed(static_cast<unsigned int>(rank_seed));
+	}
 
 	// Snapshot configuration
 	const double snapshot_interval = (snapshot_cfg.interval_seconds > 0.0) ? snapshot_cfg.interval_seconds : 60.0;
