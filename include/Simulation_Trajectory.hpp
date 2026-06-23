@@ -135,7 +135,6 @@ class Trajectory_Simulator
 
 	std::function<void(const Trajectory_Simulator&)> snapshot_progress_callback;
 	bool trajectory_in_progress;
-	double current_trajectory_physical_time_sec;
 	std::chrono::steady_clock::time_point current_trajectory_wall_start;
 	mutable double accumulated_snapshot_overhead_sec;
 
@@ -174,7 +173,6 @@ class Trajectory_Simulator
 	bool Trajectory_In_Progress() const;
 	unsigned long int Current_Trajectory_ID() const;
 	double Current_Trajectory_Wall_Time_Seconds() const;
-	double Current_Trajectory_Physical_Time_Seconds() const;
 	const TrajectoryBincount& Current_Trajectory_Bincount() const;
 };
 

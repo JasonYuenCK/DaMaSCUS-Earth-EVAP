@@ -84,6 +84,84 @@ Event Interpolate_Event(const Event& before, const Event& after, double fraction
 	             before.velocity + fraction * (after.velocity - before.velocity));
 }
 
+double Radius_At_Fraction(const Event& before, const Event& after, double fraction)
+{
+	return Interpolate_Event(before, after, fraction).Radius();
+}
+
+double Find_Surface_Crossing_Fraction(const Event& before, const Event& after, double lower, double upper)
+{
+	double r_lower = Radius_At_Fraction(before, after, lower) - rSun;
+	for(int iteration = 0; iteration < 60; iteration++)
+	{
+		const double mid = 0.5 * (lower + upper);
+		const double r_mid = Radius_At_Fraction(before, after, mid) - rSun;
+		if((r_lower <= 0.0 && r_mid <= 0.0) || (r_lower >= 0.0 && r_mid >= 0.0))
+		{
+			lower = mid;
+			r_lower = r_mid;
+		}
+		else
+			upper = mid;
+	}
+	return Clamp_Unit_Interval(0.5 * (lower + upper));
+}
+
+bool Solar_Interior_Fraction_Interval(const Event& before, const Event& after, double r_before, double r_after, double& start, double& end)
+{
+	const bool before_inside = r_before < rSun;
+	const bool after_inside = r_after < rSun;
+	if(before_inside && after_inside)
+	{
+		start = 0.0;
+		end = 1.0;
+		return true;
+	}
+	if(!before_inside && after_inside)
+	{
+		start = Find_Surface_Crossing_Fraction(before, after, 0.0, 1.0);
+		end = 1.0;
+		return end > start;
+	}
+	if(before_inside && !after_inside)
+	{
+		start = 0.0;
+		end = Find_Surface_Crossing_Fraction(before, after, 0.0, 1.0);
+		return end > start;
+	}
+	return false;
+}
+
+double Solve_Linear_Rate_Optical_Depth_Fraction(double rate_start, double rate_end, double interval_dt, double target_tau)
+{
+	if(target_tau <= 0.0)
+		return 0.0;
+	if(interval_dt <= 0.0)
+		return 1.0;
+
+	const double target = target_tau / interval_dt;
+	const double a = 0.5 * (rate_end - rate_start);
+	const double b = rate_start;
+	if(std::fabs(a) < 1.0e-300)
+		return (b > 0.0) ? Clamp_Unit_Interval(target / b) : 1.0;
+
+	const double discriminant = b * b + 4.0 * a * target;
+	if(!std::isfinite(discriminant) || discriminant < 0.0)
+		return 1.0;
+
+	const double sqrt_discriminant = sqrt(discriminant);
+	const double roots[2] = {
+	    (-b + sqrt_discriminant) / (2.0 * a),
+	    (-b - sqrt_discriminant) / (2.0 * a)
+	};
+	for(double root : roots)
+	{
+		if(std::isfinite(root) && root >= 0.0 && root <= 1.0)
+			return Clamp_Unit_Interval(root);
+	}
+	return 1.0;
+}
+
 bool RK45_Errors_Within_Tolerance(const double errors[3], const double tolerances[3])
 {
 	for(int i = 0; i < 3; i++)
@@ -206,7 +284,7 @@ void Trajectory_Result::Print_Summary(Solar_Model& solar_model, unsigned int mpi
 
 // 2. Simulator
 Trajectory_Simulator::Trajectory_Simulator(const Solar_Model& model, unsigned long int max_time_steps, unsigned long int max_scatterings, double max_distance)
-: solar_model(model), free_flight_reference_energy_eV(std::numeric_limits<double>::quiet_NaN()), current_physical_bound_state(false), terminate_on_capture(false), trajectory_in_progress(false), current_trajectory_physical_time_sec(0.0), accumulated_snapshot_overhead_sec(0.0), maximum_time_steps(max_time_steps), maximum_scatterings(max_scatterings), maximum_distance(max_distance), current_mpi_rank(0), current_trajectory_id(0)
+: solar_model(model), free_flight_reference_energy_eV(std::numeric_limits<double>::quiet_NaN()), current_physical_bound_state(false), terminate_on_capture(false), trajectory_in_progress(false), accumulated_snapshot_overhead_sec(0.0), maximum_time_steps(max_time_steps), maximum_scatterings(max_scatterings), maximum_distance(max_distance), current_mpi_rank(0), current_trajectory_id(0)
 {
 	std::random_device rd;
 	PRNG.seed(rd());
@@ -252,11 +330,6 @@ double Trajectory_Simulator::Current_Trajectory_Wall_Time_Seconds() const
 
 	const double total_wall_time_sec = 1.0e-9 * std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - current_trajectory_wall_start).count();
 	return std::max(0.0, total_wall_time_sec - accumulated_snapshot_overhead_sec);
-}
-
-double Trajectory_Simulator::Current_Trajectory_Physical_Time_Seconds() const
-{
-	return current_trajectory_physical_time_sec;
 }
 
 const TrajectoryBincount& Trajectory_Simulator::Current_Trajectory_Bincount() const
@@ -356,8 +429,30 @@ TrajectoryTerminationReason Trajectory_Simulator::Propagate_Freely(Event& curren
 	double minus_log_xi = -log(libphysica::Sample_Uniform(PRNG));
 	TrajectoryTerminationReason outcome = TrajectoryTerminationReason::MaxFreeSteps;
 	unsigned long int time_steps = 0;
-	bool scatter_event_interpolated = false;
-	Event interpolated_scatter_event;
+
+	auto commit_accepted_event = [&](const Event& accepted_event)
+	{
+		const double t_now_sec = In_Units(accepted_event.time, sec);
+		if(!terminate_on_capture)
+		{
+			const double r_now_km  = In_Units(accepted_event.Radius(), km);
+			const double v_now_kms = In_Units(accepted_event.Speed(), km / sec);
+			const double v2_now    = v_now_kms * v_now_kms;
+
+			if(prev_time_sec >= 0.0)
+			{
+				const double dt_sec = t_now_sec - prev_time_sec;
+				Accumulate_Bincount_Step(prev_r_km, prev_v2_km2s2, dt_sec);
+				prev_dt_sec = dt_sec;
+			}
+
+			prev_time_sec = t_now_sec;
+			prev_r_km     = r_now_km;
+			prev_v2_km2s2 = v2_now;
+		}
+
+		return Update_Capture_State(accepted_event.Radius(), accepted_event.Speed(), accepted_event.time, DM, false);
+	};
 
 	while(time_steps < maximum_time_steps && outcome == TrajectoryTerminationReason::MaxFreeSteps)
 	{
@@ -370,6 +465,15 @@ TrajectoryTerminationReason Trajectory_Simulator::Propagate_Freely(Event& curren
 		{
 			const double step_cap = Free_Propagation_Time_Step_Cap(r_before, v_before, maximum_distance);
 			particle_propagator.time_step = std::min(RK45_Sanitized_Time_Step(particle_propagator.time_step), step_cap);
+			const double radial_velocity_before =
+			    (r_before > 0.0) ? event_before.position.Dot(event_before.velocity) / r_before : 0.0;
+			if(r_before > rSun && radial_velocity_before < 0.0)
+			{
+				const double surface_time_estimate = (r_before - rSun) / (-radial_velocity_before);
+				if(std::isfinite(surface_time_estimate) && surface_time_estimate > 0.0)
+					particle_propagator.time_step =
+					    std::min(particle_propagator.time_step, std::max(surface_time_estimate, 1.0e-8 * sec));
+			}
 		}
 		else
 		{
@@ -380,7 +484,6 @@ TrajectoryTerminationReason Trajectory_Simulator::Propagate_Freely(Event& curren
 				std::cerr << "\nWarning in Propagate_Freely(): invalid pre-step scattering rate (rank "
 				          << current_mpi_rank << ", traj " << current_trajectory_id
 				          << ", rate=" << rate_before << "). Marking trajectory as numerically failed." << std::endl;
-				current_trajectory_physical_time_sec = In_Units(particle_propagator.Current_Time(), sec);
 				Publish_Snapshot_Progress();
 				current_event = particle_propagator.Event_In_3D();
 				return TrajectoryTerminationReason::NumericalFailure;
@@ -404,7 +507,6 @@ TrajectoryTerminationReason Trajectory_Simulator::Propagate_Freely(Event& curren
 			std::cerr << "\nWarning in Propagate_Freely(): RK45 step failed tolerance after retry limits (rank "
 			          << current_mpi_rank << ", traj " << current_trajectory_id
 			          << "). Marking trajectory as numerically failed." << std::endl;
-			current_trajectory_physical_time_sec = In_Units(particle_propagator.Current_Time(), sec);
 			Publish_Snapshot_Progress();
 			current_event = particle_propagator.Event_In_3D();
 			return TrajectoryTerminationReason::NumericalFailure;
@@ -417,7 +519,6 @@ TrajectoryTerminationReason Trajectory_Simulator::Propagate_Freely(Event& curren
 			std::cerr << "\nWarning in Propagate_Freely(): non-finite state (rank " << current_mpi_rank
 			          << ", traj " << current_trajectory_id << ", r=" << r_after
 			          << ", v=" << v_after << ", dt=" << actual_dt << "). Aborting trajectory." << std::endl;
-			current_trajectory_physical_time_sec = In_Units(particle_propagator.Current_Time(), sec);
 			Publish_Snapshot_Progress();
 			current_event = particle_propagator.Event_In_3D();
 			return TrajectoryTerminationReason::NonFiniteState;
@@ -427,7 +528,6 @@ TrajectoryTerminationReason Trajectory_Simulator::Propagate_Freely(Event& curren
 		{
 			std::cerr << "\nWarning in Propagate_Freely(): DM speed exceeds the maximum of v_max = " << v_max << std::endl
 					  << "\tAbort simulation." << std::endl;
-			current_trajectory_physical_time_sec = In_Units(particle_propagator.Current_Time(), sec);
 			Publish_Snapshot_Progress();
 			current_event = particle_propagator.Event_In_3D();
 			return TrajectoryTerminationReason::SpeedLimit;
@@ -444,82 +544,60 @@ TrajectoryTerminationReason Trajectory_Simulator::Propagate_Freely(Event& curren
 				          << current_mpi_rank << ", traj " << current_trajectory_id << ", traj_wall="
 				          << traj_wall << "s > " << max_trajectory_wall_time_sec
 				          << "s). Aborting trajectory." << std::endl;
-				current_trajectory_physical_time_sec = In_Units(particle_propagator.Current_Time(), sec);
 				Publish_Snapshot_Progress();
 				current_event = particle_propagator.Event_In_3D();
 				return TrajectoryTerminationReason::WallTimeLimit;
 			}
 		}
 
-		// --- Online bincount accumulation (every RK45 step) ---
-		double t_now_sec = In_Units(particle_propagator.Current_Time(), sec);
-		if(!terminate_on_capture)
-		{
-			double r_now_km  = In_Units(r_after, km);
-			double v_now_kms = In_Units(v_after, km / sec);
-			double v2_now    = v_now_kms * v_now_kms;
-
-			if(prev_time_sec >= 0.0)
-			{
-				double dt_sec = t_now_sec - prev_time_sec;
-				// Accumulate previous step with forward difference dt
-				Accumulate_Bincount_Step(prev_r_km, prev_v2_km2s2, dt_sec);
-				prev_dt_sec = dt_sec;
-			}
-
-			prev_time_sec = t_now_sec;
-			prev_r_km     = r_now_km;
-			prev_v2_km2s2 = v2_now;
-		}
-
-		bool captured_now = Update_Capture_State(r_after, v_after, particle_propagator.Current_Time(), DM, false);
-
-		current_trajectory_physical_time_sec = t_now_sec;
-		if((time_steps & 0xFFu) == 0u)
-			Publish_Snapshot_Progress();
-
-		if(terminate_on_capture && captured_now)
-		{
-			current_event = particle_propagator.Event_In_3D();
-			return TrajectoryTerminationReason::CaptureMode;
-		}
-
 		// Check for scatterings and reflection
 		bool scattering = false;
 		bool reflection = false;
-		const bool inside_sun_step = (r_before < rSun) || (r_after < rSun);
-		if(inside_sun_step)
+		Event accepted_event = event_after;
+		double interior_start = 0.0;
+		double interior_end = 0.0;
+		if(Solar_Interior_Fraction_Interval(event_before, event_after, r_before, r_after, interior_start, interior_end))
 		{
 			if(r_after < rSun && v_after < 0.0)
 			{
 				std::cerr << "Warning: Negative velocity detected (v = " << v_after << ") at r = " << r_after << ", skipping scattering calculation." << std::endl;
 				break;
 			}
-			double rate_after = (r_after < rSun) ? solar_model.Total_DM_Scattering_Rate(DM, r_after, v_after) : 0.0;
-			if(!std::isfinite(rate_after) || rate_after < 0.0 || !std::isfinite(rate_before) || rate_before < 0.0)
+			Event interior_end_event = Interpolate_Event(event_before, event_after, interior_end);
+			const double rate_start =
+			    (interior_start <= 0.0 && r_before < rSun)
+			    ? rate_before
+			    : 0.0;
+			const double rate_end =
+			    (interior_end >= 1.0 && r_after < rSun)
+			    ? solar_model.Total_DM_Scattering_Rate(DM, r_after, v_after)
+			    : ((interior_end < 1.0) ? 0.0 : solar_model.Total_DM_Scattering_Rate(DM, interior_end_event.Radius(), interior_end_event.Speed()));
+			if(!std::isfinite(rate_start) || rate_start < 0.0 || !std::isfinite(rate_end) || rate_end < 0.0)
 			{
 				std::cerr << "\nWarning in Propagate_Freely(): invalid scattering rate (rank "
 				          << current_mpi_rank << ", traj " << current_trajectory_id
-				          << ", rate_before=" << rate_before << ", rate_after=" << rate_after
+				          << ", rate_start=" << rate_start << ", rate_end=" << rate_end
 				          << "). Marking trajectory as numerically failed." << std::endl;
-				current_trajectory_physical_time_sec = In_Units(particle_propagator.Current_Time(), sec);
 				Publish_Snapshot_Progress();
 				current_event = event_after;
 				return TrajectoryTerminationReason::NumericalFailure;
 			}
-			double delta_tau = 0.5 * (rate_before + rate_after) * actual_dt;
+			const double interior_dt = actual_dt * (interior_end - interior_start);
+			double delta_tau = 0.5 * (rate_start + rate_end) * interior_dt;
 			if(delta_tau >= minus_log_xi)
 			{
-				double fraction = (delta_tau > 0.0) ? minus_log_xi / delta_tau : 1.0;
-				interpolated_scatter_event = Interpolate_Event(event_before, event_after, fraction);
-				scatter_event_interpolated = true;
+				const double local_fraction =
+				    Solve_Linear_Rate_Optical_Depth_Fraction(rate_start, rate_end, interior_dt, minus_log_xi);
+				const double fraction = interior_start + local_fraction * (interior_end - interior_start);
+				accepted_event = Interpolate_Event(event_before, event_after, fraction);
 				scattering = true;
 				outcome = TrajectoryTerminationReason::Scatter;
 			}
 			else
 				minus_log_xi -= delta_tau;
 		}
-		else
+
+		if(!scattering)
 		{
 			if(r_after >= maximum_distance && r_after >= r_before && v_after > solar_model.Local_Escape_Speed(r_after))
 			{
@@ -528,13 +606,18 @@ TrajectoryTerminationReason Trajectory_Simulator::Propagate_Freely(Event& curren
 			}
 		}
 
+		const bool captured_now = commit_accepted_event(accepted_event);
+		current_event = accepted_event;
+		if((time_steps & 0xFFu) == 0u)
+			Publish_Snapshot_Progress();
+		if(terminate_on_capture && captured_now)
+			return TrajectoryTerminationReason::CaptureMode;
+
 		if(reflection || scattering)
 			break;
 
-		current_event = event_after;
 	}
 
-	current_event = scatter_event_interpolated ? interpolated_scatter_event : particle_propagator.Event_In_3D();
 	return outcome;
 }
 
@@ -684,7 +767,6 @@ Trajectory_Result Trajectory_Simulator::Simulate(const Event& initial_condition,
 	current_mpi_rank = mpi_rank;
 	current_trajectory_id++;
 	trajectory_in_progress = true;
-	current_trajectory_physical_time_sec = In_Units(current_event.time, sec);
 	current_trajectory_wall_start = std::chrono::steady_clock::now();
 	accumulated_snapshot_overhead_sec = 0.0;
 	Publish_Snapshot_Progress();

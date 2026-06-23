@@ -2,6 +2,7 @@
 
 #include "gtest/gtest.h"
 #include <cstdio>
+#include <fstream>
 #include <mpi.h>
 #include <string>
 #include <sys/stat.h>
@@ -25,9 +26,15 @@ bool FileExists(const std::string& path)
 
 std::string TestOutputDir(const std::string& name)
 {
-	std::string dir = "build/" + name + "_" + std::to_string(getpid()) + "/";
+	std::string dir = name + "_" + std::to_string(getpid()) + "/";
 	mkdir(dir.c_str(), 0755);
 	return dir;
+}
+
+void TouchFile(const std::string& path)
+{
+	std::ofstream file(path);
+	file << "stale\n";
 }
 }
 
@@ -205,12 +212,20 @@ TEST(TestDataGeneration, TestDefaultOutputContract)
 	int rank = 0;
 	MPI_Comm_rank(MPI_COMM_WORLD, &rank);
 	const std::string output_dir = TestOutputDir("default_output_contract");
+	if(rank == 0)
+	{
+		TouchFile(output_dir + std::string("evaporation_") + "summary.txt");
+		TouchFile(output_dir + std::string("evaporation_") + "mode_summary.txt");
+		TouchFile(output_dir + std::string("evaporation_") + "mode_" + "bincount.txt");
+		TouchFile(output_dir + std::string("computation_") + "time_summary.txt");
+	}
 	data_set.Write_Output_Files(output_dir, DM);
 	if(rank == 0)
 	{
 		EXPECT_TRUE(FileExists(output_dir + "bincount.txt"));
 		EXPECT_TRUE(FileExists(output_dir + "evaporation_times.txt"));
 		EXPECT_FALSE(FileExists(output_dir + "evaporation_diagnostics.txt"));
+		EXPECT_FALSE(FileExists(output_dir + std::string("evaporation_") + "summary.txt"));
 		EXPECT_FALSE(FileExists(output_dir + std::string("evaporation_") + "mode_summary.txt"));
 		EXPECT_FALSE(FileExists(output_dir + std::string("evaporation_") + "mode_" + "bincount.txt"));
 		EXPECT_FALSE(FileExists(output_dir + std::string("computation_") + "time_summary.txt"));

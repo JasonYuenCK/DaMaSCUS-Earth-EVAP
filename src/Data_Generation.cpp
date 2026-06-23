@@ -367,18 +367,6 @@ void Write_Evaporation_Record_List(std::ofstream& file, const std::vector<Evapor
 	}
 }
 
-std::string Format_Physical_Time_Scientific(double physical_time_sec)
-{
-	std::ostringstream stream;
-
-	if(!std::isfinite(physical_time_sec))
-		stream << "nan";
-	else
-		stream << std::uppercase << std::scientific << std::setprecision(3) << physical_time_sec;
-
-	return stream.str();
-}
-
 std::string Join_Path(const std::string& directory, const std::string& name)
 {
 	if(directory.empty() || directory.back() == '/')
@@ -411,9 +399,6 @@ uint64_t Evaporation_Record_Key(int rank, unsigned long int trajectory_id)
 
 struct EvaporationLogState
 {
-	int last_snapshot_index = 0;
-	bool final_block_written = false;
-	uint64_t records_written = 0;
 	std::unordered_set<uint64_t> written_record_keys;
 };
 
@@ -452,8 +437,7 @@ void Recover_Evaporation_Log_State(const std::string& path, EvaporationLogState&
 		if(stream >> rank >> trajectory_id >> lifetime)
 		{
 			const uint64_t key = Evaporation_Record_Key(rank, trajectory_id);
-			if(state.written_record_keys.insert(key).second)
-				state.records_written++;
+			state.written_record_keys.insert(key);
 		}
 	}
 }
@@ -498,7 +482,6 @@ bool Append_Completed_Evaporation_Events(const std::string& path, const std::vec
 			continue;
 		file << rec.rank << "\t" << rec.trajectory_id << "\t" << std::scientific << std::setprecision(10)
 		     << rec.lifetime_unbinding << "\n";
-		state.records_written++;
 	}
 	file.close();
 	return file.good();
@@ -842,6 +825,16 @@ bool Write_Snapshot_Report_File(const std::string& snapshot_root, int snapshot_i
 {
 	Remove_Stale_Snapshot_Evaporation_File(snapshot_root, snapshot_index, interval_seconds);
 
+	if(snapshot_evaporation_log_enabled && evaporation_log_state != NULL)
+	{
+		std::vector<EvaporationRecord> snapshot_records;
+		snapshot_records.reserve(report.new_evaporation_records.size());
+		for(const auto& entry : report.new_evaporation_records)
+			snapshot_records.push_back(Make_Log_Record(entry.rank, entry.entry));
+		if(!Append_Completed_Evaporation_Events(Evaporation_Log_Path_From_Snapshot_Root(snapshot_root), snapshot_records, *evaporation_log_state))
+			return false;
+	}
+
 	if(!Write_Text_File_Atomically(Snapshot_Text_File_Path(snapshot_root, snapshot_index, interval_seconds), snapshot_index, [&](std::ofstream& file)
 	{
 		file << "# snapshot_status = merged\n";
@@ -869,17 +862,6 @@ bool Write_Snapshot_Report_File(const std::string& snapshot_root, int snapshot_i
 	}))
 		return false;
 
-	if(snapshot_evaporation_log_enabled && evaporation_log_state != NULL)
-	{
-		std::vector<EvaporationRecord> snapshot_records;
-		snapshot_records.reserve(report.new_evaporation_records.size());
-		for(const auto& entry : report.new_evaporation_records)
-			snapshot_records.push_back(Make_Log_Record(entry.rank, entry.entry));
-		if(!Append_Completed_Evaporation_Events(Evaporation_Log_Path_From_Snapshot_Root(snapshot_root), snapshot_records, *evaporation_log_state))
-			return false;
-		evaporation_log_state->last_snapshot_index = snapshot_index;
-	}
-
 	return true;
 }
 
@@ -891,6 +873,15 @@ bool Try_Write_Merged_Snapshot(const std::string& snapshot_root, const std::stri
 	const std::string snapshot_text_path = Snapshot_Text_File_Path(snapshot_root, snapshot_index, interval_seconds);
 	if(Snapshot_Text_File_Is_Merged(snapshot_text_path))
 	{
+		if(snapshot_evaporation_log_enabled)
+		{
+			Snapshot_Report_State report;
+			if(Load_Snapshot_Report_State(rank_snapshot_dir, snapshot_index, interval_seconds, mpi_processes, run_id, report))
+			{
+				if(!Write_Snapshot_Report_File(snapshot_root, snapshot_index, interval_seconds, mass_gev, sigma_cm2, report, snapshot_evaporation_log_enabled, evaporation_log_state))
+					return false;
+			}
+		}
 		Cleanup_Snapshot_Checkpoints(rank_snapshot_dir, snapshot_index, interval_seconds, mpi_processes);
 		return true;
 	}
@@ -1138,11 +1129,13 @@ void Simulation_Data::Generate_Data(obscura::DM_Particle& DM, Solar_Model& solar
 					captured_v2dt_sq_hist[b] += trajectory.bincount.v2dt_hist[b] * trajectory.bincount.v2dt_hist[b];
 				}
 
-				// Record every captured trajectory, including right-censored ones.
+				// Full survival records are only needed for diagnostics. The default
+				// output contract stores compact complete events.
 				EvaporationRecord rec;
 				if(Build_Evaporation_Record(trajectory.bincount, mpi_rank, number_of_trajectories, trajectory_completion_wall_time_sec, rec))
 				{
-					evaporation_records.push_back(rec);
+					if(evaporation_diagnostics_enabled || Is_Completed_Evaporation_Record(rec))
+						evaporation_records.push_back(rec);
 				}
 			}
 
@@ -1158,6 +1151,24 @@ void Simulation_Data::Generate_Data(obscura::DM_Particle& DM, Solar_Model& solar
 					not_captured_v2dt_hist[b] += trajectory.bincount.v2dt_hist[b];
 					not_captured_dt_sq_hist[b]   += trajectory.bincount.dt_hist[b] * trajectory.bincount.dt_hist[b];
 					not_captured_v2dt_sq_hist[b] += trajectory.bincount.v2dt_hist[b] * trajectory.bincount.v2dt_hist[b];
+				}
+
+				if(trajectory.Particle_Free())
+					number_of_free_particles++;
+				else if(trajectory.Particle_Reflected())
+				{
+					number_of_reflected_particles++;
+					Hyperbolic_Kepler_Shift(trajectory.final_event, 1.0 * AU);
+					const double v_final = trajectory.final_event.Speed();
+					if(trajectory.number_of_scatterings >= minimum_number_of_scatterings
+					   && v_final > KDE_boundary_correction_factor * minimum_speed_threshold)
+					{
+						const unsigned int isoreflection_ring =
+						    (isoreflection_rings == 1)
+						    ? 0
+						    : trajectory.final_event.Isoreflection_Ring(obscura::Sun_Velocity(), isoreflection_rings);
+						data[isoreflection_ring].push_back(libphysica::DataPoint(v_final));
+					}
 				}
 			}
 
@@ -1418,6 +1429,10 @@ void Simulation_Data::Write_Output_Files(const std::string& output_dir, obscura:
 	std::remove((output_dir + "/captured_bincount.txt").c_str());
 	std::remove((output_dir + "/not_captured_bincount.txt").c_str());
 	std::remove((output_dir + "/evaporation_diagnostics.txt").c_str());
+	std::remove((output_dir + "/evaporation_" + "summary.txt").c_str());
+	std::remove((output_dir + "/evaporation_" + "mode_summary.txt").c_str());
+	std::remove((output_dir + "/evaporation_" + "mode_" + "bincount.txt").c_str());
+	std::remove((output_dir + "/computation_" + "time_summary.txt").c_str());
 
 	// 1. Merged bincount
 	{
