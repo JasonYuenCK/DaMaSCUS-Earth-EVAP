@@ -17,6 +17,7 @@
 #include <sstream>
 #include <sys/stat.h>
 #include <unistd.h>
+#include <utility>
 #include <vector>
 
 #include "libphysica/Natural_Units.hpp"
@@ -32,6 +33,9 @@ using namespace libphysica::natural_units;
 
 namespace
 {
+const int EVAPORATION_BLOCK_FORMAT_VERSION = 1;
+const int SNAPSHOT_RUN_MANIFEST_FORMAT_VERSION = 1;
+
 bool Has_Positive_Evaporation_Time(double t_evap)
 {
 	return std::isfinite(t_evap) && t_evap > 0.0;
@@ -419,12 +423,82 @@ struct EvaporationLogState
 	std::unordered_set<EvaporationRecordKey, EvaporationRecordKeyHash> written_record_keys;
 };
 
+struct EvaporationBlockMetadata
+{
+	uint64_t run_id = 0;
+	int snapshot_index = -1;
+	double snapshot_interval_sec = 0.0;
+	double mass_gev = 0.0;
+	double sigma_cm2 = 0.0;
+};
+
+struct SnapshotRunManifest
+{
+	uint64_t run_id = 0;
+	double snapshot_interval_sec = 0.0;
+	double mass_gev = 0.0;
+	double sigma_cm2 = 0.0;
+};
+
 bool File_Is_Empty_Or_Missing(const std::string& path)
 {
 	struct stat info;
 	if(stat(path.c_str(), &info) != 0)
 		return true;
 	return info.st_size == 0;
+}
+
+std::string Trim_Copy(const std::string& text)
+{
+	const std::string whitespace = " \t\r\n";
+	const size_t begin = text.find_first_not_of(whitespace);
+	if(begin == std::string::npos)
+		return "";
+	const size_t end = text.find_last_not_of(whitespace);
+	return text.substr(begin, end - begin + 1);
+}
+
+bool Parse_Metadata_Line(const std::string& line, std::string& key, std::string& value)
+{
+	if(line.empty() || line[0] != '#')
+		return false;
+	const size_t equals = line.find('=');
+	if(equals == std::string::npos)
+		return false;
+	key = Trim_Copy(line.substr(1, equals - 1));
+	value = Trim_Copy(line.substr(equals + 1));
+	return !key.empty();
+}
+
+bool Parse_Metadata_Int(const std::string& text, int& value)
+{
+	std::istringstream stream(text);
+	stream >> value;
+	return !stream.fail();
+}
+
+bool Parse_Metadata_UInt64(const std::string& text, uint64_t& value)
+{
+	unsigned long long parsed = 0;
+	std::istringstream stream(text);
+	stream >> parsed;
+	if(stream.fail())
+		return false;
+	value = static_cast<uint64_t>(parsed);
+	return true;
+}
+
+bool Parse_Metadata_Double(const std::string& text, double& value)
+{
+	std::istringstream stream(text);
+	stream >> value;
+	return !stream.fail();
+}
+
+bool Metadata_Double_Matches(double lhs, double rhs)
+{
+	const double scale = std::max(1.0, std::max(std::fabs(lhs), std::fabs(rhs)));
+	return std::fabs(lhs - rhs) <= 1.0e-10 * scale;
 }
 
 void Write_Evaporation_Log_File_Header(std::ofstream& file, double mass_gev, double sigma_cm2)
@@ -440,6 +514,32 @@ void Write_Evaporation_Log_Event(std::ostream& file, const CompactEvaporationEve
 {
 	file << event.rank << "\t" << event.trajectory_id << "\t" << std::scientific << std::setprecision(10)
 	     << event.lifetime_unbinding << "\n";
+}
+
+void Write_Evaporation_Block_Header(std::ostream& file, uint64_t run_id, int snapshot_index, double snapshot_interval_sec, double mass_gev, double sigma_cm2)
+{
+	file << "# format_version = " << EVAPORATION_BLOCK_FORMAT_VERSION << "\n";
+	file << "# run_id = " << run_id << "\n";
+	file << "# snapshot_index = " << snapshot_index << "\n";
+	file << "# snapshot_interval_sec = " << std::scientific << std::setprecision(17) << snapshot_interval_sec << "\n";
+	file << "# DM_mass_GeV = " << std::scientific << std::setprecision(17) << mass_gev << "\n";
+	file << "# DM_sigma_cm2 = " << std::scientific << std::setprecision(17) << sigma_cm2 << "\n";
+	file << "# rank trajectory_id lifetime_unbinding_sec\n";
+}
+
+bool Parse_Evaporation_Log_Event_Line(const std::string& line, CompactEvaporationEvent& event)
+{
+	std::istringstream stream(line);
+	int rank = -1;
+	uint64_t trajectory_id = 0;
+	double lifetime = -1.0;
+	if(!(stream >> rank >> trajectory_id >> lifetime))
+		return false;
+	event.rank = rank;
+	event.trajectory_id = trajectory_id;
+	event.completion_wall_time_sec = 0.0;
+	event.lifetime_unbinding = lifetime;
+	return true;
 }
 
 bool Evaporation_Event_Order(const CompactEvaporationEvent& lhs, const CompactEvaporationEvent& rhs)
@@ -471,16 +571,98 @@ void Recover_Evaporation_Log_State(const std::string& path, EvaporationLogState&
 	{
 		if(line.empty() || line[0] == '#')
 			continue;
-		std::istringstream stream(line);
-		int rank = -1;
-		uint64_t trajectory_id = 0;
-		double lifetime = 0.0;
-		if(stream >> rank >> trajectory_id >> lifetime)
+		CompactEvaporationEvent event;
+		if(Parse_Evaporation_Log_Event_Line(line, event))
 		{
-			const EvaporationRecordKey key = Make_Evaporation_Record_Key(rank, trajectory_id);
+			const EvaporationRecordKey key = Make_Evaporation_Record_Key(event.rank, event.trajectory_id);
 			state.written_record_keys.insert(key);
 		}
 	}
+}
+
+bool Read_Evaporation_Block_Metadata(const std::string& path, EvaporationBlockMetadata& metadata)
+{
+	std::ifstream file(path);
+	if(!file.is_open())
+		return false;
+
+	int format_version = 0;
+	bool has_format_version = false;
+	bool has_run_id = false;
+	bool has_snapshot_index = false;
+	bool has_snapshot_interval = false;
+	bool has_mass = false;
+	bool has_sigma = false;
+
+	std::string line;
+	while(std::getline(file, line))
+	{
+		if(line.empty())
+			continue;
+		if(line[0] != '#')
+			break;
+
+		std::string key;
+		std::string value;
+		if(!Parse_Metadata_Line(line, key, value))
+			continue;
+
+		if(key == "format_version")
+			has_format_version = Parse_Metadata_Int(value, format_version);
+		else if(key == "run_id")
+			has_run_id = Parse_Metadata_UInt64(value, metadata.run_id);
+		else if(key == "snapshot_index")
+			has_snapshot_index = Parse_Metadata_Int(value, metadata.snapshot_index);
+		else if(key == "snapshot_interval_sec")
+			has_snapshot_interval = Parse_Metadata_Double(value, metadata.snapshot_interval_sec);
+		else if(key == "DM_mass_GeV")
+			has_mass = Parse_Metadata_Double(value, metadata.mass_gev);
+		else if(key == "DM_sigma_cm2")
+			has_sigma = Parse_Metadata_Double(value, metadata.sigma_cm2);
+	}
+
+	return has_format_version
+	    && format_version == EVAPORATION_BLOCK_FORMAT_VERSION
+	    && has_run_id
+	    && has_snapshot_index
+	    && has_snapshot_interval
+	    && has_mass
+	    && has_sigma;
+}
+
+bool Evaporation_Block_Metadata_Matches(const std::string& path, uint64_t expected_run_id, int expected_snapshot_index, double expected_snapshot_interval_sec, double expected_mass_gev, double expected_sigma_cm2)
+{
+	EvaporationBlockMetadata metadata;
+	if(!Read_Evaporation_Block_Metadata(path, metadata))
+		return false;
+
+	return metadata.run_id == expected_run_id
+	    && metadata.snapshot_index == expected_snapshot_index
+	    && Metadata_Double_Matches(metadata.snapshot_interval_sec, expected_snapshot_interval_sec)
+	    && Metadata_Double_Matches(metadata.mass_gev, expected_mass_gev)
+	    && Metadata_Double_Matches(metadata.sigma_cm2, expected_sigma_cm2);
+}
+
+bool Read_Evaporation_Block_Events(const std::string& path, std::vector<CompactEvaporationEvent>& events, EvaporationLogState& state)
+{
+	std::ifstream file(path);
+	if(!file.is_open())
+		return false;
+
+	std::string line;
+	while(std::getline(file, line))
+	{
+		if(line.empty() || line[0] == '#')
+			continue;
+		CompactEvaporationEvent event;
+		if(!Parse_Evaporation_Log_Event_Line(line, event) || !Is_Completed_Evaporation_Event(event))
+			continue;
+		const EvaporationRecordKey key = Make_Evaporation_Record_Key(event.rank, event.trajectory_id);
+		if(state.written_record_keys.insert(key).second)
+			events.push_back(event);
+	}
+
+	return true;
 }
 
 bool Write_Final_Evaporation_Time_File(const std::string& path, double mass_gev, double sigma_cm2, const std::vector<CompactEvaporationEvent>& events)
@@ -571,11 +753,17 @@ bool Clear_Directory_Contents(const std::string& directory)
 	return success;
 }
 
-void Ensure_Directory_Exists(const std::string& directory)
+bool Ensure_Directory_Exists(const std::string& directory)
 {
 	struct stat info;
 	if(stat(directory.c_str(), &info) != 0)
-		mkdir(directory.c_str(), 0755);
+	{
+		if(mkdir(directory.c_str(), 0755) != 0 && errno != EEXIST)
+			return false;
+		if(stat(directory.c_str(), &info) != 0)
+			return false;
+	}
+	return S_ISDIR(info.st_mode);
 }
 
 long long Snapshot_Time_Label_Seconds(int snapshot_index, double interval_seconds)
@@ -605,19 +793,176 @@ std::string Snapshot_Evaporation_Block_Dir_From_Output_Dir(const std::string& ou
 	return Snapshot_Evaporation_Block_Dir(Join_Path(output_dir, "snapshot"));
 }
 
+std::string Snapshot_Run_Manifest_Path(const std::string& snapshot_root)
+{
+	return Join_Path(snapshot_root, "run_manifest.txt");
+}
+
+std::string Evaporation_Partial_Log_Path_From_Output_Dir(const std::string& output_dir)
+{
+	return Join_Path(output_dir, "evaporation_times.partial.txt");
+}
+
+bool Is_Evaporation_Block_File_Name(const std::string& name)
+{
+	return name.size() > 10
+	    && name.compare(0, 6, "block_") == 0
+	    && name.compare(name.size() - 4, 4, ".txt") == 0;
+}
+
+struct EvaporationBlockFile
+{
+	int snapshot_index = -1;
+	std::string path;
+};
+
+bool List_Evaporation_Block_Files(const std::string& snapshot_root, std::vector<EvaporationBlockFile>& block_files)
+{
+	block_files.clear();
+	const std::string block_dir = Snapshot_Evaporation_Block_Dir(snapshot_root);
+	DIR* dir = opendir(block_dir.c_str());
+	if(dir == NULL)
+		return errno == ENOENT;
+
+	bool success = true;
+	struct dirent* entry = NULL;
+	while((entry = readdir(dir)) != NULL)
+	{
+		const std::string name = entry->d_name;
+		if(!Is_Evaporation_Block_File_Name(name))
+			continue;
+
+		const std::string path = Join_Path(block_dir, name);
+		EvaporationBlockMetadata metadata;
+		if(!Read_Evaporation_Block_Metadata(path, metadata))
+		{
+			success = false;
+			continue;
+		}
+
+		EvaporationBlockFile block_file;
+		block_file.snapshot_index = metadata.snapshot_index;
+		block_file.path = path;
+		block_files.push_back(block_file);
+	}
+	closedir(dir);
+
+	std::sort(block_files.begin(), block_files.end(), [](const EvaporationBlockFile& lhs, const EvaporationBlockFile& rhs)
+	{
+		return lhs.snapshot_index < rhs.snapshot_index;
+	});
+
+	return success;
+}
+
+bool Snapshot_Evaporation_Block_Dir_Has_Blocks(const std::string& snapshot_root)
+{
+	const std::string block_dir = Snapshot_Evaporation_Block_Dir(snapshot_root);
+	DIR* dir = opendir(block_dir.c_str());
+	if(dir == NULL)
+		return false;
+
+	bool has_blocks = false;
+	struct dirent* entry = NULL;
+	while((entry = readdir(dir)) != NULL)
+	{
+		if(Is_Evaporation_Block_File_Name(entry->d_name))
+		{
+			has_blocks = true;
+			break;
+		}
+	}
+	closedir(dir);
+	return has_blocks;
+}
+
+bool Write_Snapshot_Run_Manifest(const std::string& snapshot_root, uint64_t run_id, double snapshot_interval_sec, double mass_gev, double sigma_cm2)
+{
+	const std::string path = Snapshot_Run_Manifest_Path(snapshot_root);
+	const std::string tmp_path = path + ".tmp." + std::to_string(getpid());
+	std::ofstream file(tmp_path, std::ios::out | std::ios::trunc);
+	if(!file.is_open())
+		return false;
+
+	file << "# format_version = " << SNAPSHOT_RUN_MANIFEST_FORMAT_VERSION << "\n";
+	file << "# run_id = " << run_id << "\n";
+	file << "# snapshot_interval_sec = " << std::scientific << std::setprecision(17) << snapshot_interval_sec << "\n";
+	file << "# DM_mass_GeV = " << std::scientific << std::setprecision(17) << mass_gev << "\n";
+	file << "# DM_sigma_cm2 = " << std::scientific << std::setprecision(17) << sigma_cm2 << "\n";
+	file.close();
+
+	if(!file.good())
+	{
+		std::remove(tmp_path.c_str());
+		return false;
+	}
+	if(std::rename(tmp_path.c_str(), path.c_str()) != 0)
+	{
+		std::remove(tmp_path.c_str());
+		return false;
+	}
+	return true;
+}
+
+bool Read_Snapshot_Run_Manifest(const std::string& snapshot_root, SnapshotRunManifest& manifest)
+{
+	std::ifstream file(Snapshot_Run_Manifest_Path(snapshot_root));
+	if(!file.is_open())
+		return false;
+
+	int format_version = 0;
+	bool has_format_version = false;
+	bool has_run_id = false;
+	bool has_snapshot_interval = false;
+	bool has_mass = false;
+	bool has_sigma = false;
+
+	std::string line;
+	while(std::getline(file, line))
+	{
+		std::string key;
+		std::string value;
+		if(!Parse_Metadata_Line(line, key, value))
+			continue;
+
+		if(key == "format_version")
+			has_format_version = Parse_Metadata_Int(value, format_version);
+		else if(key == "run_id")
+			has_run_id = Parse_Metadata_UInt64(value, manifest.run_id);
+		else if(key == "snapshot_interval_sec")
+			has_snapshot_interval = Parse_Metadata_Double(value, manifest.snapshot_interval_sec);
+		else if(key == "DM_mass_GeV")
+			has_mass = Parse_Metadata_Double(value, manifest.mass_gev);
+		else if(key == "DM_sigma_cm2")
+			has_sigma = Parse_Metadata_Double(value, manifest.sigma_cm2);
+	}
+
+	return has_format_version
+	    && format_version == SNAPSHOT_RUN_MANIFEST_FORMAT_VERSION
+	    && has_run_id
+	    && has_snapshot_interval
+	    && has_mass
+	    && has_sigma;
+}
+
 void Remove_Stale_Snapshot_Evaporation_Block(const std::string& snapshot_root, int snapshot_index)
 {
 	std::string path = Snapshot_Evaporation_Block_Path(snapshot_root, snapshot_index);
 	std::remove(path.c_str());
 }
 
-bool Write_Evaporation_Block_File(const std::string& snapshot_root, int snapshot_index, const std::vector<CompactEvaporationEvent>& events, EvaporationLogState& state)
+bool Write_Evaporation_Block_File(const std::string& snapshot_root, int snapshot_index, double snapshot_interval_sec, uint64_t run_id, double mass_gev, double sigma_cm2, const std::vector<CompactEvaporationEvent>& events, EvaporationLogState& state)
 {
 	const std::string path = Snapshot_Evaporation_Block_Path(snapshot_root, snapshot_index);
 	if(!File_Is_Empty_Or_Missing(path))
 	{
-		Recover_Evaporation_Log_State(path, state);
-		return true;
+		if(Evaporation_Block_Metadata_Matches(path, run_id, snapshot_index, snapshot_interval_sec, mass_gev, sigma_cm2))
+		{
+			Recover_Evaporation_Log_State(path, state);
+			return true;
+		}
+		if(std::remove(path.c_str()) != 0 && errno != ENOENT)
+			return false;
 	}
 
 	std::vector<CompactEvaporationEvent> sorted_events = events;
@@ -646,6 +991,7 @@ bool Write_Evaporation_Block_File(const std::string& snapshot_root, int snapshot
 		std::ofstream file(tmp_path, std::ios::out | std::ios::trunc);
 		if(!file.is_open())
 			return false;
+		Write_Evaporation_Block_Header(file, run_id, snapshot_index, snapshot_interval_sec, mass_gev, sigma_cm2);
 		for(const auto& event : pending_events)
 			Write_Evaporation_Log_Event(file, event);
 		file.close();
@@ -911,7 +1257,7 @@ bool Load_Snapshot_Report_State(const std::string& rank_snapshot_dir, int snapsh
 	return all_ranks_ready;
 }
 
-bool Write_Snapshot_Report_File(const std::string& snapshot_root, int snapshot_index, double interval_seconds, double mass_gev, double sigma_cm2, const Snapshot_Report_State& report, bool snapshot_evaporation_log_enabled, EvaporationLogState* evaporation_log_state)
+bool Write_Snapshot_Report_File(const std::string& snapshot_root, int snapshot_index, double interval_seconds, uint64_t run_id, double mass_gev, double sigma_cm2, const Snapshot_Report_State& report, bool snapshot_evaporation_log_enabled, EvaporationLogState* evaporation_log_state)
 {
 	if(snapshot_evaporation_log_enabled && evaporation_log_state != NULL)
 	{
@@ -919,7 +1265,7 @@ bool Write_Snapshot_Report_File(const std::string& snapshot_root, int snapshot_i
 		snapshot_events.reserve(report.new_evaporation_events.size());
 		for(const auto& entry : report.new_evaporation_events)
 			snapshot_events.push_back(Make_Log_Event(entry.rank, entry.entry));
-		if(!Write_Evaporation_Block_File(snapshot_root, snapshot_index, snapshot_events, *evaporation_log_state))
+		if(!Write_Evaporation_Block_File(snapshot_root, snapshot_index, interval_seconds, run_id, mass_gev, sigma_cm2, snapshot_events, *evaporation_log_state))
 			return false;
 	}
 
@@ -966,7 +1312,7 @@ bool Try_Write_Merged_Snapshot(const std::string& snapshot_root, const std::stri
 			Snapshot_Report_State report;
 			if(Load_Snapshot_Report_State(rank_snapshot_dir, snapshot_index, interval_seconds, mpi_processes, run_id, report))
 			{
-				if(!Write_Snapshot_Report_File(snapshot_root, snapshot_index, interval_seconds, mass_gev, sigma_cm2, report, snapshot_evaporation_log_enabled, evaporation_log_state))
+				if(!Write_Snapshot_Report_File(snapshot_root, snapshot_index, interval_seconds, run_id, mass_gev, sigma_cm2, report, snapshot_evaporation_log_enabled, evaporation_log_state))
 					return false;
 			}
 		}
@@ -978,7 +1324,7 @@ bool Try_Write_Merged_Snapshot(const std::string& snapshot_root, const std::stri
 	if(!Load_Snapshot_Report_State(rank_snapshot_dir, snapshot_index, interval_seconds, mpi_processes, run_id, report))
 		return false;
 
-	if(!Write_Snapshot_Report_File(snapshot_root, snapshot_index, interval_seconds, mass_gev, sigma_cm2, report, snapshot_evaporation_log_enabled, evaporation_log_state))
+	if(!Write_Snapshot_Report_File(snapshot_root, snapshot_index, interval_seconds, run_id, mass_gev, sigma_cm2, report, snapshot_evaporation_log_enabled, evaporation_log_state))
 		return false;
 
 	Cleanup_Snapshot_Checkpoints(rank_snapshot_dir, snapshot_index, interval_seconds, mpi_processes);
@@ -996,6 +1342,36 @@ void Build_MPI_Gatherv_Layout(const std::vector<int>& item_counts, int fields_pe
 	}
 	total_items = std::accumulate(item_counts.begin(), item_counts.end(), 0);
 }
+}
+
+bool Recover_Evaporation_Time_File_From_Blocks(const std::string& snapshot_root, const std::string& output_path, uint64_t expected_run_id, double mass_gev, double sigma_cm2)
+{
+	std::vector<EvaporationBlockFile> block_files;
+	if(!List_Evaporation_Block_Files(snapshot_root, block_files))
+		return false;
+
+	std::vector<CompactEvaporationEvent> recovered_events;
+	EvaporationLogState recovered_state;
+	bool found_matching_block = false;
+	for(const auto& block_file : block_files)
+	{
+		EvaporationBlockMetadata metadata;
+		if(!Read_Evaporation_Block_Metadata(block_file.path, metadata))
+			return false;
+		if(metadata.run_id != expected_run_id)
+			continue;
+		if(!Metadata_Double_Matches(metadata.mass_gev, mass_gev) || !Metadata_Double_Matches(metadata.sigma_cm2, sigma_cm2))
+			continue;
+
+		found_matching_block = true;
+		if(!Read_Evaporation_Block_Events(block_file.path, recovered_events, recovered_state))
+			return false;
+	}
+
+	if(!found_matching_block)
+		return false;
+
+	return Write_Final_Evaporation_Time_File(output_path, mass_gev, sigma_cm2, recovered_events);
 }
 
 Simulation_Data::Simulation_Data(unsigned int sample_size, unsigned int max_trajectories, double u_min, unsigned int iso_rings)
@@ -1079,24 +1455,77 @@ void Simulation_Data::Generate_Data(obscura::DM_Particle& DM, Solar_Model& solar
 	{
 		snapshot_root = output_root + "snapshot/";
 		rank_snapshot_dir = snapshot_root + "rank_snapshot/";
-		Ensure_Directory_Exists(output_root);
+		int snapshot_init_ok = 1;
 		if(mpi_rank == 0)
 		{
-			Ensure_Directory_Exists(snapshot_root);
-			Clear_Directory_Contents(snapshot_root);
-			Ensure_Directory_Exists(snapshot_root);
-			Ensure_Directory_Exists(rank_snapshot_dir);
-			if(snapshot_evaporation_log_enabled)
-				Ensure_Directory_Exists(Snapshot_Evaporation_Block_Dir(snapshot_root));
+			if(!Ensure_Directory_Exists(output_root))
+				snapshot_init_ok = 0;
+
+			if(snapshot_init_ok && snapshot_evaporation_log_enabled && Snapshot_Evaporation_Block_Dir_Has_Blocks(snapshot_root))
+			{
+				SnapshotRunManifest previous_manifest;
+				const std::string partial_path = Evaporation_Partial_Log_Path_From_Output_Dir(output_root);
+				if(Read_Snapshot_Run_Manifest(snapshot_root, previous_manifest))
+				{
+					if(!Recover_Evaporation_Time_File_From_Blocks(snapshot_root, partial_path, previous_manifest.run_id, previous_manifest.mass_gev, previous_manifest.sigma_cm2))
+					{
+						std::cerr << "Warning in Generate_Data(): failed to recover previous snapshot evaporation blocks; snapshot initialization disabled to preserve existing blocks." << std::endl;
+						snapshot_init_ok = 0;
+					}
+				}
+				else
+				{
+					std::cerr << "Warning in Generate_Data(): found previous snapshot evaporation blocks without a valid run_manifest.txt; snapshot initialization disabled to preserve existing blocks." << std::endl;
+					snapshot_init_ok = 0;
+				}
+			}
+
+			if(snapshot_init_ok
+			   && (!Ensure_Directory_Exists(snapshot_root)
+			       || !Clear_Directory_Contents(snapshot_root)
+			       || !Ensure_Directory_Exists(snapshot_root)
+			       || !Ensure_Directory_Exists(rank_snapshot_dir)))
+			{
+				std::cerr << "Warning in Generate_Data(): failed to initialize snapshot directory; snapshots disabled for this run." << std::endl;
+				snapshot_init_ok = 0;
+			}
+
+			if(snapshot_init_ok)
+			{
+				snapshot_run_id = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::system_clock::now().time_since_epoch()).count());
+				if(snapshot_evaporation_log_enabled
+				   && (!Ensure_Directory_Exists(Snapshot_Evaporation_Block_Dir(snapshot_root))
+				       || !Write_Snapshot_Run_Manifest(snapshot_root, snapshot_run_id, snapshot_interval, snapshot_mass_gev, snapshot_sigma_cm2)))
+				{
+					std::cerr << "Warning in Generate_Data(): failed to initialize snapshot evaporation block metadata; snapshots disabled for this run." << std::endl;
+					snapshot_init_ok = 0;
+				}
+			}
 		}
-		MPI_Barrier(MPI_COMM_WORLD);
-		Ensure_Directory_Exists(snapshot_root);
-		Ensure_Directory_Exists(rank_snapshot_dir);
-		if(snapshot_evaporation_log_enabled)
-			Ensure_Directory_Exists(Snapshot_Evaporation_Block_Dir(snapshot_root));
-		if(mpi_rank == 0)
-			snapshot_run_id = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::system_clock::now().time_since_epoch()).count());
-		MPI_Bcast(&snapshot_run_id, 1, MPI_UNSIGNED_LONG_LONG, 0, MPI_COMM_WORLD);
+		MPI_Bcast(&snapshot_init_ok, 1, MPI_INT, 0, MPI_COMM_WORLD);
+		if(!snapshot_init_ok)
+		{
+			snapshot_cfg.enabled = false;
+			snapshot_evaporation_log_enabled = false;
+		}
+		else
+		{
+			MPI_Barrier(MPI_COMM_WORLD);
+			int rank_snapshot_dirs_ok =
+			    (Ensure_Directory_Exists(snapshot_root)
+			     && Ensure_Directory_Exists(rank_snapshot_dir)
+			     && (!snapshot_evaporation_log_enabled || Ensure_Directory_Exists(Snapshot_Evaporation_Block_Dir(snapshot_root)))) ? 1 : 0;
+			MPI_Allreduce(MPI_IN_PLACE, &rank_snapshot_dirs_ok, 1, MPI_INT, MPI_MIN, MPI_COMM_WORLD);
+			if(!rank_snapshot_dirs_ok)
+			{
+				if(mpi_rank == 0)
+					std::cerr << "Warning in Generate_Data(): failed to initialize rank snapshot directories; snapshots disabled for this run." << std::endl;
+				snapshot_cfg.enabled = false;
+				snapshot_evaporation_log_enabled = false;
+			}
+			else
+				MPI_Bcast(&snapshot_run_id, 1, MPI_UNSIGNED_LONG_LONG, 0, MPI_COMM_WORLD);
+		}
 	}
 
 	auto elapsed_since_start = [&]()
@@ -1611,6 +2040,8 @@ void Simulation_Data::Write_Output_Files(const std::string& output_dir, obscura:
 		std::cerr << "Warning in Write_Output_Files(): failed to write evaporation_times.txt" << std::endl;
 	else if(!Remove_Path_Recursive(Snapshot_Evaporation_Block_Dir_From_Output_Dir(output_dir)))
 		std::cerr << "Warning in Write_Output_Files(): failed to remove snapshot evaporation block files" << std::endl;
+	else
+		std::remove(Evaporation_Partial_Log_Path_From_Output_Dir(output_dir).c_str());
 
 
 }

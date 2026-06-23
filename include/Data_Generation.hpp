@@ -53,6 +53,8 @@ struct CompactEvaporationEvent
 	double lifetime_unbinding = -1.0;
 };
 
+bool Recover_Evaporation_Time_File_From_Blocks(const std::string& snapshot_root, const std::string& output_path, uint64_t expected_run_id, double mass_gev, double sigma_cm2);
+
 class Simulation_Data
 {
   private:

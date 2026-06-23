@@ -2,11 +2,15 @@
 
 #include "gtest/gtest.h"
 #include <cstdio>
+#include <cstdint>
 #include <fstream>
+#include <iomanip>
 #include <mpi.h>
+#include <sstream>
 #include <string>
 #include <sys/stat.h>
 #include <unistd.h>
+#include <vector>
 
 #include "libphysica/Natural_Units.hpp"
 
@@ -35,6 +39,58 @@ void TouchFile(const std::string& path)
 {
 	std::ofstream file(path);
 	file << "stale\n";
+}
+
+struct TestEvaporationRow
+{
+	int rank = -1;
+	uint64_t trajectory_id = 0;
+	double lifetime_unbinding = -1.0;
+};
+
+TestEvaporationRow MakeTestEvaporationRow(int rank, uint64_t trajectory_id, double lifetime_unbinding)
+{
+	TestEvaporationRow row;
+	row.rank = rank;
+	row.trajectory_id = trajectory_id;
+	row.lifetime_unbinding = lifetime_unbinding;
+	return row;
+}
+
+void EnsureDir(const std::string& path)
+{
+	mkdir(path.c_str(), 0755);
+}
+
+void WriteTestEvaporationBlock(const std::string& path, uint64_t run_id, int snapshot_index, double interval, double mass_gev, double sigma_cm2, const std::vector<TestEvaporationRow>& rows)
+{
+	std::ofstream file(path);
+	file << "# format_version = 1\n";
+	file << "# run_id = " << run_id << "\n";
+	file << "# snapshot_index = " << snapshot_index << "\n";
+	file << "# snapshot_interval_sec = " << std::scientific << std::setprecision(17) << interval << "\n";
+	file << "# DM_mass_GeV = " << std::scientific << std::setprecision(17) << mass_gev << "\n";
+	file << "# DM_sigma_cm2 = " << std::scientific << std::setprecision(17) << sigma_cm2 << "\n";
+	file << "# rank trajectory_id lifetime_unbinding_sec\n";
+	for(const auto& row : rows)
+		file << row.rank << "\t" << row.trajectory_id << "\t" << std::scientific << std::setprecision(10) << row.lifetime_unbinding << "\n";
+}
+
+std::vector<TestEvaporationRow> ReadRecoveredRows(const std::string& path)
+{
+	std::vector<TestEvaporationRow> rows;
+	std::ifstream file(path);
+	std::string line;
+	while(std::getline(file, line))
+	{
+		if(line.empty() || line[0] == '#')
+			continue;
+		std::istringstream stream(line);
+		TestEvaporationRow row;
+		if(stream >> row.rank >> row.trajectory_id >> row.lifetime_unbinding)
+			rows.push_back(row);
+	}
+	return rows;
 }
 }
 
@@ -68,6 +124,83 @@ TEST(TestDataGeneration, TestCompactEvaporationEventStaysCompact)
 {
 	EXPECT_LT(sizeof(CompactEvaporationEvent), sizeof(EvaporationRecord) / 2);
 	EXPECT_LE(sizeof(CompactEvaporationEvent), static_cast<size_t>(40));
+}
+
+TEST(TestDataGeneration, TestRecoverEvaporationTimeFileFromBlocksFiltersRunAndDeduplicates)
+{
+	int rank = 0;
+	MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+	if(rank != 0)
+		return;
+
+	const uint64_t run_id = 123456789ULL;
+	const double mass_gev = 1.25;
+	const double sigma_cm2 = 2.5e-36;
+	const double interval = 30.0;
+	const std::string output_dir = TestOutputDir("recover_evaporation_blocks");
+	const std::string snapshot_root = output_dir + "snapshot/";
+	const std::string block_dir = snapshot_root + "evaporation_blocks/";
+	EnsureDir(snapshot_root);
+	EnsureDir(block_dir);
+
+	std::vector<TestEvaporationRow> block_1_rows;
+	block_1_rows.push_back(MakeTestEvaporationRow(1, 5, 99.0));
+	block_1_rows.push_back(MakeTestEvaporationRow(2, 4, 30.0));
+	WriteTestEvaporationBlock(block_dir + "block_000001.txt", run_id, 1, interval, mass_gev, sigma_cm2, block_1_rows);
+
+	std::vector<TestEvaporationRow> block_2_rows;
+	block_2_rows.push_back(MakeTestEvaporationRow(1, 5, 20.0));
+	block_2_rows.push_back(MakeTestEvaporationRow(0, 3, 10.0));
+	WriteTestEvaporationBlock(block_dir + "block_000002.txt", run_id, 2, interval, mass_gev, sigma_cm2, block_2_rows);
+
+	std::vector<TestEvaporationRow> wrong_run_rows;
+	wrong_run_rows.push_back(MakeTestEvaporationRow(9, 9, 9.0));
+	WriteTestEvaporationBlock(block_dir + "block_000003.txt", run_id + 1, 3, interval, mass_gev, sigma_cm2, wrong_run_rows);
+
+	const std::string output_path = output_dir + "evaporation_times.partial.txt";
+	ASSERT_TRUE(Recover_Evaporation_Time_File_From_Blocks(snapshot_root, output_path, run_id, mass_gev, sigma_cm2));
+
+	const std::vector<TestEvaporationRow> rows = ReadRecoveredRows(output_path);
+	ASSERT_EQ(static_cast<size_t>(3), rows.size());
+	EXPECT_EQ(0, rows[0].rank);
+	EXPECT_EQ(static_cast<uint64_t>(3), rows[0].trajectory_id);
+	EXPECT_DOUBLE_EQ(10.0, rows[0].lifetime_unbinding);
+	EXPECT_EQ(1, rows[1].rank);
+	EXPECT_EQ(static_cast<uint64_t>(5), rows[1].trajectory_id);
+	EXPECT_DOUBLE_EQ(99.0, rows[1].lifetime_unbinding);
+	EXPECT_EQ(2, rows[2].rank);
+	EXPECT_EQ(static_cast<uint64_t>(4), rows[2].trajectory_id);
+	EXPECT_DOUBLE_EQ(30.0, rows[2].lifetime_unbinding);
+}
+
+TEST(TestDataGeneration, TestRecoverEvaporationTimeFileFromBlocksRejectsWrongRun)
+{
+	int rank = 0;
+	MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+	if(rank != 0)
+		return;
+
+	const uint64_t run_id = 77ULL;
+	const double mass_gev = 1.0;
+	const double sigma_cm2 = 1.0e-37;
+	const std::string output_dir = TestOutputDir("recover_wrong_run");
+	const std::string snapshot_root = output_dir + "snapshot/";
+	const std::string block_dir = snapshot_root + "evaporation_blocks/";
+	EnsureDir(snapshot_root);
+	EnsureDir(block_dir);
+
+	std::vector<TestEvaporationRow> block_rows;
+	block_rows.push_back(MakeTestEvaporationRow(0, 1, 5.0));
+	WriteTestEvaporationBlock(block_dir + "block_000001.txt", run_id, 1, 60.0, mass_gev, sigma_cm2, block_rows);
+
+	const std::string output_path = output_dir + "evaporation_times.partial.txt";
+	TouchFile(output_path);
+	EXPECT_FALSE(Recover_Evaporation_Time_File_From_Blocks(snapshot_root, output_path, run_id + 1, mass_gev, sigma_cm2));
+
+	std::ifstream file(output_path);
+	std::string first_line;
+	std::getline(file, first_line);
+	EXPECT_EQ("stale", first_line);
 }
 
 TEST(TestDataGeneration, TestGenerateData)
