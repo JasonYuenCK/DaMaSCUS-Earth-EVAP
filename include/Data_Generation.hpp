@@ -4,6 +4,7 @@
 #include <vector>
 #include <string>
 #include <array>
+#include <cstdint>
 
 #include "libphysica/Natural_Units.hpp"
 #include "libphysica/Statistics.hpp"
@@ -44,6 +45,14 @@ struct EvaporationRecord
 	unsigned long int number_of_scatterings = 0;
 };
 
+struct CompactEvaporationEvent
+{
+	int rank = -1;
+	uint64_t trajectory_id = 0;
+	double completion_wall_time_sec = 0.0;
+	double lifetime_unbinding = -1.0;
+};
+
 class Simulation_Data
 {
   private:
@@ -81,6 +90,7 @@ class Simulation_Data
 
 	// Evaporation records
 	std::vector<EvaporationRecord> evaporation_records;
+	std::vector<CompactEvaporationEvent> compact_evaporation_events;
 	bool evaporation_diagnostics_enabled = false;
 	bool snapshot_evaporation_log_enabled = false;
 

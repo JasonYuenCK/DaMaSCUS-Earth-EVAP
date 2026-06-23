@@ -49,6 +49,11 @@ bool Is_Completed_Evaporation_Record(const EvaporationRecord& rec)
 	    && rec.lifetime_unbinding >= 0.0;
 }
 
+bool Is_Completed_Evaporation_Event(const CompactEvaporationEvent& event)
+{
+	return std::isfinite(event.lifetime_unbinding) && event.lifetime_unbinding >= 0.0;
+}
+
 const char* TerminationReason_Name(TrajectoryTerminationReason reason)
 {
 	switch(reason)
@@ -126,13 +131,23 @@ bool Build_Evaporation_Record(const TrajectoryBincount& bincount, int mpi_rank, 
 	return true;
 }
 
+bool Make_Compact_Evaporation_Event(const EvaporationRecord& rec, CompactEvaporationEvent& event)
+{
+	if(!Is_Completed_Evaporation_Record(rec))
+		return false;
+
+	event.rank = rec.rank;
+	event.trajectory_id = rec.trajectory_id;
+	event.completion_wall_time_sec = rec.completion_wall_time_sec;
+	event.lifetime_unbinding = rec.lifetime_unbinding;
+	return true;
+}
+
 struct SnapshotEvaporationEntry
 {
 	uint64_t trajectory_id = 0;
 	double completion_wall_time_sec = 0.0;
-	double observed_lifetime_sec = 0.0;
-	uint8_t event_observed = 0;
-	uint8_t survival_valid = 0;
+	double lifetime_unbinding_sec = -1.0;
 };
 
 struct RankedSnapshotEvaporationEntry
@@ -163,7 +178,7 @@ struct Rank_Snapshot_State
 	std::array<double, NUM_BINS> not_captured_v2dt_hist{};
 	std::array<double, NUM_BINS> not_captured_dt_sq_hist{};
 	std::array<double, NUM_BINS> not_captured_v2dt_sq_hist{};
-	std::vector<SnapshotEvaporationEntry> new_evaporation_records;
+	std::vector<SnapshotEvaporationEntry> new_evaporation_events;
 };
 
 struct Snapshot_Report_State
@@ -182,7 +197,7 @@ struct Snapshot_Report_State
 	std::array<double, NUM_BINS> not_captured_v2dt_hist{};
 	std::array<double, NUM_BINS> not_captured_dt_sq_hist{};
 	std::array<double, NUM_BINS> not_captured_v2dt_sq_hist{};
-	std::vector<RankedSnapshotEvaporationEntry> new_evaporation_records;
+	std::vector<RankedSnapshotEvaporationEntry> new_evaporation_events;
 };
 
 template<typename T>
@@ -213,45 +228,33 @@ void Write_Snapshot_Evaporation_Entry_Binary(std::ofstream& file, const Snapshot
 {
 	Write_Binary_Value(file, entry.trajectory_id);
 	Write_Binary_Value(file, entry.completion_wall_time_sec);
-	Write_Binary_Value(file, entry.observed_lifetime_sec);
-	file.write(reinterpret_cast<const char*>(&entry.event_observed), sizeof(entry.event_observed));
-	file.write(reinterpret_cast<const char*>(&entry.survival_valid), sizeof(entry.survival_valid));
+	Write_Binary_Value(file, entry.lifetime_unbinding_sec);
 }
 
 void Read_Snapshot_Evaporation_Entry_Binary(std::ifstream& file, SnapshotEvaporationEntry& entry)
 {
 	Read_Binary_Value(file, entry.trajectory_id);
 	Read_Binary_Value(file, entry.completion_wall_time_sec);
-	Read_Binary_Value(file, entry.observed_lifetime_sec);
-	file.read(reinterpret_cast<char*>(&entry.event_observed), sizeof(entry.event_observed));
-	file.read(reinterpret_cast<char*>(&entry.survival_valid), sizeof(entry.survival_valid));
+	Read_Binary_Value(file, entry.lifetime_unbinding_sec);
 }
 
-SnapshotEvaporationEntry Make_Snapshot_Evaporation_Entry(const EvaporationRecord& rec)
+SnapshotEvaporationEntry Make_Snapshot_Evaporation_Entry(const CompactEvaporationEvent& event)
 {
 	SnapshotEvaporationEntry entry;
-	entry.trajectory_id = static_cast<uint64_t>(rec.trajectory_id);
-	entry.completion_wall_time_sec = rec.completion_wall_time_sec;
-	entry.observed_lifetime_sec = rec.observed_lifetime;
-	entry.event_observed = rec.event_observed ? 1 : 0;
-	entry.survival_valid = rec.survival_valid ? 1 : 0;
+	entry.trajectory_id = static_cast<uint64_t>(event.trajectory_id);
+	entry.completion_wall_time_sec = event.completion_wall_time_sec;
+	entry.lifetime_unbinding_sec = event.lifetime_unbinding;
 	return entry;
 }
 
-EvaporationRecord Make_Log_Record(int rank, const SnapshotEvaporationEntry& entry)
+CompactEvaporationEvent Make_Log_Event(int rank, const SnapshotEvaporationEntry& entry)
 {
-	EvaporationRecord rec;
-	rec.rank = rank;
-	rec.trajectory_id = static_cast<unsigned long int>(entry.trajectory_id);
-	rec.completion_wall_time_sec = entry.completion_wall_time_sec;
-	rec.observed_lifetime = entry.observed_lifetime_sec;
-	rec.event_observed = (entry.event_observed != 0);
-	rec.survival_valid = (entry.survival_valid != 0);
-	rec.censored = rec.survival_valid && !rec.event_observed;
-	rec.truncated = rec.censored;
-	rec.lifetime_unbinding = rec.event_observed ? entry.observed_lifetime_sec : -1.0;
-	rec.t_evap = rec.event_observed ? entry.observed_lifetime_sec : std::numeric_limits<double>::quiet_NaN();
-	return rec;
+	CompactEvaporationEvent event;
+	event.rank = rank;
+	event.trajectory_id = static_cast<unsigned long int>(entry.trajectory_id);
+	event.completion_wall_time_sec = entry.completion_wall_time_sec;
+	event.lifetime_unbinding = entry.lifetime_unbinding_sec;
+	return event;
 }
 
 double Capture_Ratio_From_Counts(uint64_t total_trajectories, uint64_t captured_particles)
@@ -419,6 +422,12 @@ void Write_Evaporation_Log_File_Header(std::ofstream& file, double mass_gev, dou
 	file << "# rank trajectory_id lifetime_unbinding_sec\n";
 }
 
+void Write_Evaporation_Log_Event(std::ostream& file, const CompactEvaporationEvent& event)
+{
+	file << event.rank << "\t" << event.trajectory_id << "\t" << std::scientific << std::setprecision(10)
+	     << event.lifetime_unbinding << "\n";
+}
+
 void Recover_Evaporation_Log_State(const std::string& path, EvaporationLogState& state)
 {
 	std::ifstream file(path);
@@ -459,41 +468,97 @@ bool Initialize_Evaporation_Log(const std::string& path, double mass_gev, double
 	return file.good();
 }
 
-bool Append_Completed_Evaporation_Events(const std::string& path, const std::vector<EvaporationRecord>& records, EvaporationLogState& state)
+bool Append_Completed_Evaporation_Events(const std::string& path, const std::vector<CompactEvaporationEvent>& events, EvaporationLogState& state)
 {
-	std::vector<EvaporationRecord> sorted_records = records;
-	std::sort(sorted_records.begin(), sorted_records.end(), [](const EvaporationRecord& lhs, const EvaporationRecord& rhs)
+	std::vector<CompactEvaporationEvent> sorted_events = events;
+	std::sort(sorted_events.begin(), sorted_events.end(), [](const CompactEvaporationEvent& lhs, const CompactEvaporationEvent& rhs)
 	{
 		if(lhs.rank != rhs.rank)
 			return lhs.rank < rhs.rank;
 		return lhs.trajectory_id < rhs.trajectory_id;
 	});
 
-	std::ofstream file(path, std::ios::out | std::ios::app);
-	if(!file.is_open())
-		return false;
-
 	std::vector<uint64_t> newly_written_keys;
 	std::unordered_set<uint64_t> pending_record_keys;
-	for(const auto& rec : sorted_records)
+	std::vector<CompactEvaporationEvent> pending_events;
+	for(const auto& event : sorted_events)
 	{
-		if(!Is_Completed_Evaporation_Record(rec))
+		if(!Is_Completed_Evaporation_Event(event))
 			continue;
-		const uint64_t key = Evaporation_Record_Key(rec.rank, rec.trajectory_id);
+		const uint64_t key = Evaporation_Record_Key(event.rank, event.trajectory_id);
 		if(state.written_record_keys.count(key) != 0 || !pending_record_keys.insert(key).second)
 			continue;
-		file << rec.rank << "\t" << rec.trajectory_id << "\t" << std::scientific << std::setprecision(10)
-		     << rec.lifetime_unbinding << "\n";
+		pending_events.push_back(event);
 		newly_written_keys.push_back(key);
 	}
-	file.close();
-	if(!file.good())
+
+	if(pending_events.empty())
+		return true;
+
+	const std::string block_path = path + ".block." + std::to_string(getpid()) + "." + std::to_string(newly_written_keys.front());
+	const std::string tmp_path = path + ".tmp." + std::to_string(getpid()) + "." + std::to_string(newly_written_keys.front());
+	{
+		std::ofstream block(block_path, std::ios::out | std::ios::trunc);
+		if(!block.is_open())
+			return false;
+		for(const auto& event : pending_events)
+			Write_Evaporation_Log_Event(block, event);
+		block.close();
+		if(!block.good())
+		{
+			std::remove(block_path.c_str());
+			return false;
+		}
+	}
+
+	{
+		std::ifstream existing(path);
+		std::ifstream block(block_path);
+		std::ofstream merged(tmp_path, std::ios::out | std::ios::trunc);
+		if(!existing.is_open() || !block.is_open() || !merged.is_open())
+		{
+			std::remove(block_path.c_str());
+			std::remove(tmp_path.c_str());
+			return false;
+		}
+
+		merged << existing.rdbuf();
+		merged << block.rdbuf();
+		merged.close();
+		if(!merged.good())
+		{
+			std::remove(block_path.c_str());
+			std::remove(tmp_path.c_str());
+			return false;
+		}
+	}
+
+	if(std::rename(tmp_path.c_str(), path.c_str()) != 0)
+	{
+		std::remove(block_path.c_str());
+		std::remove(tmp_path.c_str());
 		return false;
+	}
+
+	std::remove(block_path.c_str());
 	state.written_record_keys.insert(newly_written_keys.begin(), newly_written_keys.end());
 	return true;
 }
 
-bool Write_Final_Evaporation_Time_File(const std::string& path, double mass_gev, double sigma_cm2, const std::vector<EvaporationRecord>& records)
+bool Append_Completed_Evaporation_Events(const std::string& path, const std::vector<EvaporationRecord>& records, EvaporationLogState& state)
+{
+	std::vector<CompactEvaporationEvent> events;
+	events.reserve(records.size());
+	for(const auto& rec : records)
+	{
+		CompactEvaporationEvent event;
+		if(Make_Compact_Evaporation_Event(rec, event))
+			events.push_back(event);
+	}
+	return Append_Completed_Evaporation_Events(path, events, state);
+}
+
+bool Write_Final_Evaporation_Time_File(const std::string& path, double mass_gev, double sigma_cm2, const std::vector<CompactEvaporationEvent>& events)
 {
 	EvaporationLogState state;
 	std::ofstream file(path, std::ios::out | std::ios::trunc);
@@ -503,7 +568,20 @@ bool Write_Final_Evaporation_Time_File(const std::string& path, double mass_gev,
 	file.close();
 	if(!file.good())
 		return false;
-	return Append_Completed_Evaporation_Events(path, records, state);
+	return Append_Completed_Evaporation_Events(path, events, state);
+}
+
+bool Write_Final_Evaporation_Time_File(const std::string& path, double mass_gev, double sigma_cm2, const std::vector<EvaporationRecord>& records)
+{
+	std::vector<CompactEvaporationEvent> events;
+	events.reserve(records.size());
+	for(const auto& rec : records)
+	{
+		CompactEvaporationEvent event;
+		if(Make_Compact_Evaporation_Event(rec, event))
+			events.push_back(event);
+	}
+	return Write_Final_Evaporation_Time_File(path, mass_gev, sigma_cm2, events);
 }
 
 bool Remove_Path_Recursive(const std::string& path)
@@ -676,9 +754,9 @@ bool Write_Rank_Snapshot_State(const std::string& path, const Rank_Snapshot_Stat
 	Write_Binary_Array(file, state.not_captured_v2dt_hist);
 	Write_Binary_Array(file, state.not_captured_dt_sq_hist);
 	Write_Binary_Array(file, state.not_captured_v2dt_sq_hist);
-	const uint64_t new_evaporation_record_count = static_cast<uint64_t>(state.new_evaporation_records.size());
-	Write_Binary_Value(file, new_evaporation_record_count);
-	for(const auto& entry : state.new_evaporation_records)
+	const uint64_t new_evaporation_event_count = static_cast<uint64_t>(state.new_evaporation_events.size());
+	Write_Binary_Value(file, new_evaporation_event_count);
+	for(const auto& entry : state.new_evaporation_events)
 		Write_Snapshot_Evaporation_Entry_Binary(file, entry);
 	file.close();
 
@@ -723,12 +801,12 @@ bool Read_Rank_Snapshot_State(const std::string& path, uint64_t expected_run_id,
 	Read_Binary_Array(file, state.not_captured_v2dt_hist);
 	Read_Binary_Array(file, state.not_captured_dt_sq_hist);
 	Read_Binary_Array(file, state.not_captured_v2dt_sq_hist);
-	uint64_t new_evaporation_record_count = 0;
-	Read_Binary_Value(file, new_evaporation_record_count);
-	state.new_evaporation_records.clear();
-	state.new_evaporation_records.resize(static_cast<size_t>(new_evaporation_record_count));
-	for(size_t i = 0; i < state.new_evaporation_records.size(); i++)
-		Read_Snapshot_Evaporation_Entry_Binary(file, state.new_evaporation_records[i]);
+	uint64_t new_evaporation_event_count = 0;
+	Read_Binary_Value(file, new_evaporation_event_count);
+	state.new_evaporation_events.clear();
+	state.new_evaporation_events.resize(static_cast<size_t>(new_evaporation_event_count));
+	for(size_t i = 0; i < state.new_evaporation_events.size(); i++)
+		Read_Snapshot_Evaporation_Entry_Binary(file, state.new_evaporation_events[i]);
 
 	if(!file)
 		return false;
@@ -744,14 +822,14 @@ void Accumulate_Snapshot_Report_State(Snapshot_Report_State& report, const Rank_
 	report.snapshot_bincount_not_captured_samples += (state.local_total - state.local_captured);
 	const double lower_wall_time = (report.snapshot_time_label > report.snapshot_interval_seconds) ? (report.snapshot_time_label - report.snapshot_interval_seconds) : 0.0;
 	const double upper_wall_time = static_cast<double>(report.snapshot_time_label);
-	for(const auto& entry : state.new_evaporation_records)
+	for(const auto& entry : state.new_evaporation_events)
 	{
 		if(entry.completion_wall_time_sec > lower_wall_time && entry.completion_wall_time_sec <= upper_wall_time)
 		{
 			RankedSnapshotEvaporationEntry ranked_entry;
 			ranked_entry.rank = state.rank;
 			ranked_entry.entry = entry;
-			report.new_evaporation_records.push_back(ranked_entry);
+			report.new_evaporation_events.push_back(ranked_entry);
 		}
 	}
 
@@ -833,11 +911,11 @@ bool Write_Snapshot_Report_File(const std::string& snapshot_root, int snapshot_i
 
 	if(snapshot_evaporation_log_enabled && evaporation_log_state != NULL)
 	{
-		std::vector<EvaporationRecord> snapshot_records;
-		snapshot_records.reserve(report.new_evaporation_records.size());
-		for(const auto& entry : report.new_evaporation_records)
-			snapshot_records.push_back(Make_Log_Record(entry.rank, entry.entry));
-		if(!Append_Completed_Evaporation_Events(Evaporation_Log_Path_From_Snapshot_Root(snapshot_root), snapshot_records, *evaporation_log_state))
+		std::vector<CompactEvaporationEvent> snapshot_events;
+		snapshot_events.reserve(report.new_evaporation_events.size());
+		for(const auto& entry : report.new_evaporation_events)
+			snapshot_events.push_back(Make_Log_Event(entry.rank, entry.entry));
+		if(!Append_Completed_Evaporation_Events(Evaporation_Log_Path_From_Snapshot_Root(snapshot_root), snapshot_events, *evaporation_log_state))
 			return false;
 	}
 
@@ -1042,9 +1120,9 @@ void Simulation_Data::Generate_Data(obscura::DM_Particle& DM, Solar_Model& solar
 		(void)snapshot_upper_wall_time;
 		if(snapshot_evaporation_log_enabled)
 		{
-			state.new_evaporation_records.reserve(evaporation_entry_end - evaporation_entry_begin);
+			state.new_evaporation_events.reserve(evaporation_entry_end - evaporation_entry_begin);
 			for(size_t entry_index = evaporation_entry_begin; entry_index < evaporation_entry_end; entry_index++)
-				state.new_evaporation_records.push_back(Make_Snapshot_Evaporation_Entry(evaporation_records[entry_index]));
+				state.new_evaporation_events.push_back(Make_Snapshot_Evaporation_Entry(compact_evaporation_events[entry_index]));
 		}
 		return state;
 	};
@@ -1080,8 +1158,8 @@ void Simulation_Data::Generate_Data(obscura::DM_Particle& DM, Solar_Model& solar
 			size_t evaporation_entry_end = first_uncommitted_evaporation_entry;
 			if(snapshot_evaporation_log_enabled)
 			{
-				while(evaporation_entry_end < evaporation_records.size()
-				      && evaporation_records[evaporation_entry_end].completion_wall_time_sec <= snapshot_upper_wall_time)
+				while(evaporation_entry_end < compact_evaporation_events.size()
+				      && compact_evaporation_events[evaporation_entry_end].completion_wall_time_sec <= snapshot_upper_wall_time)
 					evaporation_entry_end++;
 			}
 			Rank_Snapshot_State state = build_rank_snapshot_state(false, snapshot_upper_wall_time, first_uncommitted_evaporation_entry, evaporation_entry_end);
@@ -1135,13 +1213,14 @@ void Simulation_Data::Generate_Data(obscura::DM_Particle& DM, Solar_Model& solar
 					captured_v2dt_sq_hist[b] += trajectory.bincount.v2dt_hist[b] * trajectory.bincount.v2dt_hist[b];
 				}
 
-				// Full survival records are only needed for diagnostics. The default
-				// output contract stores compact complete events.
 				EvaporationRecord rec;
 				if(Build_Evaporation_Record(trajectory.bincount, mpi_rank, number_of_trajectories, trajectory_completion_wall_time_sec, rec))
 				{
-					if(evaporation_diagnostics_enabled || Is_Completed_Evaporation_Record(rec))
+					if(evaporation_diagnostics_enabled)
 						evaporation_records.push_back(rec);
+					CompactEvaporationEvent event;
+					if(Make_Compact_Evaporation_Event(rec, event))
+						compact_evaporation_events.push_back(event);
 				}
 			}
 
@@ -1207,7 +1286,7 @@ void Simulation_Data::Generate_Data(obscura::DM_Particle& DM, Solar_Model& solar
 	// Final snapshot state: keep per-rank binary under snapshot/rank_snapshot and merge on interval boundaries.
 	if(snapshot_cfg.enabled)
 	{
-		Rank_Snapshot_State final_state = build_rank_snapshot_state(true, computing_time, first_uncommitted_evaporation_entry, evaporation_records.size());
+		Rank_Snapshot_State final_state = build_rank_snapshot_state(true, computing_time, first_uncommitted_evaporation_entry, compact_evaporation_events.size());
 		final_state.snapshot_index = next_snapshot_index - 1;
 		Write_Rank_Snapshot_State(Rank_Snapshot_Final_Path(rank_snapshot_dir, mpi_rank), final_state);
 
@@ -1351,24 +1430,18 @@ void Simulation_Data::Perform_MPI_Reductions()
 	}
 	else
 	{
-		std::vector<EvaporationRecord> local_complete_records;
-		for(const auto& rec : evaporation_records)
-		{
-			if(Is_Completed_Evaporation_Record(rec))
-				local_complete_records.push_back(rec);
-		}
-
-		const int local_evap_count = static_cast<int>(local_complete_records.size());
+		const int local_evap_count = static_cast<int>(compact_evaporation_events.size());
 		std::vector<int> evap_counts(mpi_processes, 0);
 		MPI_Gather(&local_evap_count, 1, MPI_INT, mpi_rank == 0 ? evap_counts.data() : nullptr, 1, MPI_INT, 0, MPI_COMM_WORLD);
 
-		constexpr int EVAPORATION_COMPACT_MPI_FIELDS = 3;
+		constexpr int EVAPORATION_COMPACT_MPI_FIELDS = 4;
 		std::vector<double> local_evap_data(local_evap_count * EVAPORATION_COMPACT_MPI_FIELDS);
 		for(int i = 0; i < local_evap_count; i++)
 		{
-			local_evap_data[EVAPORATION_COMPACT_MPI_FIELDS*i] = static_cast<double>(local_complete_records[i].rank);
-			local_evap_data[EVAPORATION_COMPACT_MPI_FIELDS*i + 1] = static_cast<double>(local_complete_records[i].trajectory_id);
-			local_evap_data[EVAPORATION_COMPACT_MPI_FIELDS*i + 2] = local_complete_records[i].lifetime_unbinding;
+			local_evap_data[EVAPORATION_COMPACT_MPI_FIELDS*i] = static_cast<double>(compact_evaporation_events[i].rank);
+			local_evap_data[EVAPORATION_COMPACT_MPI_FIELDS*i + 1] = static_cast<double>(compact_evaporation_events[i].trajectory_id);
+			local_evap_data[EVAPORATION_COMPACT_MPI_FIELDS*i + 2] = compact_evaporation_events[i].completion_wall_time_sec;
+			local_evap_data[EVAPORATION_COMPACT_MPI_FIELDS*i + 3] = compact_evaporation_events[i].lifetime_unbinding;
 		}
 
 		std::vector<int> recv_counts, displacements;
@@ -1393,21 +1466,16 @@ void Simulation_Data::Perform_MPI_Reductions()
 		            mpi_rank == 0 ? displacements.data() : nullptr,
 		            MPI_DOUBLE, 0, MPI_COMM_WORLD);
 
-		evaporation_records.clear();
+		compact_evaporation_events.clear();
 		if(mpi_rank == 0)
 		{
-			evaporation_records.resize(total_evap);
+			compact_evaporation_events.resize(total_evap);
 			for(int i = 0; i < total_evap; i++)
 			{
-				evaporation_records[i].rank = static_cast<int>(global_evap_data[EVAPORATION_COMPACT_MPI_FIELDS*i]);
-				evaporation_records[i].trajectory_id = static_cast<unsigned long int>(global_evap_data[EVAPORATION_COMPACT_MPI_FIELDS*i + 1]);
-				evaporation_records[i].lifetime_unbinding = global_evap_data[EVAPORATION_COMPACT_MPI_FIELDS*i + 2];
-				evaporation_records[i].observed_lifetime = evaporation_records[i].lifetime_unbinding;
-				evaporation_records[i].t_evap = evaporation_records[i].lifetime_unbinding;
-				evaporation_records[i].event_observed = true;
-				evaporation_records[i].survival_valid = true;
-				evaporation_records[i].censored = false;
-				evaporation_records[i].truncated = false;
+				compact_evaporation_events[i].rank = static_cast<int>(global_evap_data[EVAPORATION_COMPACT_MPI_FIELDS*i]);
+				compact_evaporation_events[i].trajectory_id = static_cast<unsigned long int>(global_evap_data[EVAPORATION_COMPACT_MPI_FIELDS*i + 1]);
+				compact_evaporation_events[i].completion_wall_time_sec = global_evap_data[EVAPORATION_COMPACT_MPI_FIELDS*i + 2];
+				compact_evaporation_events[i].lifetime_unbinding = global_evap_data[EVAPORATION_COMPACT_MPI_FIELDS*i + 3];
 			}
 		}
 	}
@@ -1479,7 +1547,9 @@ void Simulation_Data::Write_Output_Files(const std::string& output_dir, obscura:
 		f.close();
 	}
 
-	bool evaporation_times_ok = Write_Final_Evaporation_Time_File(Evaporation_Log_Path_From_Output_Dir(output_dir), mass_gev, sigma_cm2, evaporation_records);
+	bool evaporation_times_ok = evaporation_diagnostics_enabled
+	    ? Write_Final_Evaporation_Time_File(Evaporation_Log_Path_From_Output_Dir(output_dir), mass_gev, sigma_cm2, evaporation_records)
+	    : Write_Final_Evaporation_Time_File(Evaporation_Log_Path_From_Output_Dir(output_dir), mass_gev, sigma_cm2, compact_evaporation_events);
 	if(!evaporation_times_ok)
 		std::cerr << "Warning in Write_Output_Files(): failed to write evaporation_times.txt" << std::endl;
 
@@ -1600,10 +1670,21 @@ void Simulation_Data::Print_Summary(unsigned int mpi_rank)
 
 		// Median for observed unbinding events only; censored records belong in survival analysis.
 		std::vector<double> observed_unbinding_lifetimes;
-		for(const auto& rec : evaporation_records)
+		if(evaporation_diagnostics_enabled)
 		{
-			if(rec.survival_valid && rec.event_observed && Has_Positive_Evaporation_Time(rec.lifetime_unbinding))
-				observed_unbinding_lifetimes.push_back(rec.lifetime_unbinding);
+			for(const auto& rec : evaporation_records)
+			{
+				if(rec.survival_valid && rec.event_observed && Has_Positive_Evaporation_Time(rec.lifetime_unbinding))
+					observed_unbinding_lifetimes.push_back(rec.lifetime_unbinding);
+			}
+		}
+		else
+		{
+			for(const auto& event : compact_evaporation_events)
+			{
+				if(Has_Positive_Evaporation_Time(event.lifetime_unbinding))
+					observed_unbinding_lifetimes.push_back(event.lifetime_unbinding);
+			}
 		}
 		if(!observed_unbinding_lifetimes.empty())
 		{

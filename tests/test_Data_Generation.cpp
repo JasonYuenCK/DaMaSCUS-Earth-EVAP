@@ -64,6 +64,12 @@ TEST(TestDataGeneration, TestDataSetConstructor)
 		ASSERT_EQ(set.size(), 0);
 }
 
+TEST(TestDataGeneration, TestCompactEvaporationEventStaysCompact)
+{
+	EXPECT_LT(sizeof(CompactEvaporationEvent), sizeof(EvaporationRecord) / 2);
+	EXPECT_LE(sizeof(CompactEvaporationEvent), static_cast<size_t>(40));
+}
+
 TEST(TestDataGeneration, TestGenerateData)
 {
 	// ARRANGE
