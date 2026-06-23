@@ -33,10 +33,12 @@ constexpr double RK45_MAX_STEP_FACTOR = 4.0;
 constexpr int RK45_MAX_INNER_RETRIES = 2000;
 constexpr double FREE_ENERGY_DRIFT_REL_E_SCALE_EV = 1.0e-30;
 constexpr double MAX_OPTICAL_DEPTH_STEP = 0.05;
+constexpr double CAPTURE_MODE_MAX_OPTICAL_DEPTH_STEP = 0.10;
 constexpr double OPTICAL_DEPTH_RELATIVE_TOLERANCE = 1.0e-2;
 constexpr double OPTICAL_DEPTH_ABSOLUTE_TOLERANCE = 1.0e-12 * MAX_OPTICAL_DEPTH_STEP;
 constexpr unsigned int MAX_OPTICAL_DEPTH_RETRIES = 100;
 constexpr std::size_t MAX_OPTICAL_DEPTH_PIECES = 4;
+constexpr std::size_t CAPTURE_MODE_OPTICAL_DEPTH_PIECES = 2;
 
 struct OpticalDepthPiece
 {
@@ -212,6 +214,7 @@ bool Build_Optical_Depth_Pieces(const Event& before,
                                 obscura::DM_Particle& DM,
                                 bool use_cached_start_rate,
                                 double cached_start_rate,
+                                std::size_t requested_piece_count,
                                 std::array<OpticalDepthPiece, MAX_OPTICAL_DEPTH_PIECES>& pieces,
                                 std::size_t& piece_count,
                                 double& tau_two_piece,
@@ -225,13 +228,14 @@ bool Build_Optical_Depth_Pieces(const Event& before,
 	if(!(interior_end > interior_start) || actual_dt <= 0.0)
 		return false;
 
+	requested_piece_count = std::max<std::size_t>(1, std::min(requested_piece_count, MAX_OPTICAL_DEPTH_PIECES));
 	const double span = interior_end - interior_start;
 	std::array<double, MAX_OPTICAL_DEPTH_PIECES + 1> fractions;
 	std::array<double, MAX_OPTICAL_DEPTH_PIECES + 1> rates;
-	for(std::size_t i = 0; i < fractions.size(); i++)
-		fractions[i] = interior_start + 0.25 * static_cast<double>(i) * span;
+	for(std::size_t i = 0; i <= requested_piece_count; i++)
+		fractions[i] = interior_start + static_cast<double>(i) / static_cast<double>(requested_piece_count) * span;
 
-	for(std::size_t i = 0; i < rates.size(); i++)
+	for(std::size_t i = 0; i <= requested_piece_count; i++)
 	{
 		if(i == 0 && use_cached_start_rate)
 			rates[i] = cached_start_rate;
@@ -251,8 +255,14 @@ bool Build_Optical_Depth_Pieces(const Event& before,
 		return 0.5 * (rates[start_index] + rates[end_index]) * piece_dt;
 	};
 
-	tau_two_piece = trapezoid_tau(0, 2) + trapezoid_tau(2, 4);
-	for(std::size_t i = 0; i < MAX_OPTICAL_DEPTH_PIECES; i++)
+	if(requested_piece_count >= 4)
+		tau_two_piece = trapezoid_tau(0, 2) + trapezoid_tau(2, 4);
+	else
+	{
+		for(std::size_t i = 0; i < requested_piece_count; i++)
+			tau_two_piece += trapezoid_tau(i, i + 1);
+	}
+	for(std::size_t i = 0; i < requested_piece_count; i++)
 	{
 		if(fractions[i + 1] > fractions[i])
 		{
@@ -279,13 +289,33 @@ double Solve_Linear_Rate_Optical_Depth_Fraction(double rate_start, double rate_e
 	if(target_tau >= total_tau)
 		return 1.0;
 
+	const double target = target_tau / interval_dt;
+	const double a = 0.5 * (rate_end - rate_start);
+	const double b = rate_start;
+	if(std::fabs(a) < 1.0e-300)
+		return (b > 0.0) ? Clamp_Unit_Interval(target / b) : 1.0;
+
+	const double discriminant = b * b + 4.0 * a * target;
+	if(std::isfinite(discriminant) && discriminant >= 0.0)
+	{
+		const double sqrt_discriminant = sqrt(discriminant);
+		const double roots[2] = {
+		    (-b + sqrt_discriminant) / (2.0 * a),
+		    (-b - sqrt_discriminant) / (2.0 * a)
+		};
+		for(double root : roots)
+		{
+			if(std::isfinite(root) && root >= 0.0 && root <= 1.0)
+				return Clamp_Unit_Interval(root);
+		}
+	}
+
 	double low = 0.0;
 	double high = 1.0;
-	for(int iteration = 0; iteration < 60; iteration++)
+	for(int iteration = 0; iteration < 30; iteration++)
 	{
 		const double mid = 0.5 * (low + high);
-		const double tau_mid =
-		    interval_dt * (rate_start * mid + 0.5 * (rate_end - rate_start) * mid * mid);
+		const double tau_mid = interval_dt * (rate_start * mid + 0.5 * (rate_end - rate_start) * mid * mid);
 		if(tau_mid < target_tau)
 			low = mid;
 		else
@@ -501,6 +531,9 @@ double Trajectory_Simulator::Capture_Energy_eV(double radius, double speed, obsc
 
 bool Trajectory_Simulator::Update_Capture_State(double radius, double speed, double time, obscura::DM_Particle& DM, bool allow_new_capture)
 {
+	if(terminate_on_capture && !allow_new_capture && !current_bincount.is_captured)
+		return false;
+
 	double E_eV = Capture_Energy_eV(radius, speed, DM);
 	double dE_from_prev_eV = std::numeric_limits<double>::quiet_NaN();
 	if(std::isfinite(previous_capture_energy_eV))
@@ -574,6 +607,9 @@ TrajectoryTerminationReason Trajectory_Simulator::Propagate_Freely(Event& curren
 	unsigned long int time_steps = 0;
 	unsigned long int step_attempts = 0;
 	unsigned int optical_depth_retries = 0;
+	const bool fast_capture_mode = terminate_on_capture;
+	const double optical_depth_step_limit = fast_capture_mode ? CAPTURE_MODE_MAX_OPTICAL_DEPTH_STEP : MAX_OPTICAL_DEPTH_STEP;
+	const std::size_t optical_depth_piece_target = fast_capture_mode ? CAPTURE_MODE_OPTICAL_DEPTH_PIECES : MAX_OPTICAL_DEPTH_PIECES;
 
 	auto commit_accepted_event = [&](const Event& accepted_event)
 	{
@@ -635,7 +671,7 @@ TrajectoryTerminationReason Trajectory_Simulator::Propagate_Freely(Event& curren
 			}
 			if(rate_before > 0.0)
 			{
-				particle_propagator.time_step = std::min(particle_propagator.time_step, MAX_OPTICAL_DEPTH_STEP / rate_before);
+				particle_propagator.time_step = std::min(particle_propagator.time_step, optical_depth_step_limit / rate_before);
 			}
 		}
 
@@ -714,20 +750,21 @@ TrajectoryTerminationReason Trajectory_Simulator::Propagate_Freely(Event& curren
 			double delta_tau = 0.0;
 			bool invalid_rate = false;
 			const bool use_cached_start_rate = r_before < rSun && interior_start <= 1.0e-12;
-			Build_Optical_Depth_Pieces(event_before,
-			                           event_after,
-			                           interior_start,
-			                           interior_end,
-			                           actual_dt,
-			                           solar_model,
-			                           DM,
-			                           use_cached_start_rate,
-			                           rate_before,
-			                           optical_pieces,
-			                           optical_piece_count,
-			                           tau_two_piece,
-			                           delta_tau,
-			                           invalid_rate);
+				Build_Optical_Depth_Pieces(event_before,
+				                           event_after,
+				                           interior_start,
+				                           interior_end,
+				                           actual_dt,
+				                           solar_model,
+				                           DM,
+				                           use_cached_start_rate,
+				                           rate_before,
+				                           optical_depth_piece_target,
+				                           optical_pieces,
+				                           optical_piece_count,
+				                           tau_two_piece,
+				                           delta_tau,
+				                           invalid_rate);
 			if(invalid_rate || !std::isfinite(delta_tau) || delta_tau < 0.0)
 			{
 				std::cerr << "\nWarning in Propagate_Freely(): invalid scattering rate (rank "
@@ -738,34 +775,36 @@ TrajectoryTerminationReason Trajectory_Simulator::Propagate_Freely(Event& curren
 				return TrajectoryTerminationReason::NumericalFailure;
 			}
 
-			const double tau_error_scale = std::max(delta_tau, OPTICAL_DEPTH_ABSOLUTE_TOLERANCE);
-			const double tau_relative_error = std::fabs(delta_tau - tau_two_piece) / tau_error_scale;
-			if(delta_tau > MAX_OPTICAL_DEPTH_STEP || tau_relative_error > OPTICAL_DEPTH_RELATIVE_TOLERANCE)
-			{
-				optical_depth_retries++;
-				if(optical_depth_retries > MAX_OPTICAL_DEPTH_RETRIES)
+				const double tau_error_scale = std::max(delta_tau, OPTICAL_DEPTH_ABSOLUTE_TOLERANCE);
+				const double tau_relative_error = std::fabs(delta_tau - tau_two_piece) / tau_error_scale;
+				const bool reject_for_optical_depth = delta_tau > optical_depth_step_limit;
+				const bool reject_for_tau_accuracy = !fast_capture_mode && tau_relative_error > OPTICAL_DEPTH_RELATIVE_TOLERANCE;
+				if(reject_for_optical_depth || reject_for_tau_accuracy)
 				{
-					std::cerr << "\nWarning in Propagate_Freely(): optical-depth step rejected more than "
-					          << MAX_OPTICAL_DEPTH_RETRIES << " consecutive times (rank "
-					          << current_mpi_rank << ", traj " << current_trajectory_id
-					          << ", delta_tau=" << delta_tau
-					          << ", relative_error=" << tau_relative_error
-					          << "). Marking trajectory as numerically failed." << std::endl;
-					Publish_Snapshot_Progress();
-					current_event = event_before;
-					return TrajectoryTerminationReason::NumericalFailure;
-				}
+					optical_depth_retries++;
+					if(optical_depth_retries > MAX_OPTICAL_DEPTH_RETRIES)
+					{
+						std::cerr << "\nWarning in Propagate_Freely(): optical-depth step rejected more than "
+						          << MAX_OPTICAL_DEPTH_RETRIES << " consecutive times (rank "
+						          << current_mpi_rank << ", traj " << current_trajectory_id
+						          << ", delta_tau=" << delta_tau
+						          << ", relative_error=" << tau_relative_error
+						          << "). Marking trajectory as numerically failed." << std::endl;
+						Publish_Snapshot_Progress();
+						current_event = event_before;
+						return TrajectoryTerminationReason::NumericalFailure;
+					}
 
-				particle_propagator = propagator_before;
-				double factor = RK45_MAX_STEP_FACTOR;
-				if(delta_tau > MAX_OPTICAL_DEPTH_STEP && delta_tau > 0.0)
-					factor = std::min(factor, 0.8 * MAX_OPTICAL_DEPTH_STEP / delta_tau);
-				if(tau_relative_error > OPTICAL_DEPTH_RELATIVE_TOLERANCE && tau_relative_error > 0.0)
-					factor = std::min(factor, 0.8 * std::sqrt(OPTICAL_DEPTH_RELATIVE_TOLERANCE / tau_relative_error));
-				factor = std::max(RK45_MIN_STEP_FACTOR, std::min(factor, 1.0));
-				particle_propagator.time_step = RK45_Sanitized_Time_Step(factor * actual_dt);
-				continue;
-			}
+					particle_propagator = propagator_before;
+					double factor = RK45_MAX_STEP_FACTOR;
+					if(delta_tau > optical_depth_step_limit && delta_tau > 0.0)
+						factor = std::min(factor, 0.8 * optical_depth_step_limit / delta_tau);
+					if(reject_for_tau_accuracy && tau_relative_error > 0.0)
+						factor = std::min(factor, 0.8 * std::sqrt(OPTICAL_DEPTH_RELATIVE_TOLERANCE / tau_relative_error));
+					factor = std::max(RK45_MIN_STEP_FACTOR, std::min(factor, 1.0));
+					particle_propagator.time_step = RK45_Sanitized_Time_Step(factor * actual_dt);
+					continue;
+				}
 
 			if(delta_tau >= minus_log_xi)
 			{

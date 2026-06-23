@@ -98,7 +98,7 @@ class Simulation_Data
 
 	// MPI
 	int mpi_rank, mpi_processes;
-	void Perform_MPI_Reductions();
+	void Perform_MPI_Reductions(bool capture_mode);
 
 	// For reflection spectrum compatibility (kept but not actively used in new logic)
 	unsigned int isoreflection_rings;
