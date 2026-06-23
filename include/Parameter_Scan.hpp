@@ -31,10 +31,6 @@ class Configuration : public obscura::Configuration
 	unsigned int max_trajectories;
 	unsigned long int maximum_number_of_scatterings;
 	SnapshotConfig snapshot_config;
-	bool evaporation_mode_bincount_enabled;
-	std::vector<double> evaporation_mode_boundaries_log10_s;
-	std::vector<std::string> evaporation_mode_labels;
-	bool evaporation_mode_include_truncated;
 	bool evaporation_diagnostics_enabled;
 	double cross_section_min, cross_section_max;
 	bool compute_halo_constraints, perform_full_scan, capture_mode;

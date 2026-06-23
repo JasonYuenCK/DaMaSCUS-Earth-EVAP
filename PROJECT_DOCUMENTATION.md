@@ -306,8 +306,7 @@ mpirun -n 32 ./DaMaSCUS-SUN config_Lingyu.cfg
 - 运行参数：样本大小，最大轨迹数，输出目录，等反射环数
 - 暗光子专属参数：$\epsilon$（动能混合），$\alpha_D$（暗规范耦合），$m_{A'}$（介质子质量），形因子类型
 - 可选数值模拟参数：`max_trajectories`（未设置时默认为 `sample_size * 1000`）、`snapshot_enabled`、`snapshot_interval`、`snapshot_evaporation_log_enabled`、`max_trajectory_wall_time_sec`
-- 分峰径向统计参数：`evaporation_mode_bincount_enabled`、`evaporation_mode_boundaries_log10_s`、`evaporation_mode_labels`、`evaporation_mode_include_truncated`。默认关闭；开启后按 `log10(lifetime_unbinding/s)` 分组累积 captured 轨迹已有的在线 bincount。`evaporation_mode_include_truncated` 仅为兼容旧配置保留，当前分峰始终只使用 `event_observed=1` 且 `survival_valid=1` 的完整事件。
-- 蒸发诊断参数：`snapshot_evaporation_log_enabled` 与 `evaporation_diagnostics_enabled` 已拆分。前者在 `snapshot_enabled=true` 时默认开启，把 snapshot evaporation/survival delta 追加到单个 `evaporation_times.txt`；后者默认关闭，只控制最终 `evaporation_summary.txt` 的完整 survival/数值诊断输出。
+- 蒸发诊断参数：`snapshot_evaporation_log_enabled` 与 `evaporation_diagnostics_enabled` 已拆分。前者在 `snapshot_enabled=true` 时默认开启，把完整、有效的蒸发事件追加到单个 `evaporation_times.txt`；后者默认关闭，只控制最终 `evaporation_diagnostics.txt` 的完整 survival/数值诊断输出。
 - 快速捕获率参数：`capture_mode = true`（也可使用 `run_mode = "Capture"`）。该模式只用于估计捕获率，散射后若 $E < 0$ 则立即停止当前轨迹，不写模拟输出文件。
 
 示例：
@@ -317,10 +316,6 @@ run_mode = "Parameter point";
 capture_mode = true;
 sample_size = 1000;
 max_trajectories = 100000;
-evaporation_mode_bincount_enabled = true;
-evaporation_mode_boundaries_log10_s = (4.5, 11.1);
-evaporation_mode_labels = ("P1_fast", "P2_theory", "P3_tail");
-evaporation_mode_include_truncated = false;
 ```
 
 **全局配置变量**（`Parameter_Scan.cpp`）：
@@ -469,14 +464,11 @@ $$\int \sum_i n_i \frac{m_\chi m_i}{(m_\chi + m_i)^2} \langle v_\text{rel} \rang
 
 ### 6.2 蒸发时间与径向统计（当前 C++ 在线输出）
 
-普通 `Parameter point` 模式直接在 `Data_Generation.cpp` 中输出三类文件：
+普通 `Parameter point` 模式直接在 `Data_Generation.cpp` 中输出以下文件：
 
 - `bincount.txt`：captured 与 not_captured 的径向占据时间 $\sum \Delta t$、速度二阶矩 $\sum v^2\Delta t$，以及逐 bin 误差估计。
-- `evaporation_times.txt`：未启用 snapshot 日志时，默认 final 蒸发时间序列只写完整、有效、未删失的真实蒸发事件，列为 `rank trajectory_id t_evap_s`。启用 `snapshot_evaporation_log_enabled` 或 `evaporation_diagnostics_enabled` 时，该文件使用按 snapshot/final 顺序追加的 block 日志，保留右删失标志并计数数值无效记录。
-- `evaporation_summary.txt`：仅当 `evaporation_diagnostics_enabled=true` 时写出。每条 captured 轨迹都会写入一条 survival-analysis record，包括 `rank`、rank 内 `trajectory_id`、捕获时间 `t_capture`、最终上散射解绑时间 `t_final_unbinding_scatter`、边界逃逸时间 `t_boundary_escape`、轨迹终止时间 `t_termination`、`observed_lifetime`、`lifetime_unbinding`、`lifetime_boundary`、`event_observed`、`boundary_escape_observed`、`survival_valid`、`numerically_invalid_escape`、`censored`、`termination_reason`、首次散射后能量变负时的半径与能量诊断，以及自由传播段最大能量漂移 `max_free_energy_drift[eV]` / `max_free_energy_drift_rel`。
-- `evaporation_mode_summary.txt`：开启 `evaporation_mode_bincount_enabled` 后输出每个 evaporation mode 的 `log10(lifetime_unbinding/s)` 区间、标签和样本数；分峰始终只使用完整、有效的解绑事件，不使用右删失 lower bound。
-- `evaporation_mode_bincount.txt`：开启 `evaporation_mode_bincount_enabled` 后输出按 evaporation mode 拆分的 captured 径向统计，列为每个 mode 的 $\sum\Delta t$、$\sum v^2\Delta t$ 及对应误差。默认边界 `(4.5, 11.1)` 与标签 `("P1_fast", "P2_theory", "P3_tail")` 可直接用于三峰 ensemble 图。
-- `computation_time_summary.txt`：captured / not_captured 轨迹的 wall-clock 时间、RK45 步数统计、`ever_captured` / `complete_evaporation` / `censored_captured` / `invalid_survival_captured` 计数，以及各类 `termination_reason` 计数。
+- `evaporation_times.txt`：始终只写完整、有效、未删失的真实蒸发事件，列为 `rank trajectory_id lifetime_unbinding_sec`。
+- `evaporation_diagnostics.txt`：仅当 `evaporation_diagnostics_enabled=true` 时写出。每条 captured 轨迹都会写入一条 survival-analysis record，包括 `rank`、rank 内 `trajectory_id`、捕获时间 `t_capture`、最终上散射解绑时间 `t_final_unbinding_scatter`、边界逃逸时间 `t_boundary_escape`、轨迹终止时间 `t_termination`、`observed_lifetime`、`lifetime_unbinding`、`lifetime_boundary`、`event_observed`、`boundary_escape_observed`、`survival_valid`、`numerically_invalid_escape`、`censored`、`termination_reason`、首次散射后能量变负时的半径与能量诊断，以及自由传播段最大能量漂移 `max_free_energy_drift[eV]` / `max_free_energy_drift_rel`。
 
 `capture_rate`、`capture_rate_err` 和 `capture_rate_CI_95_lower/upper` 会写入这些文件头部；Capture Mode 不写这些文件，只在终端打印同类捕获率统计。
 
@@ -492,11 +484,11 @@ Snapshot 会合并各 rank 的当前进度，包括已完成轨迹的 captured /
 
 正式运行前还应验证散射率插值收敛：至少比较 `interpolation_points = 0`、`1000`、`2000`，检查蒸发时间中位数、长尾比例、完整蒸发事件比例和平均散射次数是否在统计误差内一致。若差异不可忽略，应提高插值网格或关闭插值生成基准结果。
 
-每个 snapshot 时间点在 `snapshot/` 目录下生成主诊断文件：
+每个 snapshot 时间点在 `snapshot/` 目录下生成主报告文件：
 
-- `snapshot_{time}s.txt`：主 snapshot 报告，开头的 rank 诊断表会把 checkpoint/final/wait reason 与该 rank 的 `running`/`done` 状态写在同一行，随后输出累计统计和 bincount histogram。
+- `snapshot_{time}s.txt`：主 snapshot 报告，输出累计统计和 bincount histogram。
 
-Snapshot 不再输出旧名 `snapshot_*_evaporation.txt`，也不再生成 `snapshot_*_completed_evaporation_diagnostic.txt`。所有 snapshot 蒸发信息只追加到 `evaporation_times.txt`，并按轨迹完成 wall time 严格归入 `(T_{k-1}, T_k]` 区间；完整 survival/数值诊断只在最终 `evaporation_summary.txt` 中可选输出一次。
+Snapshot 不再输出旧名 `snapshot_*_evaporation.txt`，也不再生成 `snapshot_*_completed_evaporation_diagnostic.txt`。所有 snapshot 蒸发信息只追加到 `evaporation_times.txt`，并按轨迹完成 wall time 严格归入 `(T_{k-1}, T_k]` 区间；完整 survival/数值诊断只在最终 `evaporation_diagnostics.txt` 中可选输出一次。
 
 各 rank 的二进制 checkpoint 临时文件位于 `snapshot/rank_snapshot/`，只用于合并中间状态；snapshot 合并成功后会清理对应 checkpoint。
 

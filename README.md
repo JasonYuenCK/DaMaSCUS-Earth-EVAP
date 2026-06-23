@@ -51,20 +51,8 @@ Key parameters in the `.cfg` file:
 | `DM_mass` | Dark matter mass in GeV |
 | `DM_cross_section_nucleon` | DM-nucleon cross section in cm² |
 | `run_mode` | "Parameter point" or "Parameter scan" |
-| `evaporation_mode_bincount_enabled` | Optional split of captured bincounts by evaporation-time peaks |
 | `snapshot_evaporation_log_enabled` | Optional snapshot append log for evaporation/survival deltas; defaults to `true` when `snapshot_enabled = true` |
 | `evaporation_diagnostics_enabled` | Optional full evaporation survival/diagnostic output; default `false` |
-
-Optional evaporation-mode settings:
-
-```cfg
-evaporation_mode_bincount_enabled = true;
-evaporation_mode_boundaries_log10_s = (4.5, 11.1);
-evaporation_mode_labels = ("P1_fast", "P2_theory", "P3_tail");
-evaporation_mode_include_truncated = false;
-```
-
-`evaporation_mode_include_truncated` is retained for config compatibility, but mode assignment uses only valid observed unbinding events.
 
 For reproducible MPI runs, a nonzero fixed seed is treated as a base seed; each rank uses `base_seed + 1000003 * mpi_rank` to avoid duplicate trajectories. Computational cutoffs (`wall_time_limit`, `max_free_steps`, `max_scatterings`) are marked invalid for survival analysis rather than normal right-censoring. Before production evaporation runs, compare `interpolation_points = 0`, `1000`, and `2000` for median lifetime, tail fraction, complete-event fraction, and mean scatterings.
 
@@ -73,17 +61,14 @@ For reproducible MPI runs, a nonzero fixed seed is treated as a base seed; each 
 For each parameter point, the main generated files are:
 
 - `bincount.txt` — Combined captured/not-captured time-weighted radial histogram with error estimates; incomplete non-captured trajectories are excluded from the not-captured histogram
-- `evaporation_times.txt` — Without snapshot logging, the default final evaporation-time sequence is a compact table of complete valid evaporation events: `rank trajectory_id t_evap_s`. With `snapshot_evaporation_log_enabled = true` or `evaporation_diagnostics_enabled = true`, it is an append log with ordered snapshot/final blocks and right-censoring flags.
-- `evaporation_summary.txt` — Only written when `evaporation_diagnostics_enabled = true`; one full survival-analysis record for every captured trajectory, including right-censoring and numerical diagnostics.
-- `evaporation_mode_summary.txt` — Counts and log10(lifetime_unbinding/s) boundaries for each configured evaporation mode, using only valid observed unbinding events, when enabled
-- `evaporation_mode_bincount.txt` — Per-mode captured radial bincounts (`dt`, `v2dt`, and errors), when enabled
-- `computation_time_summary.txt` — Wall-clock time, RK45 step-count statistics, captured/complete/censored/invalid-survival counts, and trajectory termination-reason counts
+- `evaporation_times.txt` — Compact table of complete valid evaporation events only: `rank trajectory_id lifetime_unbinding_sec`.
+- `evaporation_diagnostics.txt` — Only written when `evaporation_diagnostics_enabled = true`; one full survival-analysis record for every captured trajectory, including right-censoring and numerical diagnostics.
 
 When `snapshot_enabled = true`, intermediate files are written under `snapshot/`:
 
-- `snapshot_{time}s.txt` — Cumulative snapshot report and bincount histogram. The rank diagnostic table combines the checkpoint source with the current `running`/`done` status.
+- `snapshot_{time}s.txt` — Cumulative snapshot report and bincount histogram.
 
-Snapshot evaporation deltas are appended only to the single `evaporation_times.txt` file. Full 23+ column evaporation diagnostics are still controlled separately by `evaporation_diagnostics_enabled` and written once to `evaporation_summary.txt`.
+Snapshot evaporation deltas are appended only to the single `evaporation_times.txt` file using the same compact event-only format. Full evaporation diagnostics are controlled separately by `evaporation_diagnostics_enabled` and written once to `evaporation_diagnostics.txt`.
 
 ## References
 

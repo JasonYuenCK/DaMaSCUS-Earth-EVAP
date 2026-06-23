@@ -44,16 +44,6 @@ struct EvaporationRecord
 	unsigned long int number_of_scatterings = 0;
 };
 
-struct EvaporationModeBincount
-{
-	unsigned long int count = 0;
-	unsigned long int truncated_count = 0;
-	std::array<double, NUM_BINS> dt_hist{};
-	std::array<double, NUM_BINS> v2dt_hist{};
-	std::array<double, NUM_BINS> dt_sq_hist{};
-	std::array<double, NUM_BINS> v2dt_sq_hist{};
-};
-
 class Simulation_Data
 {
   private:
@@ -73,7 +63,6 @@ class Simulation_Data
 	unsigned long int number_of_complete_evaporation_particles;
 	unsigned long int number_of_censored_captured_particles;
 	unsigned long int number_of_invalid_survival_captured_particles;
-	std::array<unsigned long int, TRAJECTORY_TERMINATION_REASON_COUNT> termination_reason_counts;
 	double average_number_of_scatterings;
 	double computing_time;
 	bool early_stopped;
@@ -92,39 +81,8 @@ class Simulation_Data
 
 	// Evaporation records
 	std::vector<EvaporationRecord> evaporation_records;
-	bool evaporation_mode_bincount_enabled = false;
-	std::vector<double> evaporation_mode_boundaries_log10_s;
-	std::vector<std::string> evaporation_mode_labels;
-	bool evaporation_mode_include_truncated = false;
-	std::vector<EvaporationModeBincount> evaporation_mode_bincounts;
 	bool evaporation_diagnostics_enabled = false;
 	bool snapshot_evaporation_log_enabled = false;
-
-	// --- Per-trajectory computation time statistics ---
-	double total_wall_time_captured;
-	double total_wall_time_not_captured;
-
-	// Wall-clock time log-histogram: 10^{-4} ~ 10^{8} s, 10 bins per decade, 120 bins
-	static constexpr int WALL_TIME_BINS = 120;
-	static constexpr double WALL_TIME_LOG_MIN = -4.0;
-	static constexpr double WALL_TIME_LOG_MAX = 8.0;
-	std::array<unsigned long int, WALL_TIME_BINS> wall_time_hist_captured;
-	std::array<unsigned long int, WALL_TIME_BINS> wall_time_hist_not_captured;
-	unsigned long int wall_time_overflow_captured;
-	unsigned long int wall_time_overflow_not_captured;
-
-	// --- Per-trajectory RK45 step count statistics ---
-	unsigned long int total_rk45_steps_captured;
-	unsigned long int total_rk45_steps_not_captured;
-
-	// RK45 step count log-histogram: 10^{0} ~ 10^{14}, 10 bins per decade, 140 bins
-	static constexpr int STEP_COUNT_BINS = 140;
-	static constexpr double STEP_COUNT_LOG_MIN = 0.0;
-	static constexpr double STEP_COUNT_LOG_MAX = 14.0;
-	std::array<unsigned long int, STEP_COUNT_BINS> step_count_hist_captured;
-	std::array<unsigned long int, STEP_COUNT_BINS> step_count_hist_not_captured;
-	unsigned long int step_count_overflow_captured;
-	unsigned long int step_count_overflow_not_captured;
 
 	// MPI
 	int mpi_rank, mpi_processes;
@@ -142,7 +100,6 @@ class Simulation_Data
 	Simulation_Data(unsigned int sample_size, unsigned int max_trajectories, double u_min = 0.0, unsigned int iso_rings = 1);
 
 	void Configure(double initial_radius, unsigned int min_scattering, unsigned long int max_scattering, unsigned long int max_free_steps = DEFAULT_MAXIMUM_FREE_TIME_STEPS);
-	void Configure_Evaporation_Mode_Bincount(bool enabled, const std::vector<double>& boundaries_log10_s, const std::vector<std::string>& labels, bool include_truncated);
 	void Configure_Evaporation_Diagnostics(bool enabled);
 
 	void Generate_Data(obscura::DM_Particle& DM, Solar_Model& solar_model, obscura::DM_Distribution& halo_model, SnapshotConfig snapshot_cfg = SnapshotConfig(), unsigned int fixed_seed = 0, bool capture_mode = false);

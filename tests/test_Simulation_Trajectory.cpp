@@ -1,6 +1,7 @@
 #include "gtest/gtest.h"
 
 #include <cmath>
+#include <vector>
 
 #include "libphysica/Natural_Units.hpp"
 
@@ -27,7 +28,7 @@ TEST(TestSimulationTrajectory, TestTrajectoryResultConstructor)
 	Event final_event(t_f, r_f, v_f);
 	unsigned int nscat = 14;
 	// ACT
-	Trajectory_Result result(initial_event, final_event, nscat, 0, TrajectoryBincount{});
+	Trajectory_Result result(initial_event, final_event, nscat, TrajectoryBincount{});
 	// ASSERT
 	EXPECT_EQ(result.initial_event.time, t_i);
 	EXPECT_EQ(result.initial_event.position, r_i);
@@ -55,12 +56,12 @@ TEST(TestSimulationTrajectory, TestParticleReflected)
 	escaped_bincount.termination_reason = TrajectoryTerminationReason::OutwardEscape;
 
 	// ACT & ASSERT
-	EXPECT_FALSE(Trajectory_Result(initial_event, not_reflected_1, 1, 0, TrajectoryBincount{}).Particle_Reflected());
-	EXPECT_FALSE(Trajectory_Result(initial_event, not_reflected_2, 1, 0, TrajectoryBincount{}).Particle_Reflected());
-	EXPECT_FALSE(Trajectory_Result(initial_event, not_reflected_3, 1, 0, TrajectoryBincount{}).Particle_Reflected());
-	EXPECT_FALSE(Trajectory_Result(initial_event, reflected_1, 1, 0, TrajectoryBincount{}).Particle_Reflected());
-	EXPECT_TRUE(Trajectory_Result(initial_event, reflected_1, 1, 0, escaped_bincount).Particle_Reflected());
-	EXPECT_FALSE(Trajectory_Result(initial_event, reflected_1, 0, 0, escaped_bincount).Particle_Reflected());
+	EXPECT_FALSE(Trajectory_Result(initial_event, not_reflected_1, 1, TrajectoryBincount{}).Particle_Reflected());
+	EXPECT_FALSE(Trajectory_Result(initial_event, not_reflected_2, 1, TrajectoryBincount{}).Particle_Reflected());
+	EXPECT_FALSE(Trajectory_Result(initial_event, not_reflected_3, 1, TrajectoryBincount{}).Particle_Reflected());
+	EXPECT_FALSE(Trajectory_Result(initial_event, reflected_1, 1, TrajectoryBincount{}).Particle_Reflected());
+	EXPECT_TRUE(Trajectory_Result(initial_event, reflected_1, 1, escaped_bincount).Particle_Reflected());
+	EXPECT_FALSE(Trajectory_Result(initial_event, reflected_1, 0, escaped_bincount).Particle_Reflected());
 }
 
 TEST(TestSimulationTrajectory, TestParticleFree)
@@ -75,9 +76,9 @@ TEST(TestSimulationTrajectory, TestParticleFree)
 	escaped_bincount.termination_reason = TrajectoryTerminationReason::OutwardEscape;
 
 	// ACT & ASSERT
-	EXPECT_FALSE(Trajectory_Result(initial_event, final_event, 1, 0, TrajectoryBincount{}).Particle_Free());
-	EXPECT_FALSE(Trajectory_Result(initial_event, final_event, 0, 0, TrajectoryBincount{}).Particle_Free());
-	EXPECT_TRUE(Trajectory_Result(initial_event, final_event, 0, 0, escaped_bincount).Particle_Free());
+	EXPECT_FALSE(Trajectory_Result(initial_event, final_event, 1, TrajectoryBincount{}).Particle_Free());
+	EXPECT_FALSE(Trajectory_Result(initial_event, final_event, 0, TrajectoryBincount{}).Particle_Free());
+	EXPECT_TRUE(Trajectory_Result(initial_event, final_event, 0, escaped_bincount).Particle_Free());
 }
 
 TEST(TestSimulationTrajectory, TestParticleCaptured)
@@ -96,10 +97,10 @@ TEST(TestSimulationTrajectory, TestParticleCaptured)
 	Solar_Model solar_model;
 
 	// ACT & ASSERT
-	EXPECT_TRUE(Trajectory_Result(initial_event, captured_1, 0, 0, TrajectoryBincount{}).Particle_Captured(solar_model));
-	EXPECT_FALSE(Trajectory_Result(initial_event, not_captured_2, 0, 0, TrajectoryBincount{}).Particle_Captured(solar_model));
-	EXPECT_TRUE(Trajectory_Result(initial_event, captured_3, 0, 0, TrajectoryBincount{}).Particle_Captured(solar_model));
-	EXPECT_FALSE(Trajectory_Result(initial_event, not_captured, 0, 0, TrajectoryBincount{}).Particle_Captured(solar_model));
+	EXPECT_TRUE(Trajectory_Result(initial_event, captured_1, 0, TrajectoryBincount{}).Particle_Captured(solar_model));
+	EXPECT_FALSE(Trajectory_Result(initial_event, not_captured_2, 0, TrajectoryBincount{}).Particle_Captured(solar_model));
+	EXPECT_TRUE(Trajectory_Result(initial_event, captured_3, 0, TrajectoryBincount{}).Particle_Captured(solar_model));
+	EXPECT_FALSE(Trajectory_Result(initial_event, not_captured, 0, TrajectoryBincount{}).Particle_Captured(solar_model));
 }
 
 // TEST(TestSimulationTrajectory, TestResultPrintSummary)
@@ -179,6 +180,28 @@ TEST(TestSimulationTrajectory, TestScatter)
 		simulator.Scatter(event, DM);
 		for(int j = 0; j < 3; j++)
 			EXPECT_NE(event.velocity[j], v_ini[j]);
+	}
+}
+
+TEST(TestSimulationTrajectory, TestScatterWithZAxisVelocityIsFinite)
+{
+	obscura::DM_Particle_SI DM(0.5 * GeV);
+	DM.Set_Sigma_Proton(pb);
+	DM.Set_Sigma_Electron(pb);
+
+	Solar_Model SSM;
+	Trajectory_Simulator simulator(SSM);
+	std::vector<libphysica::Vector> velocities;
+	velocities.push_back(libphysica::Vector({0.0, 0.0, 100.0 * km / sec}));
+	velocities.push_back(libphysica::Vector({0.0, 0.0, -100.0 * km / sec}));
+	velocities.push_back(libphysica::Vector({1.0e-15 * km / sec, 0.0, 100.0 * km / sec}));
+
+	for(const auto& velocity : velocities)
+	{
+		Event event(0.0, libphysica::Vector({0.25 * rSun, 0.0, 0.0}), velocity);
+		ASSERT_NO_THROW(simulator.Scatter(event, DM));
+		for(int component = 0; component < 3; component++)
+			EXPECT_TRUE(std::isfinite(event.velocity[component]));
 	}
 }
 

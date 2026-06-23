@@ -8,6 +8,8 @@
 #include <string>
 #include <iostream>
 #include <limits>
+#include <numeric>
+#include <stdexcept>
 
 #include "libphysica/Special_Functions.hpp"
 #include "libphysica/Statistics.hpp"
@@ -69,6 +71,19 @@ bool Outward_Escaping_At_Boundary(const Event& event, Solar_Model& solar_model, 
 	return radial_velocity > 0.0 && event.Speed() > solar_model.Local_Escape_Speed(radius);
 }
 
+double Clamp_Unit_Interval(double value)
+{
+	return std::max(0.0, std::min(1.0, value));
+}
+
+Event Interpolate_Event(const Event& before, const Event& after, double fraction)
+{
+	fraction = Clamp_Unit_Interval(fraction);
+	return Event(before.time + fraction * (after.time - before.time),
+	             before.position + fraction * (after.position - before.position),
+	             before.velocity + fraction * (after.velocity - before.velocity));
+}
+
 bool RK45_Errors_Within_Tolerance(const double errors[3], const double tolerances[3])
 {
 	for(int i = 0; i < 3; i++)
@@ -127,8 +142,8 @@ bool TrajectoryTerminationInvalidatesSurvival(TrajectoryTerminationReason reason
 	}
 }
 
-Trajectory_Result::Trajectory_Result(const Event& event_ini, const Event& event_final, unsigned long int nScat, unsigned long int rk45_steps, TrajectoryBincount bc)
-: initial_event(event_ini), final_event(event_final), number_of_scatterings(nScat), total_rk45_steps(rk45_steps), bincount(std::move(bc))
+Trajectory_Result::Trajectory_Result(const Event& event_ini, const Event& event_final, unsigned long int nScat, TrajectoryBincount bc)
+: initial_event(event_ini), final_event(event_final), number_of_scatterings(nScat), bincount(std::move(bc))
 {
 }
 
@@ -191,7 +206,7 @@ void Trajectory_Result::Print_Summary(Solar_Model& solar_model, unsigned int mpi
 
 // 2. Simulator
 Trajectory_Simulator::Trajectory_Simulator(const Solar_Model& model, unsigned long int max_time_steps, unsigned long int max_scatterings, double max_distance)
-: solar_model(model), free_flight_reference_energy_eV(std::numeric_limits<double>::quiet_NaN()), current_physical_bound_state(false), terminate_on_capture(false), total_rk45_steps_current_traj(0), trajectory_in_progress(false), current_trajectory_physical_time_sec(0.0), accumulated_snapshot_overhead_sec(0.0), maximum_time_steps(max_time_steps), maximum_scatterings(max_scatterings), maximum_distance(max_distance), current_mpi_rank(0), current_trajectory_id(0)
+: solar_model(model), free_flight_reference_energy_eV(std::numeric_limits<double>::quiet_NaN()), current_physical_bound_state(false), terminate_on_capture(false), trajectory_in_progress(false), current_trajectory_physical_time_sec(0.0), accumulated_snapshot_overhead_sec(0.0), maximum_time_steps(max_time_steps), maximum_scatterings(max_scatterings), maximum_distance(max_distance), current_mpi_rank(0), current_trajectory_id(0)
 {
 	std::random_device rd;
 	PRNG.seed(rd());
@@ -341,25 +356,48 @@ TrajectoryTerminationReason Trajectory_Simulator::Propagate_Freely(Event& curren
 	double minus_log_xi = -log(libphysica::Sample_Uniform(PRNG));
 	TrajectoryTerminationReason outcome = TrajectoryTerminationReason::MaxFreeSteps;
 	unsigned long int time_steps = 0;
+	bool scatter_event_interpolated = false;
+	Event interpolated_scatter_event;
 
 	while(time_steps < maximum_time_steps && outcome == TrajectoryTerminationReason::MaxFreeSteps)
 	{
 		time_steps++;
+		Event event_before = particle_propagator.Event_In_3D();
 		double r_before = particle_propagator.Current_Radius();
 		double v_before = particle_propagator.Current_Speed();
+		double rate_before = 0.0;
 		if(r_before >= rSun)
 		{
 			const double step_cap = Free_Propagation_Time_Step_Cap(r_before, v_before, maximum_distance);
 			particle_propagator.time_step = std::min(RK45_Sanitized_Time_Step(particle_propagator.time_step), step_cap);
 		}
 		else
+		{
 			particle_propagator.time_step = RK45_Sanitized_Time_Step(particle_propagator.time_step);
+			rate_before = solar_model.Total_DM_Scattering_Rate(DM, r_before, v_before);
+			if(!std::isfinite(rate_before) || rate_before < 0.0)
+			{
+				std::cerr << "\nWarning in Propagate_Freely(): invalid pre-step scattering rate (rank "
+				          << current_mpi_rank << ", traj " << current_trajectory_id
+				          << ", rate=" << rate_before << "). Marking trajectory as numerically failed." << std::endl;
+				current_trajectory_physical_time_sec = In_Units(particle_propagator.Current_Time(), sec);
+				Publish_Snapshot_Progress();
+				current_event = particle_propagator.Event_In_3D();
+				return TrajectoryTerminationReason::NumericalFailure;
+			}
+			if(rate_before > 0.0)
+			{
+				constexpr double MAX_OPTICAL_DEPTH_STEP = 0.05;
+				particle_propagator.time_step = std::min(particle_propagator.time_step, MAX_OPTICAL_DEPTH_STEP / rate_before);
+			}
+		}
 
 		double t_before = particle_propagator.Current_Time();
 		bool rk_step_ok = particle_propagator.Runge_Kutta_45_Step(solar_model);
 		double actual_dt = particle_propagator.Current_Time() - t_before;
 		double r_after = particle_propagator.Current_Radius();
 		double v_after = particle_propagator.Current_Speed();
+		Event event_after = particle_propagator.Event_In_3D();
 
 		if(!rk_step_ok)
 		{
@@ -368,7 +406,6 @@ TrajectoryTerminationReason Trajectory_Simulator::Propagate_Freely(Event& curren
 			          << "). Marking trajectory as numerically failed." << std::endl;
 			current_trajectory_physical_time_sec = In_Units(particle_propagator.Current_Time(), sec);
 			Publish_Snapshot_Progress();
-			total_rk45_steps_current_traj += time_steps;
 			current_event = particle_propagator.Event_In_3D();
 			return TrajectoryTerminationReason::NumericalFailure;
 		}
@@ -382,7 +419,6 @@ TrajectoryTerminationReason Trajectory_Simulator::Propagate_Freely(Event& curren
 			          << ", v=" << v_after << ", dt=" << actual_dt << "). Aborting trajectory." << std::endl;
 			current_trajectory_physical_time_sec = In_Units(particle_propagator.Current_Time(), sec);
 			Publish_Snapshot_Progress();
-			total_rk45_steps_current_traj += time_steps;
 			current_event = particle_propagator.Event_In_3D();
 			return TrajectoryTerminationReason::NonFiniteState;
 		}
@@ -393,7 +429,6 @@ TrajectoryTerminationReason Trajectory_Simulator::Propagate_Freely(Event& curren
 					  << "\tAbort simulation." << std::endl;
 			current_trajectory_physical_time_sec = In_Units(particle_propagator.Current_Time(), sec);
 			Publish_Snapshot_Progress();
-			total_rk45_steps_current_traj += time_steps;
 			current_event = particle_propagator.Event_In_3D();
 			return TrajectoryTerminationReason::SpeedLimit;
 		}
@@ -411,7 +446,6 @@ TrajectoryTerminationReason Trajectory_Simulator::Propagate_Freely(Event& curren
 				          << "s). Aborting trajectory." << std::endl;
 				current_trajectory_physical_time_sec = In_Units(particle_propagator.Current_Time(), sec);
 				Publish_Snapshot_Progress();
-				total_rk45_steps_current_traj += time_steps;
 				current_event = particle_propagator.Event_In_3D();
 				return TrajectoryTerminationReason::WallTimeLimit;
 			}
@@ -446,7 +480,6 @@ TrajectoryTerminationReason Trajectory_Simulator::Propagate_Freely(Event& curren
 
 		if(terminate_on_capture && captured_now)
 		{
-			total_rk45_steps_current_traj += time_steps;
 			current_event = particle_propagator.Event_In_3D();
 			return TrajectoryTerminationReason::CaptureMode;
 		}
@@ -454,23 +487,37 @@ TrajectoryTerminationReason Trajectory_Simulator::Propagate_Freely(Event& curren
 		// Check for scatterings and reflection
 		bool scattering = false;
 		bool reflection = false;
-		if(r_after < rSun)
+		const bool inside_sun_step = (r_before < rSun) || (r_after < rSun);
+		if(inside_sun_step)
 		{
-			if(v_after < 0.0)
+			if(r_after < rSun && v_after < 0.0)
 			{
 				std::cerr << "Warning: Negative velocity detected (v = " << v_after << ") at r = " << r_after << ", skipping scattering calculation." << std::endl;
 				break;
 			}
-			double total_rate = solar_model.Total_DM_Scattering_Rate(DM, r_after, v_after);
-			double time_step_max = (total_rate > 0.0) ? (0.1 / total_rate) : (1e30);
-			if(particle_propagator.time_step > time_step_max)
-				particle_propagator.time_step = time_step_max;
-			minus_log_xi -= actual_dt * total_rate;
-			if(minus_log_xi < 0.0)
+			double rate_after = (r_after < rSun) ? solar_model.Total_DM_Scattering_Rate(DM, r_after, v_after) : 0.0;
+			if(!std::isfinite(rate_after) || rate_after < 0.0 || !std::isfinite(rate_before) || rate_before < 0.0)
 			{
+				std::cerr << "\nWarning in Propagate_Freely(): invalid scattering rate (rank "
+				          << current_mpi_rank << ", traj " << current_trajectory_id
+				          << ", rate_before=" << rate_before << ", rate_after=" << rate_after
+				          << "). Marking trajectory as numerically failed." << std::endl;
+				current_trajectory_physical_time_sec = In_Units(particle_propagator.Current_Time(), sec);
+				Publish_Snapshot_Progress();
+				current_event = event_after;
+				return TrajectoryTerminationReason::NumericalFailure;
+			}
+			double delta_tau = 0.5 * (rate_before + rate_after) * actual_dt;
+			if(delta_tau >= minus_log_xi)
+			{
+				double fraction = (delta_tau > 0.0) ? minus_log_xi / delta_tau : 1.0;
+				interpolated_scatter_event = Interpolate_Event(event_before, event_after, fraction);
+				scatter_event_interpolated = true;
 				scattering = true;
 				outcome = TrajectoryTerminationReason::Scatter;
 			}
+			else
+				minus_log_xi -= delta_tau;
 		}
 		else
 		{
@@ -483,12 +530,11 @@ TrajectoryTerminationReason Trajectory_Simulator::Propagate_Freely(Event& curren
 
 		if(reflection || scattering)
 			break;
+
+		current_event = event_after;
 	}
 
-	// Accumulate RK45 steps for this Propagate_Freely call
-	total_rk45_steps_current_traj += time_steps;
-
-	current_event = particle_propagator.Event_In_3D();
+	current_event = scatter_event_interpolated ? interpolated_scatter_event : particle_propagator.Event_In_3D();
 	return outcome;
 }
 
@@ -497,16 +543,23 @@ int Trajectory_Simulator::Sample_Target(obscura::DM_Particle& DM, double r, doub
 {
 	if(r > rSun)
 	{
-		std::cerr << "Error in Trajectory_Simulator::Sample_Target(): r > rSun." << std::endl;
-		std::exit(EXIT_FAILURE);
+		throw std::runtime_error("Sample_Target(): r > rSun.");
 	}
 	else
 	{
 		// C: 复用预分配的 rate_nuclei_cache，避免每次散射事件堆分配
 		for(unsigned int i = 0; i < solar_model.target_isotopes.size(); i++)
+		{
 			rate_nuclei_cache[i] = solar_model.DM_Scattering_Rate_Nucleus(DM, r, DM_speed, i);
+			if(!std::isfinite(rate_nuclei_cache[i]) || rate_nuclei_cache[i] < 0.0)
+				throw std::runtime_error("Sample_Target(): nucleus scattering rate is negative or non-finite.");
+		}
 		double rate_electron = solar_model.DM_Scattering_Rate_Electron(DM, r, DM_speed);
+		if(!std::isfinite(rate_electron) || rate_electron < 0.0)
+			throw std::runtime_error("Sample_Target(): electron scattering rate is negative or non-finite.");
 		double total_rate	 = std::accumulate(rate_nuclei_cache.begin(), rate_nuclei_cache.end(), rate_electron);
+		if(!std::isfinite(total_rate) || total_rate <= 0.0)
+			throw std::runtime_error("Sample_Target(): total scattering rate is non-positive or non-finite.");
 
 		double xi = libphysica::Sample_Uniform(PRNG);
 		// Electron
@@ -520,8 +573,7 @@ int Trajectory_Simulator::Sample_Target(obscura::DM_Particle& DM, double r, doub
 			if(sum > xi || i == solar_model.target_isotopes.size() - 1)
 				return i;
 		}
-		std::cerr << "Error in Trajectory_Simulator::Sample_Target(): No target could be sampled." << std::endl;
-		std::exit(EXIT_FAILURE);
+		throw std::runtime_error("Sample_Target(): no target could be sampled.");
 	}
 }
 
@@ -530,6 +582,8 @@ libphysica::Vector Trajectory_Simulator::Sample_Target_Velocity(double temperatu
 	// Sampling algorithm taken from Romano & Walsh, "An improved target velocity sampling algorithm for free gas elastic scattering"
 	double kappa = sqrt(target_mass / 2.0 / temperature);
 	double vDM	 = vel_DM.Norm();
+	if(!std::isfinite(vDM) || vDM <= 0.0)
+		throw std::runtime_error("Sample_Target_Velocity(): DM speed is non-positive or non-finite.");
 	// 1. Sample target speed vT and mu = cos alpha
 	double y  = kappa * vDM;
 	double x  = y;
@@ -562,11 +616,15 @@ libphysica::Vector Trajectory_Simulator::Sample_Target_Velocity(double temperatu
 	double cos_phi	 = cos(phi);
 	double sin_phi	 = sin(phi);
 
-	libphysica::Vector unit_vector_DM = vel_DM.Normalized();
-	double aux						  = sqrt(1.0 - pow(unit_vector_DM[2], 2.0));
-	libphysica::Vector unit_vector_T({cos_theta * unit_vector_DM[0] + sin_theta / aux * (unit_vector_DM[0] * unit_vector_DM[2] * cos_phi - unit_vector_DM[1] * sin_phi),
-									  cos_theta * unit_vector_DM[1] + sin_theta / aux * (unit_vector_DM[1] * unit_vector_DM[2] * cos_phi + unit_vector_DM[0] * sin_phi),
-									  cos_theta * unit_vector_DM[2] - aux * cos_phi * sin_theta});
+	libphysica::Vector u = vel_DM.Normalized();
+	libphysica::Vector reference = (std::fabs(u[2]) < 0.9)
+	                             ? libphysica::Vector({0.0, 0.0, 1.0})
+	                             : libphysica::Vector({1.0, 0.0, 0.0});
+	libphysica::Vector e1 = reference.Cross(u).Normalized();
+	libphysica::Vector e2 = u.Cross(e1).Normalized();
+	libphysica::Vector unit_vector_T = cos_theta * u
+	                                 + sin_theta * cos_phi * e1
+	                                 + sin_theta * sin_phi * e2;
 
 	return vT * unit_vector_T;
 }
@@ -625,7 +683,6 @@ Trajectory_Result Trajectory_Simulator::Simulate(const Event& initial_condition,
 	current_physical_bound_state = false;
 	current_mpi_rank = mpi_rank;
 	current_trajectory_id++;
-	total_rk45_steps_current_traj = 0;
 	trajectory_in_progress = true;
 	current_trajectory_physical_time_sec = In_Units(current_event.time, sec);
 	current_trajectory_wall_start = std::chrono::steady_clock::now();
@@ -638,7 +695,17 @@ Trajectory_Result Trajectory_Simulator::Simulate(const Event& initial_condition,
 		TrajectoryTerminationReason propagation_reason = Propagate_Freely(current_event, DM);
 		if(propagation_reason == TrajectoryTerminationReason::Scatter && current_event.Radius() < rSun)
 		{
-			Scatter(current_event, DM);
+			try
+			{
+				Scatter(current_event, DM);
+			}
+			catch(const std::exception& error)
+			{
+				std::cerr << "\nWarning in Trajectory_Simulator::Simulate(): " << error.what()
+				          << " Marking trajectory as numerically failed." << std::endl;
+				termination_reason = TrajectoryTerminationReason::NumericalFailure;
+				break;
+			}
 			number_of_scatterings++;
 			bool captured_after_scatter = Update_Capture_State(current_event.Radius(), current_event.Speed(), current_event.time, DM, true);
 			if(terminate_on_capture && captured_after_scatter)
@@ -695,7 +762,7 @@ Trajectory_Result Trajectory_Simulator::Simulate(const Event& initial_condition,
 	if(TrajectoryTerminationInvalidatesSurvival(termination_reason))
 		current_bincount.survival_valid = false;
 
-	return Trajectory_Result(initial_condition, current_event, number_of_scatterings, total_rk45_steps_current_traj, current_bincount);
+	return Trajectory_Result(initial_condition, current_event, number_of_scatterings, current_bincount);
 }  
 
 // 3. Equation of motion solution with Runge-Kutta-Fehlberg

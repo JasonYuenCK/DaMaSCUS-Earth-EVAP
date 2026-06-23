@@ -1,6 +1,5 @@
 #include "Parameter_Scan.hpp"
 
-#include <algorithm>
 #include <cmath>
 #include <libconfig.h++>
 #include <limits>
@@ -248,61 +247,6 @@ void Configuration::Import_Parameter_Scan_Parameter()
 		snapshot_config.max_trajectory_wall_time_sec = 0.0;  // default: unlimited
 	}
 
-	// Per-evaporation-mode ensemble bincounts (optional, default off).
-	evaporation_mode_bincount_enabled = false;
-	try
-	{
-		bool mode_bincount_enabled = config.lookup("evaporation_mode_bincount_enabled");
-		evaporation_mode_bincount_enabled = mode_bincount_enabled;
-	}
-	catch(const SettingNotFoundException& nfex)
-	{
-	}
-
-	evaporation_mode_boundaries_log10_s = {4.5, 11.1};
-	try
-	{
-		const Setting& boundaries = config.lookup("evaporation_mode_boundaries_log10_s");
-		evaporation_mode_boundaries_log10_s.clear();
-		for(int i = 0; i < boundaries.getLength(); i++)
-			evaporation_mode_boundaries_log10_s.push_back(static_cast<double>(boundaries[i]));
-	}
-	catch(const SettingNotFoundException& nfex)
-	{
-	}
-	if(!std::is_sorted(evaporation_mode_boundaries_log10_s.begin(), evaporation_mode_boundaries_log10_s.end()))
-	{
-		std::cerr << "Error in Configuration::Import_Parameter_Scan_Parameter(): 'evaporation_mode_boundaries_log10_s' must be sorted ascending." << std::endl;
-		std::exit(EXIT_FAILURE);
-	}
-
-	evaporation_mode_labels = {"P1_fast", "P2_theory", "P3_tail"};
-	try
-	{
-		const Setting& labels = config.lookup("evaporation_mode_labels");
-		evaporation_mode_labels.clear();
-		for(int i = 0; i < labels.getLength(); i++)
-			evaporation_mode_labels.push_back(labels[i].c_str());
-	}
-	catch(const SettingNotFoundException& nfex)
-	{
-	}
-	if(evaporation_mode_bincount_enabled && evaporation_mode_labels.size() != evaporation_mode_boundaries_log10_s.size() + 1)
-	{
-		std::cerr << "Error in Configuration::Import_Parameter_Scan_Parameter(): 'evaporation_mode_labels' must have one more entry than 'evaporation_mode_boundaries_log10_s'." << std::endl;
-		std::exit(EXIT_FAILURE);
-	}
-
-	evaporation_mode_include_truncated = false;
-	try
-	{
-		bool include_truncated = config.lookup("evaporation_mode_include_truncated");
-		evaporation_mode_include_truncated = include_truncated;
-	}
-	catch(const SettingNotFoundException& nfex)
-	{
-	}
-
 	evaporation_diagnostics_enabled = false;
 	try
 	{
@@ -448,8 +392,6 @@ void Configuration::Print_Summary(int mpi_rank)
 				  << "\tSample size:\t\t\t" << sample_size << std::endl
 				  << "\tMax scatterings/traj:\t\t" << maximum_number_of_scatterings << std::endl
 				  << "\tSc. rate interpolation:\t\t" << ((interpolation_points > 0) ? "[x] (Grid: " + std::to_string(interpolation_points) + "×" + std::to_string(interpolation_points) + ")" : "[ ]") << std::endl;
-		if(evaporation_mode_bincount_enabled)
-			std::cout << "\tEvap. mode bincount:\t\t" << "[x]" << std::endl;
 		if(snapshot_config.enabled && snapshot_config.snapshot_evaporation_log_enabled)
 			std::cout << "\tSnapshot evap. log:\t\t" << "[x]" << std::endl;
 		if(evaporation_diagnostics_enabled)
@@ -472,7 +414,6 @@ double Compute_p_Value(unsigned int sample_size, obscura::DM_Particle& DM, obscu
 	solar_model.Interpolate_Total_DM_Scattering_Rate(DM, rate_interpolation_points, rate_interpolation_points);
 	Simulation_Data data_set(sample_size, g_max_trajectories, u_min);
 	data_set.Configure(2.0 * rSun, 1, max_scatterings);
-	data_set.Configure_Evaporation_Mode_Bincount(false, {}, {}, false);
 	data_set.Generate_Data(DM, solar_model, halo_model);
 	data_set.Print_Summary(mpi_rank);
 	Reflection_Spectrum spectrum(data_set, solar_model, halo_model, DM.mass);

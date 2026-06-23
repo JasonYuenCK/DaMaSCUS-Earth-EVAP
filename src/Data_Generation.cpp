@@ -12,7 +12,7 @@
 #include <limits>
 #include <mpi.h>
 #include <numeric>
-#include <set>
+#include <unordered_set>
 #include <sstream>
 #include <sys/stat.h>
 #include <unistd.h>
@@ -31,14 +31,6 @@ using namespace libphysica::natural_units;
 
 namespace
 {
-constexpr int SNAPSHOT_WALL_TIME_BINS = 120;
-constexpr int SNAPSHOT_STEP_COUNT_BINS = 140;
-
-bool Starts_With(const std::string& value, const std::string& prefix)
-{
-	return value.compare(0, prefix.size(), prefix) == 0;
-}
-
 bool Has_Positive_Evaporation_Time(double t_evap)
 {
 	return std::isfinite(t_evap) && t_evap > 0.0;
@@ -87,48 +79,6 @@ int TerminationReason_Index(TrajectoryTerminationReason reason)
 bool Completed_Outward_Escape(TrajectoryTerminationReason reason)
 {
 	return reason == TrajectoryTerminationReason::OutwardEscape;
-}
-
-bool Incomplete_Physical_Termination(TrajectoryTerminationReason reason)
-{
-	return reason != TrajectoryTerminationReason::OutwardEscape
-	    && reason != TrajectoryTerminationReason::CaptureMode;
-}
-
-unsigned long int Count_Incomplete_Physical_Terminations(const std::array<unsigned long int, TRAJECTORY_TERMINATION_REASON_COUNT>& counts)
-{
-	unsigned long int total = 0;
-	for(int reason_index = 0; reason_index < TRAJECTORY_TERMINATION_REASON_COUNT; reason_index++)
-	{
-		TrajectoryTerminationReason reason = static_cast<TrajectoryTerminationReason>(reason_index);
-		if(Incomplete_Physical_Termination(reason))
-			total += counts[reason_index];
-	}
-	return total;
-}
-
-int Classify_Evaporation_Mode(double log10_t_evap, const std::vector<double>& boundaries_log10_s)
-{
-	if(!std::isfinite(log10_t_evap))
-		return -1;
-	int mode = 0;
-	while(mode < static_cast<int>(boundaries_log10_s.size()) && log10_t_evap >= boundaries_log10_s[mode])
-		mode++;
-	return mode;
-}
-
-void Accumulate_Mode_Bincount(EvaporationModeBincount& mode_bincount, const TrajectoryBincount& bincount)
-{
-	mode_bincount.count++;
-	if(bincount.truncated)
-		mode_bincount.truncated_count++;
-	for(int bin = 0; bin < NUM_BINS; bin++)
-	{
-		mode_bincount.dt_hist[bin] += bincount.dt_hist[bin];
-		mode_bincount.v2dt_hist[bin] += bincount.v2dt_hist[bin];
-		mode_bincount.dt_sq_hist[bin] += bincount.dt_hist[bin] * bincount.dt_hist[bin];
-		mode_bincount.v2dt_sq_hist[bin] += bincount.v2dt_hist[bin] * bincount.v2dt_hist[bin];
-	}
 }
 
 bool Build_Evaporation_Record(const TrajectoryBincount& bincount, int mpi_rank, unsigned long int trajectory_id, double completion_wall_time_sec, EvaporationRecord& rec)
@@ -202,8 +152,6 @@ struct Rank_Snapshot_State
 	uint64_t local_total = 0;
 	uint64_t current_trajectory_id = 0;
 	double rank_elapsed_wall_sec = 0.0;
-	double current_trajectory_wall_sec = 0.0;
-	double current_trajectory_physical_sec = 0.0;
 	int32_t current_trajectory_captured = 0;
 	std::array<double, NUM_BINS> current_trajectory_dt_hist{};
 	std::array<double, NUM_BINS> current_trajectory_v2dt_hist{};
@@ -215,18 +163,6 @@ struct Rank_Snapshot_State
 	std::array<double, NUM_BINS> not_captured_v2dt_hist{};
 	std::array<double, NUM_BINS> not_captured_dt_sq_hist{};
 	std::array<double, NUM_BINS> not_captured_v2dt_sq_hist{};
-	double total_wall_time_captured = 0.0;
-	double total_wall_time_not_captured = 0.0;
-	uint64_t total_rk45_steps_captured = 0;
-	uint64_t total_rk45_steps_not_captured = 0;
-	std::array<uint64_t, SNAPSHOT_WALL_TIME_BINS> wall_time_hist_captured{};
-	std::array<uint64_t, SNAPSHOT_WALL_TIME_BINS> wall_time_hist_not_captured{};
-	uint64_t wall_time_overflow_captured = 0;
-	uint64_t wall_time_overflow_not_captured = 0;
-	std::array<uint64_t, SNAPSHOT_STEP_COUNT_BINS> step_count_hist_captured{};
-	std::array<uint64_t, SNAPSHOT_STEP_COUNT_BINS> step_count_hist_not_captured{};
-	uint64_t step_count_overflow_captured = 0;
-	uint64_t step_count_overflow_not_captured = 0;
 	std::vector<SnapshotEvaporationEntry> new_evaporation_records;
 };
 
@@ -246,43 +182,8 @@ struct Snapshot_Report_State
 	std::array<double, NUM_BINS> not_captured_v2dt_hist{};
 	std::array<double, NUM_BINS> not_captured_dt_sq_hist{};
 	std::array<double, NUM_BINS> not_captured_v2dt_sq_hist{};
-	double total_wall_time_captured = 0.0;
-	double total_wall_time_not_captured = 0.0;
-	uint64_t total_rk45_steps_captured = 0;
-	uint64_t total_rk45_steps_not_captured = 0;
-	std::array<uint64_t, SNAPSHOT_WALL_TIME_BINS> wall_time_hist_captured{};
-	std::array<uint64_t, SNAPSHOT_WALL_TIME_BINS> wall_time_hist_not_captured{};
-	uint64_t wall_time_overflow_captured = 0;
-	uint64_t wall_time_overflow_not_captured = 0;
-	std::array<uint64_t, SNAPSHOT_STEP_COUNT_BINS> step_count_hist_captured{};
-	std::array<uint64_t, SNAPSHOT_STEP_COUNT_BINS> step_count_hist_not_captured{};
-	uint64_t step_count_overflow_captured = 0;
-	uint64_t step_count_overflow_not_captured = 0;
-	std::vector<Rank_Snapshot_State> rank_states;
 	std::vector<RankedSnapshotEvaporationEntry> new_evaporation_records;
 };
-
-struct Snapshot_Load_Diagnostics
-{
-	int ready_ranks = 0;
-	std::vector<std::string> per_rank_status;
-};
-
-std::string Format_Rank_Status(const Rank_Snapshot_State& state);
-
-template<typename T, size_t N>
-bool Find_Nonzero_Bin_Range(const std::array<T, N>& captured_hist, const std::array<T, N>& not_captured_hist, int& first_bin, int& last_bin)
-{
-	first_bin = 0;
-	while(first_bin < static_cast<int>(N) && captured_hist[first_bin] == 0 && not_captured_hist[first_bin] == 0)
-		first_bin++;
-
-	last_bin = static_cast<int>(N) - 1;
-	while(last_bin >= first_bin && captured_hist[last_bin] == 0 && not_captured_hist[last_bin] == 0)
-		last_bin--;
-
-	return first_bin <= last_bin;
-}
 
 template<typename T>
 void Write_Binary_Value(std::ofstream& file, const T& value)
@@ -306,95 +207,6 @@ template<typename T, size_t N>
 void Read_Binary_Array(std::ifstream& file, std::array<T, N>& values)
 {
 	file.read(reinterpret_cast<char*>(values.data()), N * sizeof(T));
-}
-
-void Write_Evaporation_Record_Binary(std::ofstream& file, const EvaporationRecord& rec)
-{
-	const int32_t rank = static_cast<int32_t>(rec.rank);
-	const uint64_t trajectory_id = static_cast<uint64_t>(rec.trajectory_id);
-	const int32_t event_observed = rec.event_observed ? 1 : 0;
-	const int32_t boundary_escape_observed = rec.boundary_escape_observed ? 1 : 0;
-	const int32_t survival_valid = rec.survival_valid ? 1 : 0;
-	const int32_t numerically_invalid_escape = rec.numerically_invalid_escape ? 1 : 0;
-	const int32_t censored = rec.censored ? 1 : 0;
-	const int32_t truncated = rec.truncated ? 1 : 0;
-	const int32_t termination_reason = static_cast<int32_t>(TerminationReason_Index(rec.termination_reason));
-	const uint64_t number_of_scatterings = static_cast<uint64_t>(rec.number_of_scatterings);
-
-	Write_Binary_Value(file, rank);
-	Write_Binary_Value(file, trajectory_id);
-	Write_Binary_Value(file, rec.completion_wall_time_sec);
-	Write_Binary_Value(file, rec.t_evap);
-	Write_Binary_Value(file, rec.t_capture);
-	Write_Binary_Value(file, rec.t_final_unbinding_scatter);
-	Write_Binary_Value(file, rec.t_boundary_escape);
-	Write_Binary_Value(file, rec.t_termination);
-	Write_Binary_Value(file, rec.observed_lifetime);
-	Write_Binary_Value(file, rec.lifetime_unbinding);
-	Write_Binary_Value(file, rec.lifetime_boundary);
-	Write_Binary_Value(file, rec.r_first_negative_km);
-	Write_Binary_Value(file, rec.E_first_negative_eV);
-	Write_Binary_Value(file, rec.dE_first_negative_from_prev_eV);
-	Write_Binary_Value(file, event_observed);
-	Write_Binary_Value(file, boundary_escape_observed);
-	Write_Binary_Value(file, survival_valid);
-	Write_Binary_Value(file, numerically_invalid_escape);
-	Write_Binary_Value(file, censored);
-	Write_Binary_Value(file, truncated);
-	Write_Binary_Value(file, termination_reason);
-	Write_Binary_Value(file, rec.max_free_energy_drift_eV);
-	Write_Binary_Value(file, rec.max_free_energy_drift_rel);
-	Write_Binary_Value(file, number_of_scatterings);
-}
-
-void Read_Evaporation_Record_Binary(std::ifstream& file, EvaporationRecord& rec)
-{
-	int32_t rank = 0;
-	uint64_t trajectory_id = 0;
-	int32_t event_observed = 0;
-	int32_t boundary_escape_observed = 0;
-	int32_t survival_valid = 0;
-	int32_t numerically_invalid_escape = 0;
-	int32_t censored = 0;
-	int32_t truncated = 0;
-	int32_t termination_reason = 0;
-	uint64_t number_of_scatterings = 0;
-
-	Read_Binary_Value(file, rank);
-	Read_Binary_Value(file, trajectory_id);
-	Read_Binary_Value(file, rec.completion_wall_time_sec);
-	Read_Binary_Value(file, rec.t_evap);
-	Read_Binary_Value(file, rec.t_capture);
-	Read_Binary_Value(file, rec.t_final_unbinding_scatter);
-	Read_Binary_Value(file, rec.t_boundary_escape);
-	Read_Binary_Value(file, rec.t_termination);
-	Read_Binary_Value(file, rec.observed_lifetime);
-	Read_Binary_Value(file, rec.lifetime_unbinding);
-	Read_Binary_Value(file, rec.lifetime_boundary);
-	Read_Binary_Value(file, rec.r_first_negative_km);
-	Read_Binary_Value(file, rec.E_first_negative_eV);
-	Read_Binary_Value(file, rec.dE_first_negative_from_prev_eV);
-	Read_Binary_Value(file, event_observed);
-	Read_Binary_Value(file, boundary_escape_observed);
-	Read_Binary_Value(file, survival_valid);
-	Read_Binary_Value(file, numerically_invalid_escape);
-	Read_Binary_Value(file, censored);
-	Read_Binary_Value(file, truncated);
-	Read_Binary_Value(file, termination_reason);
-	Read_Binary_Value(file, rec.max_free_energy_drift_eV);
-	Read_Binary_Value(file, rec.max_free_energy_drift_rel);
-	Read_Binary_Value(file, number_of_scatterings);
-
-	rec.rank = static_cast<int>(rank);
-	rec.trajectory_id = static_cast<unsigned long int>(trajectory_id);
-	rec.event_observed = (event_observed != 0);
-	rec.boundary_escape_observed = (boundary_escape_observed != 0);
-	rec.survival_valid = (survival_valid != 0);
-	rec.numerically_invalid_escape = (numerically_invalid_escape != 0);
-	rec.censored = (censored != 0);
-	rec.truncated = (truncated != 0);
-	rec.termination_reason = static_cast<TrajectoryTerminationReason>(TerminationReason_Index(static_cast<TrajectoryTerminationReason>(termination_reason)));
-	rec.number_of_scatterings = static_cast<unsigned long int>(number_of_scatterings);
 }
 
 void Write_Snapshot_Evaporation_Entry_Binary(std::ofstream& file, const SnapshotEvaporationEntry& entry)
@@ -567,12 +379,6 @@ std::string Format_Physical_Time_Scientific(double physical_time_sec)
 	return stream.str();
 }
 
-bool Path_Exists(const std::string& path)
-{
-	struct stat info;
-	return stat(path.c_str(), &info) == 0;
-}
-
 std::string Join_Path(const std::string& directory, const std::string& name)
 {
 	if(directory.empty() || directory.back() == '/')
@@ -597,200 +403,19 @@ std::string Evaporation_Log_Path_From_Snapshot_Root(const std::string& snapshot_
 	return Join_Path(snapshot_root, "evaporation_times.txt");
 }
 
-using EvaporationRecordKey = std::pair<int, unsigned long int>;
+uint64_t Evaporation_Record_Key(int rank, unsigned long int trajectory_id)
+{
+	return (static_cast<uint64_t>(static_cast<uint32_t>(rank)) << 48)
+	     ^ static_cast<uint64_t>(trajectory_id);
+}
 
 struct EvaporationLogState
 {
-	std::set<EvaporationRecordKey> written_record_keys;
-	std::set<int> completed_snapshot_blocks;
 	int last_snapshot_index = 0;
-	bool final_block_complete = false;
-	uint64_t valid_records = 0;
-	uint64_t event_records = 0;
-	uint64_t censored_records = 0;
-	uint64_t invalid_records = 0;
+	bool final_block_written = false;
+	uint64_t records_written = 0;
+	std::unordered_set<uint64_t> written_record_keys;
 };
-
-uint64_t Payload_Checksum(const std::vector<std::string>& lines);
-
-EvaporationLogState Read_Evaporation_Log_State(const std::string& path)
-{
-	EvaporationLogState state;
-	std::ifstream file(path);
-	if(!file.is_open())
-		return state;
-
-	auto accumulate_record_line = [&](const std::string& line)
-	{
-		if(line.empty())
-			return;
-
-		if(Starts_With(line, "# invalid_record"))
-		{
-			std::istringstream stream(line.substr(std::string("# invalid_record").size()));
-			int rank = -1;
-			unsigned long int trajectory_id = 0;
-			if(stream >> rank >> trajectory_id)
-			{
-				if(state.written_record_keys.insert(EvaporationRecordKey(rank, trajectory_id)).second)
-					state.invalid_records++;
-			}
-			return;
-		}
-		if(line[0] == '#')
-			return;
-
-		std::istringstream stream(line);
-		int rank = -1;
-		unsigned long int trajectory_id = 0;
-		double time_s = 0.0;
-		int event_observed = 1;
-		if(stream >> rank >> trajectory_id >> time_s)
-		{
-			stream >> event_observed;
-			if(state.written_record_keys.insert(EvaporationRecordKey(rank, trajectory_id)).second)
-			{
-				state.valid_records++;
-				if(event_observed != 0)
-					state.event_records++;
-				else
-					state.censored_records++;
-			}
-		}
-	};
-
-	auto parse_block_integer = [](const std::vector<std::string>& lines, const std::string& prefix, int fallback)
-	{
-		for(const auto& block_line : lines)
-		{
-			if(Starts_With(block_line, prefix))
-			{
-				std::istringstream stream(block_line.substr(prefix.size()));
-				int value = fallback;
-				if(stream >> value)
-					return value;
-			}
-		}
-		return fallback;
-	};
-
-	auto parse_block_uint64 = [](const std::vector<std::string>& lines, const std::string& prefix, uint64_t fallback)
-	{
-		for(const auto& block_line : lines)
-		{
-			if(Starts_With(block_line, prefix))
-			{
-				std::istringstream stream(block_line.substr(prefix.size()));
-				uint64_t value = fallback;
-				if(stream >> value)
-					return value;
-			}
-		}
-		return fallback;
-	};
-
-	auto count_data_lines = [](const std::vector<std::string>& lines)
-	{
-		uint64_t count = 0;
-		for(const auto& block_line : lines)
-		{
-			if(!block_line.empty() && block_line[0] != '#')
-				count++;
-		}
-		return count;
-	};
-
-	std::string line;
-	int current_snapshot_index = -1;
-	bool in_final_block = false;
-	bool in_block = false;
-	std::vector<std::string> pending_block_lines;
-	while(std::getline(file, line))
-	{
-		if(line.empty())
-			continue;
-
-		if(Starts_With(line, "# BEGIN_SNAPSHOT"))
-		{
-			current_snapshot_index = -1;
-			in_final_block = false;
-			in_block = true;
-			pending_block_lines.clear();
-			continue;
-		}
-		if(Starts_With(line, "# BEGIN_FINAL"))
-		{
-			in_final_block = true;
-			current_snapshot_index = -1;
-			in_block = true;
-			pending_block_lines.clear();
-			continue;
-		}
-
-		if(!in_block)
-			continue;
-
-		if(Starts_With(line, "# block_id = snapshot_"))
-		{
-			std::istringstream stream(line.substr(std::string("# block_id = snapshot_").size()));
-			stream >> current_snapshot_index;
-		}
-
-		pending_block_lines.push_back(line);
-
-		if(Starts_With(line, "# END_SNAPSHOT"))
-		{
-			const int previous_snapshot_index = parse_block_integer(pending_block_lines, "# previous_snapshot_index = ", -1);
-			const int records_written = parse_block_integer(pending_block_lines, "# records_written = ", -1);
-			const uint64_t expected_checksum = parse_block_uint64(pending_block_lines, "# payload_checksum = ", std::numeric_limits<uint64_t>::max());
-			const bool records_match = (records_written >= 0 && count_data_lines(pending_block_lines) == static_cast<uint64_t>(records_written));
-			const bool checksum_match = (expected_checksum != std::numeric_limits<uint64_t>::max()
-			                             && Payload_Checksum(pending_block_lines) == expected_checksum);
-			if(current_snapshot_index == state.last_snapshot_index + 1
-			   && previous_snapshot_index == state.last_snapshot_index
-			   && records_match
-			   && checksum_match)
-			{
-				for(const auto& block_line : pending_block_lines)
-					accumulate_record_line(block_line);
-				state.completed_snapshot_blocks.insert(current_snapshot_index);
-				state.last_snapshot_index = current_snapshot_index;
-			}
-			current_snapshot_index = -1;
-			in_final_block = false;
-			in_block = false;
-			pending_block_lines.clear();
-			continue;
-		}
-		if(Starts_With(line, "# END_FINAL"))
-		{
-			const int records_written = parse_block_integer(pending_block_lines, "# records_written = ", -1);
-			const uint64_t expected_checksum = parse_block_uint64(pending_block_lines, "# payload_checksum = ", std::numeric_limits<uint64_t>::max());
-			const bool records_match = (records_written >= 0 && count_data_lines(pending_block_lines) == static_cast<uint64_t>(records_written));
-			const bool checksum_match = (expected_checksum != std::numeric_limits<uint64_t>::max()
-			                             && Payload_Checksum(pending_block_lines) == expected_checksum);
-			if(in_final_block && records_match && checksum_match)
-			{
-				for(const auto& block_line : pending_block_lines)
-					accumulate_record_line(block_line);
-				state.final_block_complete = true;
-			}
-			current_snapshot_index = -1;
-			in_final_block = false;
-			in_block = false;
-			pending_block_lines.clear();
-			continue;
-		}
-	}
-
-	return state;
-}
-
-bool Evaporation_Log_Has_Snapshot_Block(const std::string& path, int snapshot_index)
-{
-	EvaporationLogState state = Read_Evaporation_Log_State(path);
-	return state.completed_snapshot_blocks.count(snapshot_index) != 0;
-}
 
 bool File_Is_Empty_Or_Missing(const std::string& path)
 {
@@ -800,72 +425,58 @@ bool File_Is_Empty_Or_Missing(const std::string& path)
 	return info.st_size == 0;
 }
 
-struct EvaporationLogBlockCounts
+void Write_Evaporation_Log_File_Header(std::ofstream& file, double mass_gev, double sigma_cm2)
 {
-	uint64_t valid_records = 0;
-	uint64_t event_records = 0;
-	uint64_t censored_records = 0;
-	uint64_t invalid_records = 0;
-};
-
-uint64_t Update_FNV1a_Checksum(uint64_t checksum, const std::string& text)
-{
-	constexpr uint64_t fnv_prime = 1099511628211ULL;
-	for(char c : text)
-	{
-		checksum ^= static_cast<uint8_t>(c);
-		checksum *= fnv_prime;
-	}
-	checksum ^= static_cast<uint8_t>('\n');
-	checksum *= fnv_prime;
-	return checksum;
-}
-
-uint64_t Payload_Checksum(const std::vector<std::string>& lines)
-{
-	uint64_t checksum = 1469598103934665603ULL;
-	for(const auto& line : lines)
-	{
-		if(!line.empty() && line[0] != '#')
-			checksum = Update_FNV1a_Checksum(checksum, line);
-	}
-	return checksum;
-}
-
-void Write_Evaporation_Log_File_Header(std::ofstream& file, double mass_gev, double sigma_cm2, bool diagnostics_enabled)
-{
-	file << (diagnostics_enabled ? "# DaMaSCUS-SUN evaporation survival records\n" : "# DaMaSCUS-SUN evaporation times\n");
-	file << "# format_version = 2\n";
+	file << "# DaMaSCUS-SUN evaporation times\n";
+	file << "# format_version = 3\n";
 	file << "# DM_mass_GeV = " << std::scientific << std::setprecision(6) << mass_gev << "\n";
 	file << "# DM_sigma_cm2 = " << std::scientific << std::setprecision(6) << sigma_cm2 << "\n";
-	file << "# survival_log_enabled = " << (diagnostics_enabled ? 1 : 0) << "\n";
-	if(diagnostics_enabled)
-	{
-		file << "# columns: rank trajectory_id time_s event_observed\n";
-		file << "# event_observed = 1 means time_s is the physical evaporation lifetime.\n";
-		file << "# event_observed = 0 means time_s is the right-censoring lifetime.\n";
-		file << "# Numerically invalid records are counted in block headers and identified by # invalid_record comments, not data rows.\n";
-		file << "# The full diagnostic record is written to evaporation_summary.txt.\n";
-	}
-	else
-	{
-		file << "# output_mode = complete_evaporation_events_only\n";
-		file << "# columns: rank trajectory_id t_evap_s\n";
-		file << "# Only survival_valid=1, event_observed=1, lifetime_unbinding>=0 records are written.\n";
-	}
-	file << "#\n";
+	file << "# rank trajectory_id lifetime_unbinding_sec\n";
 }
 
-bool Write_Evaporation_Time_Log_Block(const std::string& path, const std::string& block_kind, int snapshot_index, double snapshot_interval_seconds, double mass_gev, double sigma_cm2, const std::vector<EvaporationRecord>& records, bool diagnostics_enabled)
+void Recover_Evaporation_Log_State(const std::string& path, EvaporationLogState& state)
 {
-	EvaporationLogState state = Read_Evaporation_Log_State(path);
-	if(block_kind == "snapshot" && state.completed_snapshot_blocks.count(snapshot_index) != 0)
-		return true;
-	if(block_kind == "snapshot" && snapshot_index != state.last_snapshot_index + 1)
-		return false;
-	if(block_kind == "final" && state.final_block_complete)
-		return true;
+	std::ifstream file(path);
+	if(!file.is_open())
+		return;
 
+	std::string line;
+	while(std::getline(file, line))
+	{
+		if(line.empty() || line[0] == '#')
+			continue;
+		std::istringstream stream(line);
+		int rank = -1;
+		unsigned long int trajectory_id = 0;
+		double lifetime = 0.0;
+		if(stream >> rank >> trajectory_id >> lifetime)
+		{
+			const uint64_t key = Evaporation_Record_Key(rank, trajectory_id);
+			if(state.written_record_keys.insert(key).second)
+				state.records_written++;
+		}
+	}
+}
+
+bool Initialize_Evaporation_Log(const std::string& path, double mass_gev, double sigma_cm2, EvaporationLogState& state)
+{
+	state = EvaporationLogState();
+	if(!File_Is_Empty_Or_Missing(path))
+	{
+		Recover_Evaporation_Log_State(path, state);
+		return true;
+	}
+
+	std::ofstream file(path, std::ios::out | std::ios::trunc);
+	if(!file.is_open())
+		return false;
+	Write_Evaporation_Log_File_Header(file, mass_gev, sigma_cm2);
+	file.close();
+	return file.good();
+}
+
+bool Append_Completed_Evaporation_Events(const std::string& path, const std::vector<EvaporationRecord>& records, EvaporationLogState& state)
+{
 	std::vector<EvaporationRecord> sorted_records = records;
 	std::sort(sorted_records.begin(), sorted_records.end(), [](const EvaporationRecord& lhs, const EvaporationRecord& rhs)
 	{
@@ -874,138 +485,36 @@ bool Write_Evaporation_Time_Log_Block(const std::string& path, const std::string
 		return lhs.trajectory_id < rhs.trajectory_id;
 	});
 
-	std::vector<EvaporationRecord> new_valid_records;
-	std::vector<EvaporationRecord> new_invalid_records;
-	std::set<EvaporationRecordKey> keys_after_block = state.written_record_keys;
-	for(const auto& rec : sorted_records)
-	{
-		const EvaporationRecordKey key(rec.rank, rec.trajectory_id);
-		if(keys_after_block.count(key) != 0)
-			continue;
-
-		keys_after_block.insert(key);
-		if(diagnostics_enabled && rec.survival_valid && std::isfinite(rec.observed_lifetime) && rec.observed_lifetime >= 0.0)
-			new_valid_records.push_back(rec);
-		else if(!diagnostics_enabled && Is_Completed_Evaporation_Record(rec))
-			new_valid_records.push_back(rec);
-		else if(!diagnostics_enabled)
-			continue;
-		else
-			new_invalid_records.push_back(rec);
-	}
-
-	EvaporationLogBlockCounts new_counts;
-	new_counts.valid_records = static_cast<uint64_t>(new_valid_records.size());
-	new_counts.invalid_records = static_cast<uint64_t>(new_invalid_records.size());
-	for(const auto& rec : new_valid_records)
-	{
-		if(rec.event_observed)
-			new_counts.event_records++;
-		else
-			new_counts.censored_records++;
-	}
-
-	const bool needs_header = File_Is_Empty_Or_Missing(path);
 	std::ofstream file(path, std::ios::out | std::ios::app);
 	if(!file.is_open())
 		return false;
 
-	if(needs_header)
-		Write_Evaporation_Log_File_Header(file, mass_gev, sigma_cm2, diagnostics_enabled);
-
-	if(block_kind == "snapshot")
+	for(const auto& rec : sorted_records)
 	{
-		const long long target_wall_time = Snapshot_Time_Label_Seconds(snapshot_index, snapshot_interval_seconds);
-		file << "# BEGIN_SNAPSHOT\n";
-		file << "# block_id = snapshot_" << snapshot_index << "\n";
-		file << "# snapshot_index = " << snapshot_index << "\n";
-		file << "# previous_snapshot_index = " << state.last_snapshot_index << "\n";
-		file << "# target_wall_time_s = " << target_wall_time << "\n";
-		file << "# snapshot_interval_s = " << std::fixed << std::setprecision(3) << snapshot_interval_seconds << "\n";
-	}
-	else
-	{
-		file << "# BEGIN_FINAL\n";
-		file << "# block_id = final\n";
-	}
-
-	if(diagnostics_enabled)
-	{
-		file << "# new_records = " << new_counts.valid_records << "\n";
-		file << "# new_events = " << new_counts.event_records << "\n";
-		file << "# new_censored = " << new_counts.censored_records << "\n";
-		file << "# new_invalid = " << new_counts.invalid_records << "\n";
-		file << "# cumulative_records = " << (state.valid_records + new_counts.valid_records) << "\n";
-		file << "# cumulative_events = " << (state.event_records + new_counts.event_records) << "\n";
-		file << "# cumulative_censored = " << (state.censored_records + new_counts.censored_records) << "\n";
-		file << "# cumulative_invalid = " << (state.invalid_records + new_counts.invalid_records) << "\n";
-	}
-	file << "# columns: " << (diagnostics_enabled ? "rank trajectory_id time_s event_observed" : "rank trajectory_id t_evap_s") << "\n";
-
-	if(diagnostics_enabled)
-	{
-		for(const auto& rec : new_invalid_records)
-			file << "# invalid_record\t" << rec.rank << "\t" << rec.trajectory_id
-			     << "\ttermination_reason=" << TerminationReason_Name(rec.termination_reason) << "\n";
-	}
-
-	std::vector<std::string> payload_lines;
-	payload_lines.reserve(new_valid_records.size());
-	for(const auto& rec : new_valid_records)
-	{
-		std::ostringstream line;
-		line << rec.rank << "\t" << rec.trajectory_id << "\t" << std::scientific << std::setprecision(10)
-		     << (diagnostics_enabled ? rec.observed_lifetime : rec.lifetime_unbinding);
-		if(diagnostics_enabled)
-			line << "\t" << (rec.event_observed ? 1 : 0);
-		payload_lines.push_back(line.str());
-	}
-	file << "# payload_checksum = " << Payload_Checksum(payload_lines) << "\n";
-	for(const auto& line : payload_lines)
-		file << line << "\n";
-
-	if(block_kind == "snapshot")
-	{
-		file << "# records_written = " << new_counts.valid_records << "\n";
-		file << "# END_SNAPSHOT\n";
-		file << "# snapshot_index = " << snapshot_index << "\n";
-	}
-	else
-	{
-		file << "# records_written = " << new_counts.valid_records << "\n";
-		file << "# END_FINAL\n";
-		file << "# run_complete = 1\n";
+		if(!Is_Completed_Evaporation_Record(rec))
+			continue;
+		const uint64_t key = Evaporation_Record_Key(rec.rank, rec.trajectory_id);
+		if(!state.written_record_keys.insert(key).second)
+			continue;
+		file << rec.rank << "\t" << rec.trajectory_id << "\t" << std::scientific << std::setprecision(10)
+		     << rec.lifetime_unbinding << "\n";
+		state.records_written++;
 	}
 	file.close();
-
 	return file.good();
 }
 
 bool Write_Final_Evaporation_Time_File(const std::string& path, double mass_gev, double sigma_cm2, const std::vector<EvaporationRecord>& records)
 {
-	std::vector<EvaporationRecord> sorted_records = records;
-	std::sort(sorted_records.begin(), sorted_records.end(), [](const EvaporationRecord& lhs, const EvaporationRecord& rhs)
-	{
-		if(lhs.rank != rhs.rank)
-			return lhs.rank < rhs.rank;
-		return lhs.trajectory_id < rhs.trajectory_id;
-	});
-
+	EvaporationLogState state;
 	std::ofstream file(path, std::ios::out | std::ios::trunc);
 	if(!file.is_open())
 		return false;
-
-	Write_Evaporation_Log_File_Header(file, mass_gev, sigma_cm2, false);
-	for(const auto& rec : sorted_records)
-	{
-		if(!Is_Completed_Evaporation_Record(rec))
-			continue;
-		file << rec.rank << "\t" << rec.trajectory_id << "\t" << std::scientific << std::setprecision(10)
-		     << rec.lifetime_unbinding << "\n";
-	}
+	Write_Evaporation_Log_File_Header(file, mass_gev, sigma_cm2);
 	file.close();
-
-	return file.good();
+	if(!file.good())
+		return false;
+	return Append_Completed_Evaporation_Events(path, records, state);
 }
 
 bool Remove_Path_Recursive(const std::string& path)
@@ -1082,19 +591,6 @@ void Remove_Stale_Snapshot_Evaporation_File(const std::string& snapshot_root, in
 {
 	std::string path = snapshot_root + "snapshot_" + std::to_string(Snapshot_Time_Label_Seconds(snapshot_index, interval_seconds)) + "s_evaporation.txt";
 	std::remove(path.c_str());
-}
-
-void Write_Snapshot_Diagnostics(std::ofstream& file, int snapshot_index, double interval_seconds, int caller_rank, const Snapshot_Load_Diagnostics& diagnostics, bool merged)
-{
-	file << "# snapshot_status = " << (merged ? "merged" : "waiting") << "\n";
-	file << "# snapshot_target_wall_time_s = " << Snapshot_Time_Label_Seconds(snapshot_index, interval_seconds) << "\n";
-	file << "# snapshot_interval_s = " << std::fixed << std::setprecision(3) << interval_seconds << "\n";
-	file << "# attempted_by_rank = " << caller_rank << "\n";
-	file << "# ready_ranks = " << diagnostics.ready_ranks << " / " << diagnostics.per_rank_status.size() << "\n";
-	file << "#\n";
-	file << "# rank_index  source_or_wait_reason_and_status\n";
-	for(size_t rank = 0; rank < diagnostics.per_rank_status.size(); rank++)
-		file << rank << "\t" << diagnostics.per_rank_status[rank] << "\n";
 }
 
 bool Snapshot_Text_File_Is_Merged(const std::string& path)
@@ -1180,8 +676,6 @@ bool Write_Rank_Snapshot_State(const std::string& path, const Rank_Snapshot_Stat
 	Write_Binary_Value(file, state.local_total);
 	Write_Binary_Value(file, state.current_trajectory_id);
 	Write_Binary_Value(file, state.rank_elapsed_wall_sec);
-	Write_Binary_Value(file, state.current_trajectory_wall_sec);
-	Write_Binary_Value(file, state.current_trajectory_physical_sec);
 	Write_Binary_Value(file, state.current_trajectory_captured);
 	Write_Binary_Array(file, state.current_trajectory_dt_hist);
 	Write_Binary_Array(file, state.current_trajectory_v2dt_hist);
@@ -1193,18 +687,6 @@ bool Write_Rank_Snapshot_State(const std::string& path, const Rank_Snapshot_Stat
 	Write_Binary_Array(file, state.not_captured_v2dt_hist);
 	Write_Binary_Array(file, state.not_captured_dt_sq_hist);
 	Write_Binary_Array(file, state.not_captured_v2dt_sq_hist);
-	Write_Binary_Value(file, state.total_wall_time_captured);
-	Write_Binary_Value(file, state.total_wall_time_not_captured);
-	Write_Binary_Value(file, state.total_rk45_steps_captured);
-	Write_Binary_Value(file, state.total_rk45_steps_not_captured);
-	Write_Binary_Array(file, state.wall_time_hist_captured);
-	Write_Binary_Array(file, state.wall_time_hist_not_captured);
-	Write_Binary_Value(file, state.wall_time_overflow_captured);
-	Write_Binary_Value(file, state.wall_time_overflow_not_captured);
-	Write_Binary_Array(file, state.step_count_hist_captured);
-	Write_Binary_Array(file, state.step_count_hist_not_captured);
-	Write_Binary_Value(file, state.step_count_overflow_captured);
-	Write_Binary_Value(file, state.step_count_overflow_not_captured);
 	const uint64_t new_evaporation_record_count = static_cast<uint64_t>(state.new_evaporation_records.size());
 	Write_Binary_Value(file, new_evaporation_record_count);
 	for(const auto& entry : state.new_evaporation_records)
@@ -1241,8 +723,6 @@ bool Read_Rank_Snapshot_State(const std::string& path, uint64_t expected_run_id,
 	Read_Binary_Value(file, state.local_total);
 	Read_Binary_Value(file, state.current_trajectory_id);
 	Read_Binary_Value(file, state.rank_elapsed_wall_sec);
-	Read_Binary_Value(file, state.current_trajectory_wall_sec);
-	Read_Binary_Value(file, state.current_trajectory_physical_sec);
 	Read_Binary_Value(file, state.current_trajectory_captured);
 	Read_Binary_Array(file, state.current_trajectory_dt_hist);
 	Read_Binary_Array(file, state.current_trajectory_v2dt_hist);
@@ -1254,18 +734,6 @@ bool Read_Rank_Snapshot_State(const std::string& path, uint64_t expected_run_id,
 	Read_Binary_Array(file, state.not_captured_v2dt_hist);
 	Read_Binary_Array(file, state.not_captured_dt_sq_hist);
 	Read_Binary_Array(file, state.not_captured_v2dt_sq_hist);
-	Read_Binary_Value(file, state.total_wall_time_captured);
-	Read_Binary_Value(file, state.total_wall_time_not_captured);
-	Read_Binary_Value(file, state.total_rk45_steps_captured);
-	Read_Binary_Value(file, state.total_rk45_steps_not_captured);
-	Read_Binary_Array(file, state.wall_time_hist_captured);
-	Read_Binary_Array(file, state.wall_time_hist_not_captured);
-	Read_Binary_Value(file, state.wall_time_overflow_captured);
-	Read_Binary_Value(file, state.wall_time_overflow_not_captured);
-	Read_Binary_Array(file, state.step_count_hist_captured);
-	Read_Binary_Array(file, state.step_count_hist_not_captured);
-	Read_Binary_Value(file, state.step_count_overflow_captured);
-	Read_Binary_Value(file, state.step_count_overflow_not_captured);
 	uint64_t new_evaporation_record_count = 0;
 	Read_Binary_Value(file, new_evaporation_record_count);
 	state.new_evaporation_records.clear();
@@ -1279,28 +747,12 @@ bool Read_Rank_Snapshot_State(const std::string& path, uint64_t expected_run_id,
 	return state.run_id == expected_run_id;
 }
 
-bool Write_Snapshot_Text_Status(const std::string& snapshot_root, int snapshot_index, double interval_seconds, int caller_rank, const Snapshot_Load_Diagnostics& diagnostics, bool merged)
-{
-	return Write_Text_File_Atomically(Snapshot_Text_File_Path(snapshot_root, snapshot_index, interval_seconds), snapshot_index * 1000 + caller_rank, [&](std::ofstream& file)
-	{
-		Write_Snapshot_Diagnostics(file, snapshot_index, interval_seconds, caller_rank, diagnostics, merged);
-	});
-}
-
 void Accumulate_Snapshot_Report_State(Snapshot_Report_State& report, const Rank_Snapshot_State& state)
 {
 	report.total_trajectories += state.local_total;
 	report.captured_particles += state.local_captured;
 	report.snapshot_bincount_captured_samples += state.local_captured;
 	report.snapshot_bincount_not_captured_samples += (state.local_total - state.local_captured);
-	report.total_wall_time_captured += state.total_wall_time_captured;
-	report.total_wall_time_not_captured += state.total_wall_time_not_captured;
-	report.total_rk45_steps_captured += state.total_rk45_steps_captured;
-	report.total_rk45_steps_not_captured += state.total_rk45_steps_not_captured;
-	report.wall_time_overflow_captured += state.wall_time_overflow_captured;
-	report.wall_time_overflow_not_captured += state.wall_time_overflow_not_captured;
-	report.step_count_overflow_captured += state.step_count_overflow_captured;
-	report.step_count_overflow_not_captured += state.step_count_overflow_not_captured;
 	const double lower_wall_time = (report.snapshot_time_label > report.snapshot_interval_seconds) ? (report.snapshot_time_label - report.snapshot_interval_seconds) : 0.0;
 	const double upper_wall_time = static_cast<double>(report.snapshot_time_label);
 	for(const auto& entry : state.new_evaporation_records)
@@ -1352,31 +804,14 @@ void Accumulate_Snapshot_Report_State(Snapshot_Report_State& report, const Rank_
 		}
 	}
 
-	for(int bin = 0; bin < SNAPSHOT_WALL_TIME_BINS; bin++)
-	{
-		report.wall_time_hist_captured[bin] += state.wall_time_hist_captured[bin];
-		report.wall_time_hist_not_captured[bin] += state.wall_time_hist_not_captured[bin];
-	}
-
-	for(int bin = 0; bin < SNAPSHOT_STEP_COUNT_BINS; bin++)
-	{
-		report.step_count_hist_captured[bin] += state.step_count_hist_captured[bin];
-		report.step_count_hist_not_captured[bin] += state.step_count_hist_not_captured[bin];
-	}
 
 }
 
-bool Load_Snapshot_Report_State(const std::string& rank_snapshot_dir, int snapshot_index, double interval_seconds, int mpi_processes, uint64_t run_id, Snapshot_Report_State& report, Snapshot_Load_Diagnostics* diagnostics = NULL)
+bool Load_Snapshot_Report_State(const std::string& rank_snapshot_dir, int snapshot_index, double interval_seconds, int mpi_processes, uint64_t run_id, Snapshot_Report_State& report)
 {
 	report = Snapshot_Report_State();
 	report.snapshot_time_label = Snapshot_Time_Label_Seconds(snapshot_index, interval_seconds);
 	report.snapshot_interval_seconds = interval_seconds;
-	report.rank_states.reserve(mpi_processes);
-	if(diagnostics != NULL)
-	{
-		diagnostics->ready_ranks = 0;
-		diagnostics->per_rank_status.assign(mpi_processes, "pending");
-	}
 
 	bool all_ranks_ready = true;
 
@@ -1384,94 +819,37 @@ bool Load_Snapshot_Report_State(const std::string& rank_snapshot_dir, int snapsh
 	{
 		Rank_Snapshot_State state;
 		const std::string checkpoint_path = Rank_Snapshot_Checkpoint_Path(rank_snapshot_dir, rank, snapshot_index, interval_seconds);
-		const bool checkpoint_exists = Path_Exists(checkpoint_path);
 		if(Read_Rank_Snapshot_State(checkpoint_path, run_id, state))
 		{
 			Accumulate_Snapshot_Report_State(report, state);
-			report.rank_states.push_back(state);
-			if(diagnostics != NULL)
-			{
-				diagnostics->ready_ranks++;
-				diagnostics->per_rank_status[rank] = "checkpoint, " + Format_Rank_Status(state);
-			}
 			continue;
 		}
 
 		const std::string final_path = Rank_Snapshot_Final_Path(rank_snapshot_dir, rank);
-		const bool final_exists = Path_Exists(final_path);
 		if(Read_Rank_Snapshot_State(final_path, run_id, state) && state.done && state.rank_elapsed_wall_sec <= report.snapshot_time_label)
 		{
 			Accumulate_Snapshot_Report_State(report, state);
-			report.rank_states.push_back(state);
-			if(diagnostics != NULL)
-			{
-				diagnostics->ready_ranks++;
-				std::ostringstream status;
-				status << "final(done_at=" << std::fixed << std::setprecision(3) << state.rank_elapsed_wall_sec << "s), " << Format_Rank_Status(state);
-				diagnostics->per_rank_status[rank] = status.str();
-			}
 			continue;
 		}
 
 		all_ranks_ready = false;
-		if(diagnostics != NULL)
-		{
-			std::ostringstream status;
-			if(checkpoint_exists)
-				status << "checkpoint_unreadable_or_stale";
-			else
-				status << "no_checkpoint";
-
-			status << "; ";
-			if(!final_exists)
-				status << "no_final";
-			else if(!Read_Rank_Snapshot_State(final_path, run_id, state))
-				status << "final_unreadable_or_stale";
-			else if(!state.done)
-				status << "final_not_done";
-			else if(state.rank_elapsed_wall_sec > report.snapshot_time_label)
-				status << "final_after_target(done_at=" << std::fixed << std::setprecision(3) << state.rank_elapsed_wall_sec << "s)";
-			else
-				status << "final_unknown";
-
-			diagnostics->per_rank_status[rank] = status.str();
-		}
 	}
 
 	return all_ranks_ready;
 }
 
-bool Write_Snapshot_Report_File(const std::string& snapshot_root, int snapshot_index, double interval_seconds, double mass_gev, double sigma_cm2, const Snapshot_Report_State& report, int caller_rank, const Snapshot_Load_Diagnostics& diagnostics, bool snapshot_evaporation_log_enabled)
+bool Write_Snapshot_Report_File(const std::string& snapshot_root, int snapshot_index, double interval_seconds, double mass_gev, double sigma_cm2, const Snapshot_Report_State& report, bool snapshot_evaporation_log_enabled, EvaporationLogState* evaporation_log_state)
 {
 	Remove_Stale_Snapshot_Evaporation_File(snapshot_root, snapshot_index, interval_seconds);
 
 	if(!Write_Text_File_Atomically(Snapshot_Text_File_Path(snapshot_root, snapshot_index, interval_seconds), snapshot_index, [&](std::ofstream& file)
 	{
-		Write_Snapshot_Diagnostics(file, snapshot_index, interval_seconds, caller_rank, diagnostics, true);
-		file << "#\n";
+		file << "# snapshot_status = merged\n";
 		file << "# Cumulative snapshot report\n";
 		Write_Report_Header(file, mass_gev, sigma_cm2, report.total_trajectories, report.captured_particles, false, report.snapshot_time_label, report.snapshot_interval_seconds);
 
 		double snapshot_captured_samples = static_cast<double>(report.snapshot_bincount_captured_samples);
 		double snapshot_not_captured_samples = static_cast<double>(report.snapshot_bincount_not_captured_samples);
-		double mean_wall_cap = (report.captured_particles > 0) ? report.total_wall_time_captured / static_cast<double>(report.captured_particles) : 0.0;
-		double not_captured_particles = static_cast<double>(report.total_trajectories - report.captured_particles);
-		double captured_particles = static_cast<double>(report.captured_particles);
-		double mean_wall_nc = (not_captured_particles > 0.0) ? report.total_wall_time_not_captured / not_captured_particles : 0.0;
-		double mean_steps_cap = (report.captured_particles > 0) ? static_cast<double>(report.total_rk45_steps_captured) / captured_particles : 0.0;
-		double mean_steps_nc = (not_captured_particles > 0.0) ? static_cast<double>(report.total_rk45_steps_not_captured) / not_captured_particles : 0.0;
-
-		file << "# total_wall_time_captured_sec = " << std::scientific << std::setprecision(6) << report.total_wall_time_captured << "\n";
-		file << "# total_wall_time_not_captured_sec = " << std::scientific << std::setprecision(6) << report.total_wall_time_not_captured << "\n";
-		file << "# mean_wall_time_captured_sec = " << std::scientific << std::setprecision(6) << mean_wall_cap << "\n";
-		file << "# mean_wall_time_not_captured_sec = " << std::scientific << std::setprecision(6) << mean_wall_nc << "\n";
-		file << "# total_rk45_steps_captured = " << report.total_rk45_steps_captured << "\n";
-		file << "# total_rk45_steps_not_captured = " << report.total_rk45_steps_not_captured << "\n";
-		file << "# mean_rk45_steps_captured = " << std::scientific << std::setprecision(6) << mean_steps_cap << "\n";
-		file << "# mean_rk45_steps_not_captured = " << std::scientific << std::setprecision(6) << mean_steps_nc << "\n";
-		file << "# snapshot_bincount_captured_samples = " << report.snapshot_bincount_captured_samples << "\n";
-		file << "# snapshot_bincount_not_captured_samples = " << report.snapshot_bincount_not_captured_samples << "\n";
-		file << "# ranks_ready = " << diagnostics.ready_ranks << " / " << diagnostics.per_rank_status.size() << "\n";
 		file << "#\n";
 		file << "# [Bincount histogram]\n";
 		file << "# bin_index  cap_dt[s]  cap_v2dt[km2/s]  cap_err_dt[s]  cap_err_v2dt[km2/s]  not_cap_dt[s]  not_cap_v2dt[km2/s]  not_cap_err_dt[s]  not_cap_err_v2dt[km2/s]\n";
@@ -1491,76 +869,37 @@ bool Write_Snapshot_Report_File(const std::string& snapshot_root, int snapshot_i
 	}))
 		return false;
 
-	if(snapshot_evaporation_log_enabled)
+	if(snapshot_evaporation_log_enabled && evaporation_log_state != NULL)
 	{
 		std::vector<EvaporationRecord> snapshot_records;
 		snapshot_records.reserve(report.new_evaporation_records.size());
 		for(const auto& entry : report.new_evaporation_records)
 			snapshot_records.push_back(Make_Log_Record(entry.rank, entry.entry));
-		if(!Write_Evaporation_Time_Log_Block(Evaporation_Log_Path_From_Snapshot_Root(snapshot_root), "snapshot", snapshot_index, interval_seconds, mass_gev, sigma_cm2, snapshot_records, true))
+		if(!Append_Completed_Evaporation_Events(Evaporation_Log_Path_From_Snapshot_Root(snapshot_root), snapshot_records, *evaporation_log_state))
 			return false;
+		evaporation_log_state->last_snapshot_index = snapshot_index;
 	}
 
 	return true;
 }
 
-std::string Format_Rank_Status(const Rank_Snapshot_State& state)
-{
-	std::ostringstream stream;
-	stream << std::fixed << std::setprecision(3);
-	if(state.done)
-	{
-		stream << "done";
-	}
-	else
-	{
-		stream << "running";
-	}
-
-	stream << " (captured=" << state.local_captured
-	       << ", completed=" << state.local_total
-	       << ", snapshot_evap_delta=" << state.new_evaporation_records.size()
-	       << ", rank_wall=" << state.rank_elapsed_wall_sec << "s";
-
-	if(state.trajectory_in_progress)
-	{
-		stream << ", current_traj=" << state.current_trajectory_id
-		       << ", traj_wall=" << state.current_trajectory_wall_sec << "s"
-		       << ", traj_physical_s=" << Format_Physical_Time_Scientific(state.current_trajectory_physical_sec)
-		       << ", partial_bucket=" << (state.current_trajectory_captured ? "captured" : "not_captured");
-	}
-	else if(!state.done)
-	{
-		stream << ", next_traj=" << (state.local_total + 1);
-	}
-
-	stream << ")";
-	return stream.str();
-}
-
-bool Try_Write_Merged_Snapshot(const std::string& snapshot_root, const std::string& rank_snapshot_dir, int snapshot_index, double interval_seconds, int mpi_processes, uint64_t run_id, double mass_gev, double sigma_cm2, int caller_rank, bool snapshot_evaporation_log_enabled)
+bool Try_Write_Merged_Snapshot(const std::string& snapshot_root, const std::string& rank_snapshot_dir, int snapshot_index, double interval_seconds, int mpi_processes, uint64_t run_id, double mass_gev, double sigma_cm2, int caller_rank, bool snapshot_evaporation_log_enabled, EvaporationLogState* evaporation_log_state)
 {
 	if(caller_rank != 0)
 		return false;
 
 	const std::string snapshot_text_path = Snapshot_Text_File_Path(snapshot_root, snapshot_index, interval_seconds);
-	const std::string evaporation_log_path = Evaporation_Log_Path_From_Snapshot_Root(snapshot_root);
-	const bool evaporation_log_ready = (!snapshot_evaporation_log_enabled || Evaporation_Log_Has_Snapshot_Block(evaporation_log_path, snapshot_index));
-	if(Snapshot_Text_File_Is_Merged(snapshot_text_path) && evaporation_log_ready)
+	if(Snapshot_Text_File_Is_Merged(snapshot_text_path))
 	{
 		Cleanup_Snapshot_Checkpoints(rank_snapshot_dir, snapshot_index, interval_seconds, mpi_processes);
 		return true;
 	}
 
 	Snapshot_Report_State report;
-	Snapshot_Load_Diagnostics diagnostics;
-	if(!Load_Snapshot_Report_State(rank_snapshot_dir, snapshot_index, interval_seconds, mpi_processes, run_id, report, &diagnostics))
-	{
-		Write_Snapshot_Text_Status(snapshot_root, snapshot_index, interval_seconds, caller_rank, diagnostics, false);
+	if(!Load_Snapshot_Report_State(rank_snapshot_dir, snapshot_index, interval_seconds, mpi_processes, run_id, report))
 		return false;
-	}
 
-	if(!Write_Snapshot_Report_File(snapshot_root, snapshot_index, interval_seconds, mass_gev, sigma_cm2, report, caller_rank, diagnostics, snapshot_evaporation_log_enabled))
+	if(!Write_Snapshot_Report_File(snapshot_root, snapshot_index, interval_seconds, mass_gev, sigma_cm2, report, snapshot_evaporation_log_enabled, evaporation_log_state))
 		return false;
 
 	Cleanup_Snapshot_Checkpoints(rank_snapshot_dir, snapshot_index, interval_seconds, mpi_processes);
@@ -1573,10 +912,6 @@ Simulation_Data::Simulation_Data(unsigned int sample_size, unsigned int max_traj
   number_of_complete_evaporation_particles(0), number_of_censored_captured_particles(0),
   number_of_invalid_survival_captured_particles(0),
   average_number_of_scatterings(0.0), computing_time(0.0), early_stopped(false),
-  total_wall_time_captured(0.0), total_wall_time_not_captured(0.0),
-  wall_time_overflow_captured(0), wall_time_overflow_not_captured(0),
-  total_rk45_steps_captured(0), total_rk45_steps_not_captured(0),
-  step_count_overflow_captured(0), step_count_overflow_not_captured(0),
   mpi_rank(0), mpi_processes(1), isoreflection_rings(iso_rings), minimum_speed_threshold(u_min),
   number_of_data_points(std::vector<unsigned long int>(iso_rings, 0)),
   data(iso_rings, std::vector<libphysica::DataPoint>())
@@ -1598,21 +933,6 @@ Simulation_Data::Simulation_Data(unsigned int sample_size, unsigned int max_traj
 	captured_v2dt_sq_hist.fill(0.0);
 	not_captured_dt_sq_hist.fill(0.0);
 	not_captured_v2dt_sq_hist.fill(0.0);
-	termination_reason_counts.fill(0);
-
-	// Initialize computation time statistics
-    total_wall_time_captured = 0.0;
-    total_wall_time_not_captured = 0.0;
-    wall_time_hist_captured.fill(0);
-    wall_time_hist_not_captured.fill(0);
-    wall_time_overflow_captured = 0;
-    wall_time_overflow_not_captured = 0;
-    total_rk45_steps_captured = 0;
-    total_rk45_steps_not_captured = 0;
-    step_count_hist_captured.fill(0);
-    step_count_hist_not_captured.fill(0);
-    step_count_overflow_captured = 0;
-    step_count_overflow_not_captured = 0;
 }
 
 void Simulation_Data::Configure(double initial_radius, unsigned int min_scattering, unsigned long int max_scattering, unsigned long int max_free_steps)
@@ -1621,17 +941,6 @@ void Simulation_Data::Configure(double initial_radius, unsigned int min_scatteri
 	minimum_number_of_scatterings = min_scattering;
 	maximum_number_of_scatterings = max_scattering;
 	maximum_free_time_steps       = max_free_steps;
-}
-
-void Simulation_Data::Configure_Evaporation_Mode_Bincount(bool enabled, const std::vector<double>& boundaries_log10_s, const std::vector<std::string>& labels, bool include_truncated)
-{
-	evaporation_mode_bincount_enabled = enabled;
-	evaporation_mode_boundaries_log10_s = boundaries_log10_s;
-	evaporation_mode_labels = labels;
-	evaporation_mode_include_truncated = include_truncated;
-	evaporation_mode_bincounts.clear();
-	if(evaporation_mode_bincount_enabled)
-		evaporation_mode_bincounts.resize(evaporation_mode_boundaries_log10_s.size() + 1);
 }
 
 void Simulation_Data::Configure_Evaporation_Diagnostics(bool enabled)
@@ -1668,6 +977,7 @@ void Simulation_Data::Generate_Data(obscura::DM_Particle& DM, Solar_Model& solar
 	std::string rank_snapshot_dir;
 	uint64_t snapshot_run_id = 0;
 	int next_snapshot_index = 1;
+	EvaporationLogState evaporation_log_state;
 	if(!capture_mode && mpi_rank == 0)
 		std::remove(Evaporation_Log_Path_From_Output_Dir(output_root).c_str());
 	if(snapshot_cfg.enabled && mpi_rank == 0 && snapshot_cfg.max_trajectory_wall_time_sec <= 0.0)
@@ -1695,6 +1005,9 @@ void Simulation_Data::Generate_Data(obscura::DM_Particle& DM, Solar_Model& solar
 			snapshot_run_id = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::system_clock::now().time_since_epoch()).count());
 		MPI_Bcast(&snapshot_run_id, 1, MPI_UNSIGNED_LONG_LONG, 0, MPI_COMM_WORLD);
 	}
+	if(snapshot_evaporation_log_enabled && mpi_rank == 0
+	   && !Initialize_Evaporation_Log(Evaporation_Log_Path_From_Output_Dir(output_root), snapshot_mass_gev, snapshot_sigma_cm2, evaporation_log_state))
+		std::cerr << "Warning in Generate_Data(): failed to initialize evaporation_times.txt" << std::endl;
 
 	auto elapsed_since_start = [&]()
 	{
@@ -1714,8 +1027,6 @@ void Simulation_Data::Generate_Data(obscura::DM_Particle& DM, Solar_Model& solar
 		state.local_total = static_cast<uint64_t>(local_total);
 		state.current_trajectory_id = state.trajectory_in_progress ? static_cast<uint64_t>(simulator.Current_Trajectory_ID()) : 0;
 		state.rank_elapsed_wall_sec = done ? computing_time : elapsed_since_start();
-		state.current_trajectory_wall_sec = state.trajectory_in_progress ? simulator.Current_Trajectory_Wall_Time_Seconds() : 0.0;
-		state.current_trajectory_physical_sec = state.trajectory_in_progress ? simulator.Current_Trajectory_Physical_Time_Seconds() : 0.0;
 		if(state.trajectory_in_progress)
 		{
 			const TrajectoryBincount& current_bincount = simulator.Current_Trajectory_Bincount();
@@ -1731,18 +1042,6 @@ void Simulation_Data::Generate_Data(obscura::DM_Particle& DM, Solar_Model& solar
 		state.not_captured_v2dt_hist = not_captured_v2dt_hist;
 		state.not_captured_dt_sq_hist = not_captured_dt_sq_hist;
 		state.not_captured_v2dt_sq_hist = not_captured_v2dt_sq_hist;
-		state.total_wall_time_captured = total_wall_time_captured;
-		state.total_wall_time_not_captured = total_wall_time_not_captured;
-		state.total_rk45_steps_captured = static_cast<uint64_t>(total_rk45_steps_captured);
-		state.total_rk45_steps_not_captured = static_cast<uint64_t>(total_rk45_steps_not_captured);
-		std::copy(wall_time_hist_captured.begin(), wall_time_hist_captured.end(), state.wall_time_hist_captured.begin());
-		std::copy(wall_time_hist_not_captured.begin(), wall_time_hist_not_captured.end(), state.wall_time_hist_not_captured.begin());
-		state.wall_time_overflow_captured = static_cast<uint64_t>(wall_time_overflow_captured);
-		state.wall_time_overflow_not_captured = static_cast<uint64_t>(wall_time_overflow_not_captured);
-		std::copy(step_count_hist_captured.begin(), step_count_hist_captured.end(), state.step_count_hist_captured.begin());
-		std::copy(step_count_hist_not_captured.begin(), step_count_hist_not_captured.end(), state.step_count_hist_not_captured.begin());
-		state.step_count_overflow_captured = static_cast<uint64_t>(step_count_overflow_captured);
-		state.step_count_overflow_not_captured = static_cast<uint64_t>(step_count_overflow_not_captured);
 		(void)snapshot_upper_wall_time;
 		if(snapshot_evaporation_log_enabled)
 		{
@@ -1762,7 +1061,7 @@ void Simulation_Data::Generate_Data(obscura::DM_Particle& DM, Solar_Model& solar
 		bool all_snapshots_merged = true;
 		for(int snapshot_index = last_committed_snapshot_index + 1; snapshot_index <= max_snapshot_index; snapshot_index++)
 		{
-			if(!Try_Write_Merged_Snapshot(snapshot_root, rank_snapshot_dir, snapshot_index, snapshot_interval, mpi_processes, snapshot_run_id, snapshot_mass_gev, snapshot_sigma_cm2, mpi_rank, snapshot_evaporation_log_enabled))
+			if(!Try_Write_Merged_Snapshot(snapshot_root, rank_snapshot_dir, snapshot_index, snapshot_interval, mpi_processes, snapshot_run_id, snapshot_mass_gev, snapshot_sigma_cm2, mpi_rank, snapshot_evaporation_log_enabled, &evaporation_log_state))
 			{
 				all_snapshots_merged = false;
 				break;
@@ -1809,27 +1108,13 @@ void Simulation_Data::Generate_Data(obscura::DM_Particle& DM, Solar_Model& solar
 		Event IC = Initial_Conditions(halo_model, solar_model, simulator.PRNG);
 		Hyperbolic_Kepler_Shift(IC, initial_and_final_radius);
 
-		auto traj_t0 = std::chrono::high_resolution_clock::now();
 		Trajectory_Result trajectory = simulator.Simulate(IC, DM, mpi_rank);
-		auto traj_t1 = std::chrono::high_resolution_clock::now();
-		double traj_wall_sec = 1e-6 * std::chrono::duration_cast<std::chrono::microseconds>(traj_t1 - traj_t0).count();
 		const double trajectory_completion_wall_time_sec = elapsed_since_start();
 
 		local_total++;
 		number_of_trajectories++;
-		termination_reason_counts[TerminationReason_Index(trajectory.bincount.termination_reason)]++;
 		average_number_of_scatterings = 1.0 / number_of_trajectories * ((number_of_trajectories - 1) * average_number_of_scatterings + trajectory.number_of_scatterings);
 		const bool completed_outward_escape = Completed_Outward_Escape(trajectory.bincount.termination_reason);
-
-		// Helper lambdas for log-histogram binning
-		auto wall_time_bin = [](double t) -> int {
-			if(t <= 0.0) return -1;
-			return static_cast<int>((log10(t) - WALL_TIME_LOG_MIN) * 10.0);
-		};
-		auto step_count_bin = [](unsigned long int s) -> int {
-			if(s == 0) return -1;
-			return static_cast<int>((log10(static_cast<double>(s)) - STEP_COUNT_LOG_MIN) * 10.0);
-		};
 
 		if(trajectory.bincount.is_captured)
 		{
@@ -1858,27 +1143,9 @@ void Simulation_Data::Generate_Data(obscura::DM_Particle& DM, Solar_Model& solar
 				if(Build_Evaporation_Record(trajectory.bincount, mpi_rank, number_of_trajectories, trajectory_completion_wall_time_sec, rec))
 				{
 					evaporation_records.push_back(rec);
-					if(evaporation_mode_bincount_enabled
-						&& rec.survival_valid
-						&& rec.event_observed
-						&& Has_Positive_Evaporation_Time(rec.lifetime_unbinding))
-					{
-						int mode = Classify_Evaporation_Mode(log10(rec.lifetime_unbinding), evaporation_mode_boundaries_log10_s);
-						if(mode >= 0 && mode < static_cast<int>(evaporation_mode_bincounts.size()))
-							Accumulate_Mode_Bincount(evaporation_mode_bincounts[mode], trajectory.bincount);
-					}
 				}
 			}
 
-			// Computation time & step count statistics (captured)
-			total_wall_time_captured += traj_wall_sec;
-			total_rk45_steps_captured += trajectory.total_rk45_steps;
-			int wb = wall_time_bin(traj_wall_sec);
-			if(wb >= 0 && wb < WALL_TIME_BINS) wall_time_hist_captured[wb]++;
-			else if(wb >= WALL_TIME_BINS) wall_time_overflow_captured++;
-			int sb = step_count_bin(trajectory.total_rk45_steps);
-			if(sb >= 0 && sb < STEP_COUNT_BINS) step_count_hist_captured[sb]++;
-			else if(sb >= STEP_COUNT_BINS) step_count_overflow_captured++;
 		}
 		else
 		{
@@ -1894,33 +1161,6 @@ void Simulation_Data::Generate_Data(obscura::DM_Particle& DM, Solar_Model& solar
 				}
 			}
 
-			// Computation time & step count statistics (not captured)
-			total_wall_time_not_captured += traj_wall_sec;
-			total_rk45_steps_not_captured += trajectory.total_rk45_steps;
-			int wb = wall_time_bin(traj_wall_sec);
-			if(wb >= 0 && wb < WALL_TIME_BINS) wall_time_hist_not_captured[wb]++;
-			else if(wb >= WALL_TIME_BINS) wall_time_overflow_not_captured++;
-			int sb = step_count_bin(trajectory.total_rk45_steps);
-			if(sb >= 0 && sb < STEP_COUNT_BINS) step_count_hist_not_captured[sb]++;
-			else if(sb >= STEP_COUNT_BINS) step_count_overflow_not_captured++;
-
-			if(!capture_mode && completed_outward_escape)
-			{
-				if(trajectory.Particle_Free())
-					number_of_free_particles++;
-				else if(trajectory.Particle_Reflected())
-				{
-					number_of_reflected_particles++;
-					// Keep reflection data for compatibility (if needed)
-					Hyperbolic_Kepler_Shift(trajectory.final_event, 1.0 * AU);
-					double v_final = trajectory.final_event.Speed();
-					if(trajectory.number_of_scatterings >= minimum_number_of_scatterings && v_final > KDE_boundary_correction_factor * minimum_speed_threshold)
-					{
-						unsigned int isoreflection_ring = (isoreflection_rings == 1) ? 0 : trajectory.final_event.Isoreflection_Ring(obscura::Sun_Velocity(), isoreflection_rings);
-						data[isoreflection_ring].push_back(libphysica::DataPoint(v_final));
-					}
-				}
-			}
 		}
 
 		// Progress bar (every 20%)
@@ -1981,7 +1221,6 @@ void Simulation_Data::Perform_MPI_Reductions()
 	MPI_Allreduce(MPI_IN_PLACE, &number_of_complete_evaporation_particles, 1, MPI_UNSIGNED_LONG, MPI_SUM, MPI_COMM_WORLD);
 	MPI_Allreduce(MPI_IN_PLACE, &number_of_censored_captured_particles, 1, MPI_UNSIGNED_LONG, MPI_SUM, MPI_COMM_WORLD);
 	MPI_Allreduce(MPI_IN_PLACE, &number_of_invalid_survival_captured_particles, 1, MPI_UNSIGNED_LONG, MPI_SUM, MPI_COMM_WORLD);
-	MPI_Allreduce(MPI_IN_PLACE, termination_reason_counts.data(), TRAJECTORY_TERMINATION_REASON_COUNT, MPI_UNSIGNED_LONG, MPI_SUM, MPI_COMM_WORLD);
 	MPI_Allreduce(MPI_IN_PLACE, &average_number_of_scatterings, 1, MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
 	average_number_of_scatterings /= number_of_trajectories;
 
@@ -1995,15 +1234,6 @@ void Simulation_Data::Perform_MPI_Reductions()
 	MPI_Allreduce(MPI_IN_PLACE, not_captured_dt_sq_hist.data(), NUM_BINS, MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
 	MPI_Allreduce(MPI_IN_PLACE, not_captured_v2dt_sq_hist.data(), NUM_BINS, MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
 
-	for(auto& mode_bincount : evaporation_mode_bincounts)
-	{
-		MPI_Allreduce(MPI_IN_PLACE, &mode_bincount.count, 1, MPI_UNSIGNED_LONG, MPI_SUM, MPI_COMM_WORLD);
-		MPI_Allreduce(MPI_IN_PLACE, &mode_bincount.truncated_count, 1, MPI_UNSIGNED_LONG, MPI_SUM, MPI_COMM_WORLD);
-		MPI_Allreduce(MPI_IN_PLACE, mode_bincount.dt_hist.data(), NUM_BINS, MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
-		MPI_Allreduce(MPI_IN_PLACE, mode_bincount.v2dt_hist.data(), NUM_BINS, MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
-		MPI_Allreduce(MPI_IN_PLACE, mode_bincount.dt_sq_hist.data(), NUM_BINS, MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
-		MPI_Allreduce(MPI_IN_PLACE, mode_bincount.v2dt_sq_hist.data(), NUM_BINS, MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
-	}
 
 	// Reduce early_stopped flag (any rank early stopped => global flag)
 	int local_es = early_stopped ? 1 : 0;
@@ -2166,20 +1396,6 @@ void Simulation_Data::Perform_MPI_Reductions()
 	}
 
 	MPI_Allreduce(MPI_IN_PLACE, &computing_time, 1, MPI_DOUBLE, MPI_MAX, MPI_COMM_WORLD);
-
-	// Reduce computation time & step count statistics
-	MPI_Allreduce(MPI_IN_PLACE, &total_wall_time_captured, 1, MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
-	MPI_Allreduce(MPI_IN_PLACE, &total_wall_time_not_captured, 1, MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
-	MPI_Allreduce(MPI_IN_PLACE, wall_time_hist_captured.data(), WALL_TIME_BINS, MPI_UNSIGNED_LONG, MPI_SUM, MPI_COMM_WORLD);
-	MPI_Allreduce(MPI_IN_PLACE, wall_time_hist_not_captured.data(), WALL_TIME_BINS, MPI_UNSIGNED_LONG, MPI_SUM, MPI_COMM_WORLD);
-	MPI_Allreduce(MPI_IN_PLACE, &wall_time_overflow_captured, 1, MPI_UNSIGNED_LONG, MPI_SUM, MPI_COMM_WORLD);
-	MPI_Allreduce(MPI_IN_PLACE, &wall_time_overflow_not_captured, 1, MPI_UNSIGNED_LONG, MPI_SUM, MPI_COMM_WORLD);
-	MPI_Allreduce(MPI_IN_PLACE, &total_rk45_steps_captured, 1, MPI_UNSIGNED_LONG, MPI_SUM, MPI_COMM_WORLD);
-	MPI_Allreduce(MPI_IN_PLACE, &total_rk45_steps_not_captured, 1, MPI_UNSIGNED_LONG, MPI_SUM, MPI_COMM_WORLD);
-	MPI_Allreduce(MPI_IN_PLACE, step_count_hist_captured.data(), STEP_COUNT_BINS, MPI_UNSIGNED_LONG, MPI_SUM, MPI_COMM_WORLD);
-	MPI_Allreduce(MPI_IN_PLACE, step_count_hist_not_captured.data(), STEP_COUNT_BINS, MPI_UNSIGNED_LONG, MPI_SUM, MPI_COMM_WORLD);
-	MPI_Allreduce(MPI_IN_PLACE, &step_count_overflow_captured, 1, MPI_UNSIGNED_LONG, MPI_SUM, MPI_COMM_WORLD);
-	MPI_Allreduce(MPI_IN_PLACE, &step_count_overflow_not_captured, 1, MPI_UNSIGNED_LONG, MPI_SUM, MPI_COMM_WORLD);
 }
 
 void Simulation_Data::Write_Output_Files(const std::string& output_dir, obscura::DM_Particle& DM)
@@ -2201,9 +1417,7 @@ void Simulation_Data::Write_Output_Files(const std::string& output_dir, obscura:
 
 	std::remove((output_dir + "/captured_bincount.txt").c_str());
 	std::remove((output_dir + "/not_captured_bincount.txt").c_str());
-	std::remove((output_dir + "/evaporation_summary.txt").c_str());
-	std::remove((output_dir + "/evaporation_mode_summary.txt").c_str());
-	std::remove((output_dir + "/evaporation_mode_bincount.txt").c_str());
+	std::remove((output_dir + "/evaporation_diagnostics.txt").c_str());
 
 	// 1. Merged bincount
 	{
@@ -2238,172 +1452,17 @@ void Simulation_Data::Write_Output_Files(const std::string& output_dir, obscura:
 	// 2. Evaporation summary
 	if(evaporation_diagnostics_enabled)
 	{
-		std::ofstream f(output_dir + "/evaporation_summary.txt");
+		std::ofstream f(output_dir + "/evaporation_diagnostics.txt");
 		write_header(f);
 		Write_Evaporation_Record_List(f, evaporation_records);
 		f.close();
 	}
 
-	bool evaporation_times_ok = false;
-	if(snapshot_evaporation_log_enabled || evaporation_diagnostics_enabled)
-		evaporation_times_ok = Write_Evaporation_Time_Log_Block(Evaporation_Log_Path_From_Output_Dir(output_dir), "final", -1, 0.0, mass_gev, sigma_cm2, evaporation_records, true);
-	else
-		evaporation_times_ok = Write_Final_Evaporation_Time_File(Evaporation_Log_Path_From_Output_Dir(output_dir), mass_gev, sigma_cm2, evaporation_records);
+	bool evaporation_times_ok = Write_Final_Evaporation_Time_File(Evaporation_Log_Path_From_Output_Dir(output_dir), mass_gev, sigma_cm2, evaporation_records);
 	if(!evaporation_times_ok)
 		std::cerr << "Warning in Write_Output_Files(): failed to write evaporation_times.txt" << std::endl;
 
-	if(evaporation_mode_bincount_enabled)
-	{
-		std::ofstream f(output_dir + "/evaporation_mode_summary.txt");
-		write_header(f);
-		f << "# evaporation_mode_include_truncated = " << (evaporation_mode_include_truncated ? 1 : 0) << "\n";
-		f << "# evaporation_mode_include_truncated_status = deprecated_ignored\n";
-		f << "# mode_assignment = event_observed && survival_valid && lifetime_unbinding > 0\n";
-		f << "# mode_count = " << evaporation_mode_bincounts.size() << "\n";
-		f << "# boundary_count = " << evaporation_mode_boundaries_log10_s.size() << "\n";
-		f << "# boundaries_log10_s";
-		for(double boundary : evaporation_mode_boundaries_log10_s)
-			f << " " << std::scientific << std::setprecision(10) << boundary;
-		f << "\n";
-		f << "# mode_index  label  log10_t_lower  log10_t_upper  count  censored_count\n";
-		for(size_t mode = 0; mode < evaporation_mode_bincounts.size(); mode++)
-		{
-			double lower = (mode == 0) ? -std::numeric_limits<double>::infinity() : evaporation_mode_boundaries_log10_s[mode - 1];
-			double upper = (mode < evaporation_mode_boundaries_log10_s.size()) ? evaporation_mode_boundaries_log10_s[mode] : std::numeric_limits<double>::infinity();
-			const std::string label = (mode < evaporation_mode_labels.size()) ? evaporation_mode_labels[mode] : ("mode_" + std::to_string(mode));
-			f << mode << "\t" << label << "\t" << std::scientific << std::setprecision(10)
-			  << lower << "\t" << upper << "\t" << evaporation_mode_bincounts[mode].count
-			  << "\t" << evaporation_mode_bincounts[mode].truncated_count << "\n";
-		}
-		f.close();
-	}
 
-	if(evaporation_mode_bincount_enabled)
-	{
-		std::ofstream f(output_dir + "/evaporation_mode_bincount.txt");
-		write_header(f);
-		f << "# bin_index";
-		for(size_t mode = 0; mode < evaporation_mode_bincounts.size(); mode++)
-		{
-			const std::string label = (mode < evaporation_mode_labels.size()) ? evaporation_mode_labels[mode] : ("mode_" + std::to_string(mode));
-			f << "  " << label << "_dt[s]"
-			  << "  " << label << "_v2dt[km2/s]"
-			  << "  " << label << "_err_dt[s]"
-			  << "  " << label << "_err_v2dt[km2/s]";
-		}
-		f << "\n";
-		for(int b = 0; b < NUM_BINS; b++)
-		{
-			f << b;
-			for(const auto& mode_bincount : evaporation_mode_bincounts)
-			{
-				double N_mode = static_cast<double>(mode_bincount.count);
-				double err_dt = Snapshot_Bin_Error(mode_bincount.dt_hist[b], mode_bincount.dt_sq_hist[b], N_mode);
-				double err_v2dt = Snapshot_Bin_Error(mode_bincount.v2dt_hist[b], mode_bincount.v2dt_sq_hist[b], N_mode);
-				f << "\t" << std::scientific << std::setprecision(10)
-				  << mode_bincount.dt_hist[b] << "\t" << mode_bincount.v2dt_hist[b]
-				  << "\t" << err_dt << "\t" << err_v2dt;
-			}
-			f << "\n";
-		}
-		f.close();
-	}
-
-	// 3. Computation time & RK45 step count summary
-	{
-		std::ofstream f(output_dir + "/computation_time_summary.txt");
-		write_header(f);
-
-		double mean_wall_cap = (number_of_captured_particles > 0) ? total_wall_time_captured / number_of_captured_particles : 0.0;
-		double mean_wall_nc  = (number_of_trajectories > number_of_captured_particles) ? total_wall_time_not_captured / (number_of_trajectories - number_of_captured_particles) : 0.0;
-		double mean_steps_cap = (number_of_captured_particles > 0) ? static_cast<double>(total_rk45_steps_captured) / number_of_captured_particles : 0.0;
-		double mean_steps_nc  = (number_of_trajectories > number_of_captured_particles) ? static_cast<double>(total_rk45_steps_not_captured) / (number_of_trajectories - number_of_captured_particles) : 0.0;
-
-		f << "# ever_captured_count = " << number_of_captured_particles << "\n";
-		f << "# complete_evaporation_count = " << number_of_complete_evaporation_particles << "\n";
-		f << "# censored_captured_count = " << number_of_censored_captured_particles << "\n";
-		f << "# invalid_survival_captured_count = " << number_of_invalid_survival_captured_particles << "\n";
-		f << "# evaporation_record_count = " << evaporation_records.size() << "\n";
-		f << "#\n";
-		f << "# total_wall_time_captured_sec = " << std::scientific << std::setprecision(6) << total_wall_time_captured << "\n";
-		f << "# total_wall_time_not_captured_sec = " << std::scientific << std::setprecision(6) << total_wall_time_not_captured << "\n";
-		f << "# mean_wall_time_captured_sec = " << std::scientific << std::setprecision(6) << mean_wall_cap << "\n";
-		f << "# mean_wall_time_not_captured_sec = " << std::scientific << std::setprecision(6) << mean_wall_nc << "\n";
-		f << "# total_rk45_steps_captured = " << total_rk45_steps_captured << "\n";
-		f << "# total_rk45_steps_not_captured = " << total_rk45_steps_not_captured << "\n";
-		f << "# mean_rk45_steps_captured = " << std::scientific << std::setprecision(6) << mean_steps_cap << "\n";
-		f << "# mean_rk45_steps_not_captured = " << std::scientific << std::setprecision(6) << mean_steps_nc << "\n";
-		f << "#\n";
-		f << "# incomplete_or_guarded_terminations = " << Count_Incomplete_Physical_Terminations(termination_reason_counts) << "\n";
-		f << "# [Termination reason counts]\n";
-		f << "# reason  count\n";
-		for(int reason_index = 0; reason_index < TRAJECTORY_TERMINATION_REASON_COUNT; reason_index++)
-		{
-			TrajectoryTerminationReason reason = static_cast<TrajectoryTerminationReason>(reason_index);
-			f << TerminationReason_Name(reason) << "\t" << termination_reason_counts[reason_index] << "\n";
-		}
-		f << "#\n";
-
-		// Wall-clock time histogram
-		int wall_first_bin = 0;
-		int wall_last_bin = -1;
-		bool has_wall_bins = Find_Nonzero_Bin_Range(wall_time_hist_captured, wall_time_hist_not_captured, wall_first_bin, wall_last_bin);
-		int wall_output_first_bin = has_wall_bins ? wall_first_bin - 1 : 0;
-		f << "# [Wall-clock time histogram]\n";
-		if(has_wall_bins)
-		{
-			double observed_log10_t_min = WALL_TIME_LOG_MIN + 0.1 * wall_output_first_bin;
-			double observed_log10_t_max = WALL_TIME_LOG_MIN + 0.1 * (wall_last_bin + 1);
-			f << "# occupied_log10_t_min = " << std::fixed << std::setprecision(1) << observed_log10_t_min << "\n";
-			f << "# occupied_log10_t_max = " << std::fixed << std::setprecision(1) << observed_log10_t_max << "\n";
-		}
-		else
-		{
-			f << "# occupied_log10_t_min = nan\n";
-			f << "# occupied_log10_t_max = nan\n";
-		}
-		f << "# bin_index  log10_t_lower  log10_t_upper  count_captured  count_not_captured\n";
-		for(int b = wall_output_first_bin, compact_index = 0; has_wall_bins && b <= wall_last_bin; b++, compact_index++)
-		{
-			double lo = WALL_TIME_LOG_MIN + b * 0.1;
-			double hi = lo + 0.1;
-			f << compact_index << "\t" << std::fixed << std::setprecision(1) << lo << "\t" << hi
-			  << "\t" << ((b >= 0) ? wall_time_hist_captured[b] : 0)
-			  << "\t" << ((b >= 0) ? wall_time_hist_not_captured[b] : 0) << "\n";
-		}
-		f << "# overflow_captured = " << wall_time_overflow_captured << "\n";
-		f << "# overflow_not_captured = " << wall_time_overflow_not_captured << "\n";
-		f << "#\n";
-
-		// RK45 step count histogram
-		int step_first_bin = 0;
-		int step_last_bin = -1;
-		bool has_step_bins = Find_Nonzero_Bin_Range(step_count_hist_captured, step_count_hist_not_captured, step_first_bin, step_last_bin);
-		f << "# [RK45 step count histogram]\n";
-		if(has_step_bins)
-		{
-			double observed_log10_steps_min = STEP_COUNT_LOG_MIN + 0.1 * step_first_bin;
-			double observed_log10_steps_max = STEP_COUNT_LOG_MIN + 0.1 * (step_last_bin + 1);
-			f << "# occupied_log10_steps_min = " << std::fixed << std::setprecision(1) << observed_log10_steps_min << "\n";
-			f << "# occupied_log10_steps_max = " << std::fixed << std::setprecision(1) << observed_log10_steps_max << "\n";
-		}
-		else
-		{
-			f << "# occupied_log10_steps_min = nan\n";
-			f << "# occupied_log10_steps_max = nan\n";
-		}
-		f << "# bin_index  log10_steps_lower  log10_steps_upper  count_captured  count_not_captured\n";
-		for(int b = step_first_bin, compact_index = 0; has_step_bins && b <= step_last_bin; b++, compact_index++)
-		{
-			double lo = STEP_COUNT_LOG_MIN + b * 0.1;
-			double hi = lo + 0.1;
-			f << compact_index << "\t" << std::fixed << std::setprecision(1) << lo << "\t" << hi
-			  << "\t" << step_count_hist_captured[b] << "\t" << step_count_hist_not_captured[b] << "\n";
-		}
-		f << "# overflow_captured = " << step_count_overflow_captured << "\n";
-		f << "# overflow_not_captured = " << step_count_overflow_not_captured << "\n";
-		f.close();
-	}
 }
 
 double Simulation_Data::Free_Ratio() const
@@ -2494,20 +1553,6 @@ void Simulation_Data::Print_Summary(unsigned int mpi_rank)
 				  << "Complete evaporation count:\t" << number_of_complete_evaporation_particles << std::endl
 				  << "Censored captured count:\t" << number_of_censored_captured_particles << std::endl
 				  << "Invalid survival count:\t\t" << number_of_invalid_survival_captured_particles << std::endl;
-		std::cout << "Termination reasons:" << std::endl;
-		for(int reason_index = 0; reason_index < TRAJECTORY_TERMINATION_REASON_COUNT; reason_index++)
-		{
-			if(termination_reason_counts[reason_index] == 0)
-				continue;
-			std::cout << "  " << TerminationReason_Name(static_cast<TrajectoryTerminationReason>(reason_index))
-			          << ":\t" << termination_reason_counts[reason_index] << std::endl;
-		}
-		unsigned long int incomplete_terminations = Count_Incomplete_Physical_Terminations(termination_reason_counts);
-		if(incomplete_terminations > 0)
-		{
-			std::cout << "WARNING: incomplete/guarded terminations:\t" << incomplete_terminations << std::endl
-			          << "         Incomplete non-captured trajectories are excluded from free/reflected and not_captured bincount statistics." << std::endl;
-		}
 
 		// Capture rate error (Wilson interval)
 		{
@@ -2560,20 +1605,6 @@ void Simulation_Data::Print_Summary(unsigned int mpi_rank)
 				  << "Capture rate [1/s]:\t\t" << libphysica::Round(1.0 * number_of_captured_particles / computing_time) << std::endl
 				  << "Simulation time:\t\t" << libphysica::Time_Display(computing_time) << std::endl;
 
-		// Per-trajectory computation time & RK45 step count summary
-		std::cout << std::endl
-				  << "Captured wall-clock time:\t" << libphysica::Time_Display(total_wall_time_captured) << std::endl
-				  << "Not-captured wall-clock time:\t" << libphysica::Time_Display(total_wall_time_not_captured) << std::endl;
-		if(number_of_captured_particles > 0)
-			std::cout << "Mean captured traj time:\t\t" << std::scientific << std::setprecision(4) << total_wall_time_captured / number_of_captured_particles << " s" << std::endl;
-		if(number_of_trajectories > number_of_captured_particles)
-			std::cout << "Mean not-captured traj time:\t" << std::scientific << std::setprecision(4) << total_wall_time_not_captured / (number_of_trajectories - number_of_captured_particles) << " s" << std::endl;
-		std::cout << "Total RK45 steps (captured):\t" << total_rk45_steps_captured << std::endl
-				  << "Total RK45 steps (not captured):\t" << total_rk45_steps_not_captured << std::endl;
-		if(number_of_captured_particles > 0)
-			std::cout << "Mean RK45 steps/traj (captured):\t" << std::scientific << std::setprecision(4) << static_cast<double>(total_rk45_steps_captured) / number_of_captured_particles << std::endl;
-		if(number_of_trajectories > number_of_captured_particles)
-			std::cout << "Mean RK45 steps/traj (not cap):\t" << std::scientific << std::setprecision(4) << static_cast<double>(total_rk45_steps_not_captured) / (number_of_trajectories - number_of_captured_particles) << std::endl;
 
 		std::cout << SEPARATOR << std::endl;
 	}

@@ -100,10 +100,9 @@ struct Trajectory_Result
 {
 	Event initial_event, final_event;
 	unsigned long int number_of_scatterings;
-	unsigned long int total_rk45_steps;
 	TrajectoryBincount bincount;
 
-	Trajectory_Result(const Event& event_ini, const Event& event_final, unsigned long int nScat, unsigned long int rk45_steps, TrajectoryBincount bc);
+	Trajectory_Result(const Event& event_ini, const Event& event_final, unsigned long int nScat, TrajectoryBincount bc);
 
 	bool Particle_Reflected() const;
 	bool Particle_Free() const;
@@ -134,8 +133,6 @@ class Trajectory_Simulator
 	double Capture_Energy_eV(double radius, double speed, obscura::DM_Particle& DM);
 	bool Update_Capture_State(double radius, double speed, double time, obscura::DM_Particle& DM, bool allow_new_capture);
 
-	// RK45 step counter for current trajectory
-	unsigned long int total_rk45_steps_current_traj;
 	std::function<void(const Trajectory_Simulator&)> snapshot_progress_callback;
 	bool trajectory_in_progress;
 	double current_trajectory_physical_time_sec;
