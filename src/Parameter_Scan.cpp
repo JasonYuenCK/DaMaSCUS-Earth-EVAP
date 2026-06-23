@@ -1,5 +1,6 @@
 #include "Parameter_Scan.hpp"
 
+#include <algorithm>
 #include <cmath>
 #include <libconfig.h++>
 #include <limits>
@@ -695,7 +696,6 @@ void Parameter_Scan::Perform_Full_Scan(obscura::DM_Particle& DM, obscura::DM_Det
 
 	double p_critical					  = 1.0 - certainty_level;
 	unsigned int counter				  = 0;
-	unsigned int last_excluded_mass_index = DM_masses.size();
 	for(unsigned int i = 0; i < couplings.size(); i++)
 	{
 		int row			   = couplings.size() - 1 - i;
@@ -736,10 +736,7 @@ void Parameter_Scan::Perform_Full_Scan(obscura::DM_Particle& DM, obscura::DM_Det
 			}
 
 			if(p < p_critical)
-			{
 				row_exclusion			 = true;
-				last_excluded_mass_index = j;
-			}
 		}
 		if(!row_exclusion)
 		{
