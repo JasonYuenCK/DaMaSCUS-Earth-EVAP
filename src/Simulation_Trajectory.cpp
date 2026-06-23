@@ -30,6 +30,15 @@ constexpr double RK45_MAX_STEP_FACTOR = 4.0;
 // 保证外层循环一定能在有限时间内拿回控制权，从而触发 snapshot 回调。
 constexpr int RK45_MAX_INNER_RETRIES = 2000;
 constexpr double FREE_ENERGY_DRIFT_REL_E_SCALE_EV = 1.0e-30;
+constexpr double MAX_OPTICAL_DEPTH_STEP = 0.05;
+
+struct OpticalDepthPiece
+{
+	double start;
+	double end;
+	double rate_start;
+	double rate_end;
+};
 
 double RK45_Absolute_Max_Time_Step()
 {
@@ -89,6 +98,33 @@ double Radius_At_Fraction(const Event& before, const Event& after, double fracti
 	return Interpolate_Event(before, after, fraction).Radius();
 }
 
+bool Surface_Crossing_Fractions(const Event& before, const Event& after, double& first, double& second)
+{
+	const libphysica::Vector displacement = after.position - before.position;
+	const double a = displacement.Dot(displacement);
+	if(a <= 0.0)
+		return false;
+
+	const double b = 2.0 * before.position.Dot(displacement);
+	const double c = before.position.Dot(before.position) - rSun * rSun;
+	const double discriminant = b * b - 4.0 * a * c;
+	if(!std::isfinite(discriminant) || discriminant < 0.0)
+		return false;
+
+	const double sqrt_discriminant = std::sqrt(std::max(0.0, discriminant));
+	first = (-b - sqrt_discriminant) / (2.0 * a);
+	second = (-b + sqrt_discriminant) / (2.0 * a);
+	if(first > second)
+		std::swap(first, second);
+	return true;
+}
+
+bool Fraction_In_Unit_Interval(double fraction)
+{
+	constexpr double tolerance = 1.0e-12;
+	return fraction >= -tolerance && fraction <= 1.0 + tolerance;
+}
+
 double Find_Surface_Crossing_Fraction(const Event& before, const Event& after, double lower, double upper)
 {
 	double r_lower = Radius_At_Fraction(before, after, lower) - rSun;
@@ -111,6 +147,9 @@ bool Solar_Interior_Fraction_Interval(const Event& before, const Event& after, d
 {
 	const bool before_inside = r_before < rSun;
 	const bool after_inside = r_after < rSun;
+	double first_crossing = 0.0;
+	double second_crossing = 0.0;
+	const bool has_crossings = Surface_Crossing_Fractions(before, after, first_crossing, second_crossing);
 	if(before_inside && after_inside)
 	{
 		start = 0.0;
@@ -119,17 +158,73 @@ bool Solar_Interior_Fraction_Interval(const Event& before, const Event& after, d
 	}
 	if(!before_inside && after_inside)
 	{
-		start = Find_Surface_Crossing_Fraction(before, after, 0.0, 1.0);
+		if(has_crossings && Fraction_In_Unit_Interval(first_crossing))
+			start = Clamp_Unit_Interval(first_crossing);
+		else if(has_crossings && Fraction_In_Unit_Interval(second_crossing))
+			start = Clamp_Unit_Interval(second_crossing);
+		else
+			start = Find_Surface_Crossing_Fraction(before, after, 0.0, 1.0);
 		end = 1.0;
 		return end > start;
 	}
 	if(before_inside && !after_inside)
 	{
 		start = 0.0;
-		end = Find_Surface_Crossing_Fraction(before, after, 0.0, 1.0);
+		if(has_crossings && Fraction_In_Unit_Interval(second_crossing))
+			end = Clamp_Unit_Interval(second_crossing);
+		else if(has_crossings && Fraction_In_Unit_Interval(first_crossing))
+			end = Clamp_Unit_Interval(first_crossing);
+		else
+			end = Find_Surface_Crossing_Fraction(before, after, 0.0, 1.0);
+		return end > start;
+	}
+
+	if(has_crossings && Fraction_In_Unit_Interval(first_crossing) && Fraction_In_Unit_Interval(second_crossing))
+	{
+		start = Clamp_Unit_Interval(first_crossing);
+		end = Clamp_Unit_Interval(second_crossing);
 		return end > start;
 	}
 	return false;
+}
+
+double Scattering_Rate_At_Fraction(const Event& before, const Event& after, double fraction, Solar_Model& solar_model, obscura::DM_Particle& DM)
+{
+	const Event event = Interpolate_Event(before, after, fraction);
+	const double radius = event.Radius();
+	if(radius >= rSun)
+		return 0.0;
+	return solar_model.Total_DM_Scattering_Rate(DM, radius, event.Speed());
+}
+
+bool Build_Optical_Depth_Pieces(const Event& before, const Event& after, double interior_start, double interior_end, Solar_Model& solar_model, obscura::DM_Particle& DM, std::vector<OpticalDepthPiece>& pieces)
+{
+	pieces.clear();
+	if(!(interior_end > interior_start))
+		return false;
+
+	const double interior_mid = 0.5 * (interior_start + interior_end);
+	const double fractions[3] = {interior_start, interior_mid, interior_end};
+	const double rates[3] = {
+	    Scattering_Rate_At_Fraction(before, after, fractions[0], solar_model, DM),
+	    Scattering_Rate_At_Fraction(before, after, fractions[1], solar_model, DM),
+	    Scattering_Rate_At_Fraction(before, after, fractions[2], solar_model, DM)};
+
+	for(int i = 0; i < 3; i++)
+	{
+		if(!std::isfinite(rates[i]) || rates[i] < 0.0)
+		{
+			pieces.push_back({fractions[0], fractions[0], rates[i], rates[i]});
+			return true;
+		}
+	}
+
+	for(int i = 0; i < 2; i++)
+	{
+		if(fractions[i + 1] > fractions[i])
+			pieces.push_back({fractions[i], fractions[i + 1], rates[i], rates[i + 1]});
+	}
+	return !pieces.empty();
 }
 
 double Solve_Linear_Rate_Optical_Depth_Fraction(double rate_start, double rate_end, double interval_dt, double target_tau)
@@ -349,6 +444,17 @@ void Trajectory_Simulator::Accumulate_Bincount_Step(double r_km, double v2_km2s2
 	current_bincount.v2dt_hist[bin_idx] += v2_km2s2 * dt_sec;
 }
 
+void Trajectory_Simulator::Reset_Bincount_Anchor(const Event& event)
+{
+	if(terminate_on_capture)
+		return;
+
+	prev_time_sec = In_Units(event.time, sec);
+	prev_r_km = In_Units(event.Radius(), km);
+	const double v_kms = In_Units(event.Speed(), km / sec);
+	prev_v2_km2s2 = v_kms * v_kms;
+}
+
 double Trajectory_Simulator::Capture_Energy_eV(double radius, double speed, obscura::DM_Particle& DM)
 {
 	double vesc = solar_model.Local_Escape_Speed(radius);
@@ -429,6 +535,7 @@ TrajectoryTerminationReason Trajectory_Simulator::Propagate_Freely(Event& curren
 	double minus_log_xi = -log(libphysica::Sample_Uniform(PRNG));
 	TrajectoryTerminationReason outcome = TrajectoryTerminationReason::MaxFreeSteps;
 	unsigned long int time_steps = 0;
+	unsigned long int step_attempts = 0;
 
 	auto commit_accepted_event = [&](const Event& accepted_event)
 	{
@@ -456,7 +563,7 @@ TrajectoryTerminationReason Trajectory_Simulator::Propagate_Freely(Event& curren
 
 	while(time_steps < maximum_time_steps && outcome == TrajectoryTerminationReason::MaxFreeSteps)
 	{
-		time_steps++;
+		step_attempts++;
 		Event event_before = particle_propagator.Event_In_3D();
 		double r_before = particle_propagator.Current_Radius();
 		double v_before = particle_propagator.Current_Speed();
@@ -490,11 +597,12 @@ TrajectoryTerminationReason Trajectory_Simulator::Propagate_Freely(Event& curren
 			}
 			if(rate_before > 0.0)
 			{
-				constexpr double MAX_OPTICAL_DEPTH_STEP = 0.05;
 				particle_propagator.time_step = std::min(particle_propagator.time_step, MAX_OPTICAL_DEPTH_STEP / rate_before);
 			}
 		}
 
+		const Free_Particle_Propagator propagator_before = particle_propagator;
+		const double trial_dt = particle_propagator.time_step;
 		double t_before = particle_propagator.Current_Time();
 		bool rk_step_ok = particle_propagator.Runge_Kutta_45_Step(solar_model);
 		double actual_dt = particle_propagator.Current_Time() - t_before;
@@ -535,7 +643,7 @@ TrajectoryTerminationReason Trajectory_Simulator::Propagate_Freely(Event& curren
 
 		// 单条轨迹 wall-clock 预算：防止任何一条轨迹把整个 rank 永远拖住。
 		// 正式统计默认不限制；若配置为正值，每 256 步检查一次。
-		if(max_trajectory_wall_time_sec > 0.0 && (time_steps & 0xFFu) == 0u)
+		if(max_trajectory_wall_time_sec > 0.0 && (step_attempts & 0xFFu) == 0u)
 		{
 			double traj_wall = Current_Trajectory_Wall_Time_Seconds();
 			if(traj_wall > max_trajectory_wall_time_sec)
@@ -563,35 +671,64 @@ TrajectoryTerminationReason Trajectory_Simulator::Propagate_Freely(Event& curren
 				std::cerr << "Warning: Negative velocity detected (v = " << v_after << ") at r = " << r_after << ", skipping scattering calculation." << std::endl;
 				break;
 			}
-			Event interior_end_event = Interpolate_Event(event_before, event_after, interior_end);
-			const double rate_start =
-			    (interior_start <= 0.0 && r_before < rSun)
-			    ? rate_before
-			    : 0.0;
-			const double rate_end =
-			    (interior_end >= 1.0 && r_after < rSun)
-			    ? solar_model.Total_DM_Scattering_Rate(DM, r_after, v_after)
-			    : ((interior_end < 1.0) ? 0.0 : solar_model.Total_DM_Scattering_Rate(DM, interior_end_event.Radius(), interior_end_event.Speed()));
-			if(!std::isfinite(rate_start) || rate_start < 0.0 || !std::isfinite(rate_end) || rate_end < 0.0)
+			std::vector<OpticalDepthPiece> optical_pieces;
+			Build_Optical_Depth_Pieces(event_before, event_after, interior_start, interior_end, solar_model, DM, optical_pieces);
+			double delta_tau = 0.0;
+			bool invalid_rate = false;
+			for(const OpticalDepthPiece& piece : optical_pieces)
+			{
+				if(!std::isfinite(piece.rate_start) || piece.rate_start < 0.0 || !std::isfinite(piece.rate_end) || piece.rate_end < 0.0)
+				{
+					invalid_rate = true;
+					break;
+				}
+				const double piece_dt = actual_dt * (piece.end - piece.start);
+				delta_tau += 0.5 * (piece.rate_start + piece.rate_end) * piece_dt;
+			}
+			if(invalid_rate || !std::isfinite(delta_tau) || delta_tau < 0.0)
 			{
 				std::cerr << "\nWarning in Propagate_Freely(): invalid scattering rate (rank "
 				          << current_mpi_rank << ", traj " << current_trajectory_id
-				          << ", rate_start=" << rate_start << ", rate_end=" << rate_end
 				          << "). Marking trajectory as numerically failed." << std::endl;
 				Publish_Snapshot_Progress();
 				current_event = event_after;
 				return TrajectoryTerminationReason::NumericalFailure;
 			}
-			const double interior_dt = actual_dt * (interior_end - interior_start);
-			double delta_tau = 0.5 * (rate_start + rate_end) * interior_dt;
+
+			if(delta_tau > MAX_OPTICAL_DEPTH_STEP)
+			{
+				particle_propagator = propagator_before;
+				const double factor =
+				    std::max(RK45_MIN_STEP_FACTOR, 0.8 * MAX_OPTICAL_DEPTH_STEP / delta_tau);
+				particle_propagator.time_step = RK45_Sanitized_Time_Step(factor * trial_dt);
+				continue;
+			}
+
 			if(delta_tau >= minus_log_xi)
 			{
-				const double local_fraction =
-				    Solve_Linear_Rate_Optical_Depth_Fraction(rate_start, rate_end, interior_dt, minus_log_xi);
-				const double fraction = interior_start + local_fraction * (interior_end - interior_start);
-				accepted_event = Interpolate_Event(event_before, event_after, fraction);
-				scattering = true;
-				outcome = TrajectoryTerminationReason::Scatter;
+				double remaining_tau = minus_log_xi;
+				for(const OpticalDepthPiece& piece : optical_pieces)
+				{
+					const double piece_dt = actual_dt * (piece.end - piece.start);
+					const double piece_tau = 0.5 * (piece.rate_start + piece.rate_end) * piece_dt;
+					if(piece_tau >= remaining_tau)
+					{
+						const double local_fraction =
+						    Solve_Linear_Rate_Optical_Depth_Fraction(piece.rate_start, piece.rate_end, piece_dt, remaining_tau);
+						const double fraction = piece.start + local_fraction * (piece.end - piece.start);
+						accepted_event = Interpolate_Event(event_before, event_after, fraction);
+						scattering = true;
+						outcome = TrajectoryTerminationReason::Scatter;
+						break;
+					}
+					remaining_tau -= piece_tau;
+				}
+				if(!scattering)
+				{
+					accepted_event = Interpolate_Event(event_before, event_after, interior_end);
+					scattering = true;
+					outcome = TrajectoryTerminationReason::Scatter;
+				}
 			}
 			else
 				minus_log_xi -= delta_tau;
@@ -606,6 +743,7 @@ TrajectoryTerminationReason Trajectory_Simulator::Propagate_Freely(Event& curren
 			}
 		}
 
+		time_steps++;
 		const bool captured_now = commit_accepted_event(accepted_event);
 		current_event = accepted_event;
 		if((time_steps & 0xFFu) == 0u)
@@ -790,6 +928,7 @@ Trajectory_Result Trajectory_Simulator::Simulate(const Event& initial_condition,
 			}
 			number_of_scatterings++;
 			bool captured_after_scatter = Update_Capture_State(current_event.Radius(), current_event.Speed(), current_event.time, DM, true);
+			Reset_Bincount_Anchor(current_event);
 			if(terminate_on_capture && captured_after_scatter)
 			{
 				termination_reason = TrajectoryTerminationReason::CaptureMode;

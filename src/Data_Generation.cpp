@@ -473,18 +473,24 @@ bool Append_Completed_Evaporation_Events(const std::string& path, const std::vec
 	if(!file.is_open())
 		return false;
 
+	std::vector<uint64_t> newly_written_keys;
+	std::unordered_set<uint64_t> pending_record_keys;
 	for(const auto& rec : sorted_records)
 	{
 		if(!Is_Completed_Evaporation_Record(rec))
 			continue;
 		const uint64_t key = Evaporation_Record_Key(rec.rank, rec.trajectory_id);
-		if(!state.written_record_keys.insert(key).second)
+		if(state.written_record_keys.count(key) != 0 || !pending_record_keys.insert(key).second)
 			continue;
 		file << rec.rank << "\t" << rec.trajectory_id << "\t" << std::scientific << std::setprecision(10)
 		     << rec.lifetime_unbinding << "\n";
+		newly_written_keys.push_back(key);
 	}
 	file.close();
-	return file.good();
+	if(!file.good())
+		return false;
+	state.written_record_keys.insert(newly_written_keys.begin(), newly_written_keys.end());
+	return true;
 }
 
 bool Write_Final_Evaporation_Time_File(const std::string& path, double mass_gev, double sigma_cm2, const std::vector<EvaporationRecord>& records)

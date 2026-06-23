@@ -130,6 +130,7 @@ class Trajectory_Simulator
 	bool terminate_on_capture;
 
 	void Accumulate_Bincount_Step(double r_km, double v2_km2s2, double dt_sec);
+	void Reset_Bincount_Anchor(const Event& event);
 	double Capture_Energy_eV(double radius, double speed, obscura::DM_Particle& DM);
 	bool Update_Capture_State(double radius, double speed, double time, obscura::DM_Particle& DM, bool allow_new_capture);
 
