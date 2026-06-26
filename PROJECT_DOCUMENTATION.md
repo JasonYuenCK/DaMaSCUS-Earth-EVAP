@@ -305,7 +305,7 @@ mpirun -n 32 ./DaMaSCUS-SUN config_Lingyu.cfg
 - 暗物质属性：质量 $m_\chi$，自旋，截面 $\sigma_p$（或 $\sigma_e$），相互作用类型（SI/SD/暗光子）
 - 运行参数：样本大小，最大轨迹数，输出目录，等反射环数
 - 暗光子专属参数：$\epsilon$（动能混合），$\alpha_D$（暗规范耦合），$m_{A'}$（介质子质量），形因子类型
-- 可选数值模拟参数：`max_trajectories`（未设置时默认为 `sample_size * 1000`）、`snapshot_enabled`、`snapshot_interval`、`snapshot_evaporation_log_enabled`、`max_trajectory_wall_time_sec`
+- 可选数值模拟参数：`max_trajectories`（未设置时不限制总轨迹数；显式设置时才作为提前停止安全阀）、`snapshot_enabled`、`snapshot_interval`、`snapshot_evaporation_log_enabled`、`max_trajectory_wall_time_sec`
 - 蒸发诊断参数：`snapshot_evaporation_log_enabled` 与 `evaporation_diagnostics_enabled` 已拆分。前者在 `snapshot_enabled=true` 时默认开启，把完整、有效的蒸发事件追加到单个 `evaporation_times.txt`；后者默认关闭，只控制最终 `evaporation_diagnostics.txt` 的完整 survival/数值诊断输出。
 - 快速捕获率参数：`capture_mode = true`（也可使用 `run_mode = "Capture"`）。该模式只用于估计捕获率，散射后若 $E < 0$ 则立即停止当前轨迹，不写模拟输出文件。
 
@@ -315,12 +315,11 @@ mpirun -n 32 ./DaMaSCUS-SUN config_Lingyu.cfg
 run_mode = "Parameter point";
 capture_mode = true;
 sample_size = 1000;
-max_trajectories = 100000;
 ```
 
 **全局配置变量**（`Parameter_Scan.cpp`）：
 - `g_top_level_dir`：从配置文件读取的输出目录
-- `g_max_trajectories`：从配置文件读取的最大轨迹数安全阀
+- `g_max_trajectories`：从配置文件读取的最大轨迹数安全阀；`0` 表示不限制
 
 **太阳模型加载**（`Solar_Model.cpp`）：
 
@@ -390,7 +389,7 @@ $$\sum \Delta t,\qquad \sum v^2 \Delta t$$
 | **反射（Reflected）** | $N_\text{scat} \geq 1$，$v > v_\text{esc}$，$r > R_\odot$ | 散射后仍保持正能量并逃逸 |
 | **捕获（Captured）** | $E = \frac{1}{2}m_\chi(v^2 - v_\text{esc}^2) < 0$ | 散射后总能量为负，被引力束缚 |
 
-**样本计数逻辑**：`sample_size` 在当前实现中表示目标 captured 数量，而不是固定总入射轨迹数。每个 MPI rank 的目标捕获数为 `ceil(sample_size / N_ranks)`；总轨迹数由实际达到目标捕获数前经历的所有 free / reflected / captured 轨迹共同决定。`max_trajectories` 是安全阀，达到后提前停止并给出 `EARLY STOP` 标记。
+**样本计数逻辑**：`sample_size` 在当前实现中表示目标 captured 数量，而不是固定总入射轨迹数。每个 MPI rank 的目标捕获数为 `ceil(sample_size / N_ranks)`；总轨迹数由实际达到目标捕获数前经历的所有 free / reflected / captured 轨迹共同决定。未设置 `max_trajectories` 时，模拟只在达到该目标后结束；仅在显式设置该参数时，才会达到上限后提前停止并给出 `EARLY STOP` 标记。
 
 ### 5.4 Phase 4: MPI数据汇总
 
@@ -551,7 +550,7 @@ Snapshot 不再输出旧名 `snapshot_*_evaporation.txt`，也不再生成 `snap
 
 ### 7.8 MPI 合并与负载分配
 
-每个 MPI rank 独立生成轨迹，目标捕获数为 `ceil(sample_size / N_ranks)`，最大轨迹数为 `ceil(max_trajectories / N_ranks)`。模拟完成后通过 `MPI_Allreduce` 合并轨迹数、捕获数、bincount、计算时间和 RK45 步数；蒸发记录通过 root-only `MPI_Gather` / `MPI_Gatherv` 汇总到 rank 0，保留产生该轨迹的 `rank`，因此 `(rank, trajectory_id)` 可唯一定位一条轨迹。
+每个 MPI rank 独立生成轨迹，目标捕获数为 `ceil(sample_size / N_ranks)`。如果显式设置 `max_trajectories`，其每 rank 上限为 `ceil(max_trajectories / N_ranks)`；否则不设置轨迹数上限。模拟完成后通过 `MPI_Allreduce` 合并轨迹数、捕获数、bincount、计算时间和 RK45 步数；蒸发记录通过 root-only `MPI_Gather` / `MPI_Gatherv` 汇总到 rank 0，保留产生该轨迹的 `rank`，因此 `(rank, trajectory_id)` 可唯一定位一条轨迹。
 
 Snapshot 模式额外使用每 rank 的二进制 checkpoint 文件来合并中间进度，避免长时间运行时只能等最终 `MPI_Allreduce`。
 

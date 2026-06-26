@@ -17,7 +17,7 @@
 #include "Reflection_Spectrum.hpp"
 
 std::string g_top_level_dir;  // 全局输出目录，从config文件读取
-unsigned int g_max_trajectories = 0;  // 最大轨迹数安全阀
+unsigned int g_max_trajectories = 0;  // 最大轨迹数安全阀；0 表示不限制
 
 namespace DaMaSCUS_SUN
 {
@@ -170,8 +170,10 @@ void Configuration::Import_Parameter_Scan_Parameter()
 	}
 	catch(const SettingNotFoundException& nfex)
 	{
-		// Optional: default to sample_size * 1000
-		max_trajectories = sample_size * 1000;
+		// Optional: no implicit trajectory cap. sample_size is the target
+		// number of captured particles, so a sample_size-dependent cap can
+		// silently terminate a low-capture-rate run before that target is met.
+		max_trajectories = 0;
 		g_max_trajectories = max_trajectories;
 	}
 

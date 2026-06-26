@@ -12,7 +12,7 @@ This project extends [DaMaSCUS-SUN](https://github.com/temken/DaMaSCUS-SUN) to s
 - **Capture detection**: Marks first capture after a scattering event leaves the particle with negative total energy; later free-propagation checks update the last bound time
 - **Evaporation survival records**: Records every captured trajectory with observed/censored lifetime fields and free-flight energy-drift diagnostics
 - **MPI parallelization**: Each rank independently targets `ceil(sample_size / N_ranks)` captured particles
-- **Safety valve**: `max_trajectories` parameter prevents infinite runtime for low capture-rate scenarios
+- **Optional safety valve**: set `max_trajectories` only when an explicit hard cap is required; unset means no trajectory-count limit
 
 ## Build
 
@@ -46,7 +46,7 @@ Key parameters in the `.cfg` file:
 | Parameter | Description |
 |-----------|-------------|
 | `sample_size` | Target number of captured particles |
-| `max_trajectories` | Maximum total trajectories before forced stop (default: sample_size × 1000) |
+| `max_trajectories` | Optional maximum total trajectories before forced stop (default: no limit) |
 | `output_dir` | Directory for output files |
 | `DM_mass` | Dark matter mass in GeV |
 | `DM_cross_section_nucleon` | DM-nucleon cross section in cm² |
