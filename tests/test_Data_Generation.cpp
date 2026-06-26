@@ -41,6 +41,8 @@ void TouchFile(const std::string& path)
 	file << "stale\n";
 }
 
+// Retired with the block/manifest snapshot workflow.
+#if 0
 struct TestEvaporationRow
 {
 	int rank = -1;
@@ -201,6 +203,8 @@ TEST(TestDataGeneration, TestRecoverEvaporationTimeFileFromBlocksRejectsWrongRun
 	std::string first_line;
 	std::getline(file, first_line);
 	EXPECT_EQ("stale", first_line);
+}
+#endif
 }
 
 TEST(TestDataGeneration, TestGenerateData)
@@ -371,7 +375,7 @@ TEST(TestDataGeneration, TestDefaultOutputContract)
 	}
 }
 
-TEST(TestDataGeneration, TestDiagnosticsOutputContract)
+TEST(TestDataGeneration, TestFinalOutputContainsOnlyRequestedReports)
 {
 	Solar_Model SSM;
 	obscura::Standard_Halo_Model SHM;
@@ -382,18 +386,19 @@ TEST(TestDataGeneration, TestDiagnosticsOutputContract)
 
 	Simulation_Data data_set(1, 1);
 	data_set.Configure(1.1 * rSun, 0, 100);
-	data_set.Configure_Evaporation_Diagnostics(true);
 	data_set.Generate_Data(DM, SSM, SHM);
 
 	int rank = 0;
 	MPI_Comm_rank(MPI_COMM_WORLD, &rank);
 	const std::string output_dir = TestOutputDir("diagnostics_output_contract");
+	if(rank == 0)
+		TouchFile(output_dir + "evaporation_diagnostics.txt");
 	data_set.Write_Output_Files(output_dir, DM);
 	if(rank == 0)
 	{
 		EXPECT_TRUE(FileExists(output_dir + "bincount.txt"));
 		EXPECT_TRUE(FileExists(output_dir + "evaporation_times.txt"));
-		EXPECT_TRUE(FileExists(output_dir + "evaporation_diagnostics.txt"));
+		EXPECT_FALSE(FileExists(output_dir + "evaporation_diagnostics.txt"));
 		EXPECT_FALSE(FileExists(output_dir + std::string("evaporation_") + "mode_summary.txt"));
 		EXPECT_FALSE(FileExists(output_dir + std::string("evaporation_") + "mode_" + "bincount.txt"));
 		EXPECT_FALSE(FileExists(output_dir + std::string("computation_") + "time_summary.txt"));

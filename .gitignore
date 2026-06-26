@@ -1,79 +1,109 @@
-# Build
+# Build directories and CMake generated files
 /build/
-*.o
-*.a
-*.so
-*.so.*
-
-# Binary outputs
-bin/DaMaSCUS-SUN
-tests/test_Dark_Photon
-tests/test_Data_Generation
-tests/test_Parameter_Scan
-tests/test_Reflection_Spectrum
-tests/test_Simulation_Trajectory
-tests/test_Simulation_Utilities
-tests/test_Solar_Model
-
-# External dependencies (fetched by CMake)
-/external/
-
-# Data and results
-/data/
-/results/
-/PREVIOUS_WORK/
-/traj1gev_1e-30/
-/Trajectoies/
-/evaporation/
-/bincount/
-bin/Capture/
-/Mission/
-
-# Trajectory and output files
-*.dat
-
-# Job files
-job-*
-bin/job-*
-
-# Local config files (user-specific)
-bin/config_Lingyu.cfg
-bin/config_*.cfg
-/bin/
-
-# Library binaries
-/lib/
-
-# PDF
-/PDF/
-
-# IDE and editor
-.vscode/
-*.swp
-*.swo
-*~
-/cursor-test-extract/
-
-# OS
-*.DS_Store
-.depend
-
-# Codecov files
-coverage.info
-*.gcov
-*.gcda
-*.gcno
-
-# CMake
-CMakeLists.txt.user
+/cmake-build-*/
 CMakeCache.txt
-CMakeFiles
-CMakeScripts
-Testing
+CMakeFiles/
+CMakeScripts/
+Testing/
 Makefile
 cmake_install.cmake
 install_manifest.txt
 compile_commands.json
 CTestTestfile.cmake
-_deps
-bin/job_Lingyu.sh
+_deps/
+CMakeLists.txt.user
+
+# Compiled objects, libraries, and executables
+*.o
+*.obj
+*.a
+*.so
+*.so.*
+*.dylib
+*.dll
+*.exe
+*.out
+/lib/
+/bin/DaMaSCUS-SUN
+/tests/test_Dark_Photon
+/tests/test_Data_Generation
+/tests/test_Parameter_Scan
+/tests/test_Reflection_Spectrum
+/tests/test_Simulation_Trajectory
+/tests/test_Simulation_Utilities
+/tests/test_Solar_Model
+
+# CMake-fetched third-party dependencies
+/external/
+
+# Runtime data, generated results, and large simulation outputs
+/data/
+/results/
+/smoke_results/
+/PREVIOUS_WORK/
+/traj1gev_1e-30/
+/Trajectoies/
+/Trajectories/
+/evaporation/
+/bincount/
+/Mission/
+/PDF/
+/bin/Capture
+/bin/Capture/
+/bin/previous_config/
+
+# Snapshot/checkpoint artifacts
+snapshot/
+rank_snapshot/
+*.partial.txt
+*.tmp
+*.tmp.*
+
+# Local/user-specific configuration and server job files
+/bin/config_Lingyu.cfg
+/bin/config_smoke_snapshot.cfg
+/bin/config_*.cfg
+/bin/job_Lingyu.sh
+/bin/job-*
+/job-*
+slurm-*.out
+*.slurm
+*.pbs
+*.lsf
+*.log
+
+# Python environments and caches
+/.venv
+/.venv/
+venv/
+env/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# IDE/editor/local tooling
+/.vscode
+/.vscode/
+.idea/
+/cursor-test-extract/
+*.swp
+*.swo
+*~
+
+# OS files
+.DS_Store
+*.DS_Store
+.depend
+
+# Coverage/profiling files
+coverage.info
+*.gcov
+*.gcda
+*.gcno
+*.profraw
+*.profdata
+
+# Generic generated tables from runs
+*.dat

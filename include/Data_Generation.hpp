@@ -53,8 +53,6 @@ struct CompactEvaporationEvent
 	double lifetime_unbinding = -1.0;
 };
 
-bool Recover_Evaporation_Time_File_From_Blocks(const std::string& snapshot_root, const std::string& output_path, uint64_t expected_run_id, double mass_gev, double sigma_cm2);
-
 class Simulation_Data
 {
   private:
@@ -94,7 +92,6 @@ class Simulation_Data
 	std::vector<EvaporationRecord> evaporation_records;
 	std::vector<CompactEvaporationEvent> compact_evaporation_events;
 	bool evaporation_diagnostics_enabled = false;
-	bool snapshot_evaporation_log_enabled = false;
 
 	// MPI
 	int mpi_rank, mpi_processes;
@@ -112,7 +109,6 @@ class Simulation_Data
 	Simulation_Data(unsigned int sample_size, unsigned int max_trajectories, double u_min = 0.0, unsigned int iso_rings = 1);
 
 	void Configure(double initial_radius, unsigned int min_scattering, unsigned long int max_scattering, unsigned long int max_free_steps = DEFAULT_MAXIMUM_FREE_TIME_STEPS);
-	void Configure_Evaporation_Diagnostics(bool enabled);
 
 	void Generate_Data(obscura::DM_Particle& DM, Solar_Model& solar_model, obscura::DM_Distribution& halo_model, SnapshotConfig snapshot_cfg = SnapshotConfig(), unsigned int fixed_seed = 0, bool capture_mode = false);
 

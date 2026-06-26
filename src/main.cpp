@@ -50,7 +50,6 @@ int main(int argc, char* argv[])
 		double u_min = 0.0;
 		Simulation_Data data_set(cfg.sample_size, cfg.max_trajectories, u_min, cfg.isoreflection_rings);
 		data_set.Configure(2.0 * rSun, 1, cfg.maximum_number_of_scatterings);
-		data_set.Configure_Evaporation_Diagnostics(cfg.evaporation_diagnostics_enabled);
 		if(mpi_rank == 0)
 			std::cout << (cfg.capture_mode ? "Generate data in CAPTURE MODE..." : "Generate data...") << std::endl
 					  << "\tm_DM [MeV]:\t" << libphysica::Round(In_Units(cfg.DM->mass, MeV)) << "\t\t"

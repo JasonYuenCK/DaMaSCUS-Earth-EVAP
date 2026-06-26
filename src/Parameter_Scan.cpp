@@ -229,16 +229,6 @@ void Configuration::Import_Parameter_Scan_Parameter()
 			snapshot_config.interval_seconds = 60.0;  // default: 60 seconds
 		}
 	}
-	snapshot_config.snapshot_evaporation_log_enabled = snapshot_config.enabled;
-	try
-	{
-		bool snapshot_evap_log = config.lookup("snapshot_evaporation_log_enabled");
-		snapshot_config.snapshot_evaporation_log_enabled = snapshot_evap_log;
-	}
-	catch(const SettingNotFoundException& nfex)
-	{
-	}
-
 	// Per-trajectory wall-time budget (seconds). 0 = unlimited. Optional in cfg.
 	try
 	{
@@ -248,16 +238,6 @@ void Configuration::Import_Parameter_Scan_Parameter()
 	catch(const SettingNotFoundException& nfex)
 	{
 		snapshot_config.max_trajectory_wall_time_sec = 0.0;  // default: unlimited
-	}
-
-	evaporation_diagnostics_enabled = false;
-	try
-	{
-		bool diagnostics_enabled = config.lookup("evaporation_diagnostics_enabled");
-		evaporation_diagnostics_enabled = diagnostics_enabled;
-	}
-	catch(const SettingNotFoundException& nfex)
-	{
 	}
 
 	if(run_mode != "Parameter point" && run_mode != "Parameter scan" && run_mode != "Custom" && run_mode != "Capture")
@@ -395,10 +375,6 @@ void Configuration::Print_Summary(int mpi_rank)
 				  << "\tSample size:\t\t\t" << sample_size << std::endl
 				  << "\tMax scatterings/traj:\t\t" << maximum_number_of_scatterings << std::endl
 				  << "\tSc. rate interpolation:\t\t" << ((interpolation_points > 0) ? "[x] (Grid: " + std::to_string(interpolation_points) + "×" + std::to_string(interpolation_points) + ")" : "[ ]") << std::endl;
-		if(snapshot_config.enabled && snapshot_config.snapshot_evaporation_log_enabled)
-			std::cout << "\tSnapshot evap. log:\t\t" << "[x]" << std::endl;
-		if(evaporation_diagnostics_enabled)
-			std::cout << "\tEvap. diagnostics:\t\t" << "[x]" << std::endl;
 		if(run_mode == "Parameter point" && isoreflection_rings > 1)
 			std::cout << "\tIsoreflection rings:\t\t" << isoreflection_rings << std::endl;
 		else if(run_mode == "Parameter scan")

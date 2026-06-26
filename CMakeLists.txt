@@ -2,6 +2,14 @@ cmake_minimum_required(VERSION 3.12)
 
 project(DaMaSCUS-SUN VERSION "0.1.1")
 
+# Default to Release on single-config generators so local builds use optimization.
+if(NOT CMAKE_CONFIGURATION_TYPES AND NOT CMAKE_BUILD_TYPE)
+  set(CMAKE_BUILD_TYPE Release CACHE STRING "Build type" FORCE)
+endif()
+
+# Keep older vendored dependencies configurable under newer CMake.
+set(CMAKE_POLICY_VERSION_MINIMUM 3.5 CACHE STRING "Minimum policy version for vendored deps")
+
 # Use C++-11
 set(CMAKE_CXX_STANDARD 11)
 # Require (at least) it
@@ -20,7 +28,11 @@ set(EXTERNAL_DIR  ${PROJECT_SOURCE_DIR}/external)
 #External projects
 find_package(MPI REQUIRED)
 include_directories(${MPI_INCLUDE_PATH})
-find_package(Boost 1.65  REQUIRED )
+
+# Prefer a local Boost with C++11-compatible Boost.Math quadrature headers.
+set(BOOST_ROOT "/opt/homebrew/opt/boost@1.75" CACHE PATH "Preferred Boost root")
+set(Boost_NO_SYSTEM_PATHS ON CACHE BOOL "Prefer BOOST_ROOT over system Boost")
+find_package(Boost 1.65 REQUIRED)
 
 include(FetchContent)
 # obscura
@@ -102,4 +114,3 @@ if (BUILD_TESTING AND (PROJECT_SOURCE_DIR STREQUAL CMAKE_SOURCE_DIR))
   endif()
   add_subdirectory(${TESTS_DIR})
 endif()
-

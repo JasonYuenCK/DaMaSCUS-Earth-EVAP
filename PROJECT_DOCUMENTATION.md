@@ -305,8 +305,7 @@ mpirun -n 32 ./DaMaSCUS-SUN config_Lingyu.cfg
 - 暗物质属性：质量 $m_\chi$，自旋，截面 $\sigma_p$（或 $\sigma_e$），相互作用类型（SI/SD/暗光子）
 - 运行参数：样本大小，最大轨迹数，输出目录，等反射环数
 - 暗光子专属参数：$\epsilon$（动能混合），$\alpha_D$（暗规范耦合），$m_{A'}$（介质子质量），形因子类型
-- 可选数值模拟参数：`max_trajectories`（未设置时不限制总轨迹数；显式设置时才作为提前停止安全阀）、`snapshot_enabled`、`snapshot_interval`、`snapshot_evaporation_log_enabled`、`max_trajectory_wall_time_sec`
-- 蒸发诊断参数：`snapshot_evaporation_log_enabled` 与 `evaporation_diagnostics_enabled` 已拆分。前者在 `snapshot_enabled=true` 时默认开启，把完整、有效的蒸发事件追加到单个 `evaporation_times.txt`；后者默认关闭，只控制最终 `evaporation_diagnostics.txt` 的完整 survival/数值诊断输出。
+- 可选数值模拟参数：`max_trajectories`（未设置时不限制总轨迹数；显式设置时才作为提前停止安全阀）、`snapshot_enabled`、`snapshot_interval`、`max_trajectory_wall_time_sec`
 - 快速捕获率参数：`capture_mode = true`（也可使用 `run_mode = "Capture"`）。该模式只用于估计捕获率，散射后若 $E < 0$ 则立即停止当前轨迹，不写模拟输出文件。
 
 示例：
@@ -467,7 +466,6 @@ $$\int \sum_i n_i \frac{m_\chi m_i}{(m_\chi + m_i)^2} \langle v_\text{rel} \rang
 
 - `bincount.txt`：captured 与 not_captured 的径向占据时间 $\sum \Delta t$、速度二阶矩 $\sum v^2\Delta t$，以及逐 bin 误差估计。
 - `evaporation_times.txt`：始终只写完整、有效、未删失的真实蒸发事件，列为 `rank trajectory_id lifetime_unbinding_sec`。
-- `evaporation_diagnostics.txt`：仅当 `evaporation_diagnostics_enabled=true` 时写出。每条 captured 轨迹都会写入一条 survival-analysis record，包括 `rank`、rank 内 `trajectory_id`、捕获时间 `t_capture`、最终上散射解绑时间 `t_final_unbinding_scatter`、边界逃逸时间 `t_boundary_escape`、轨迹终止时间 `t_termination`、`observed_lifetime`、`lifetime_unbinding`、`lifetime_boundary`、`event_observed`、`boundary_escape_observed`、`survival_valid`、`numerically_invalid_escape`、`censored`、`termination_reason`、首次散射后能量变负时的半径与能量诊断，以及自由传播段最大能量漂移 `max_free_energy_drift[eV]` / `max_free_energy_drift_rel`。
 
 `capture_rate`、`capture_rate_err` 和 `capture_rate_CI_95_lower/upper` 会写入这些文件头部；Capture Mode 不写这些文件，只在终端打印同类捕获率统计。
 
@@ -476,7 +474,6 @@ $$\int \sum_i n_i \frac{m_\chi m_i}{(m_\chi + m_i)^2} \langle v_\text{rel} \rang
 若设置 `snapshot_enabled = true`，代码按 wall-clock 间隔输出累计 snapshot。相关参数为：
 
 - `snapshot_interval`：snapshot 间隔，默认 `60 s`。
-- `snapshot_evaporation_log_enabled`：snapshot 蒸发/删失 delta 单文件追加日志开关；当 `snapshot_enabled=true` 时默认开启。
 - `max_trajectory_wall_time_sec`：单条轨迹 wall-clock 上限，默认 `0` 表示不限制；若启用 snapshot 且希望避免某个 MPI rank 卡在单条轨迹上，可显式设为有限正值。
 
 Snapshot 会合并各 rank 的当前进度，包括已完成轨迹的 captured / not_captured bincount，以及正在运行轨迹的临时 bincount。Capture Mode 会强制关闭 snapshot，因为该模式只需要终端捕获率。
@@ -488,7 +485,7 @@ Snapshot 会合并各 rank 的当前进度，包括已完成轨迹的 captured /
 - `snapshot_{time}s.txt`：主 snapshot 报告，输出累计统计和 bincount histogram。
 - `snapshot_{time}s_evaporation_times.txt`：该 snapshot 间隔内新完成的、有效的蒸发事件。
 
-每个已合并 snapshot 会原子更新根目录的 `evaporation_times.txt`，其中包含当前为止所有完整、有效的蒸发事件；`snapshot_{time}s_evaporation_times.txt` 只包含该时间区间 `(T_{k-1}, T_k]` 的增量。主 snapshot 报告同时写入各 rank 实际 checkpoint wall time 的最小值和最大值。该实现是异步 checkpoint 合并，时间范围用于描述各 rank 状态的可见性，不能把它当作严格同步的全局时刻。完整 survival/数值诊断只在最终 `evaporation_diagnostics.txt` 中可选输出一次。
+每个已合并 snapshot 只写入自身的两个固定文件，不会修改根目录最终报告。`snapshot_{time}s_evaporation_times.txt` 只包含该时间区间 `(T_{k-1}, T_k]` 的增量。模拟完成、MPI 汇总后，根目录只输出 `evaporation_times.txt` 与 `bincount.txt`。
 
 各 rank 的二进制 checkpoint 临时文件位于 `snapshot/rank_snapshot/`，只用于合并中间状态；snapshot 合并成功后会清理对应 checkpoint。
 
