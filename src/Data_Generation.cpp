@@ -190,6 +190,8 @@ struct Snapshot_Report_State
 {
 	long long snapshot_time_label = 0;
 	double snapshot_interval_seconds = 0.0;
+	double rank_elapsed_wall_time_min_sec = std::numeric_limits<double>::infinity();
+	double rank_elapsed_wall_time_max_sec = 0.0;
 	uint64_t total_trajectories = 0;
 	uint64_t captured_particles = 0;
 	uint64_t snapshot_bincount_captured_samples = 0;
@@ -776,6 +778,11 @@ std::string Snapshot_Text_File_Path(const std::string& snapshot_root, int snapsh
 	return snapshot_root + "snapshot_" + std::to_string(Snapshot_Time_Label_Seconds(snapshot_index, interval_seconds)) + "s.txt";
 }
 
+std::string Snapshot_Evaporation_Time_File_Path(const std::string& snapshot_root, int snapshot_index, double interval_seconds)
+{
+	return snapshot_root + "snapshot_" + std::to_string(Snapshot_Time_Label_Seconds(snapshot_index, interval_seconds)) + "s_evaporation_times.txt";
+}
+
 std::string Snapshot_Evaporation_Block_Dir(const std::string& snapshot_root)
 {
 	return Join_Path(snapshot_root, "evaporation_blocks") + "/";
@@ -1168,6 +1175,11 @@ bool Read_Rank_Snapshot_State(const std::string& path, uint64_t expected_run_id,
 
 void Accumulate_Snapshot_Report_State(Snapshot_Report_State& report, const Rank_Snapshot_State& state)
 {
+	if(std::isfinite(state.rank_elapsed_wall_sec))
+	{
+		report.rank_elapsed_wall_time_min_sec = std::min(report.rank_elapsed_wall_time_min_sec, state.rank_elapsed_wall_sec);
+		report.rank_elapsed_wall_time_max_sec = std::max(report.rank_elapsed_wall_time_max_sec, state.rank_elapsed_wall_sec);
+	}
 	report.total_trajectories += state.local_total;
 	report.captured_particles += state.local_captured;
 	report.snapshot_bincount_captured_samples += state.local_captured;
@@ -1257,7 +1269,7 @@ bool Load_Snapshot_Report_State(const std::string& rank_snapshot_dir, int snapsh
 	return all_ranks_ready;
 }
 
-bool Write_Snapshot_Report_File(const std::string& snapshot_root, int snapshot_index, double interval_seconds, uint64_t run_id, double mass_gev, double sigma_cm2, const Snapshot_Report_State& report, bool snapshot_evaporation_log_enabled, EvaporationLogState* evaporation_log_state)
+bool Write_Snapshot_Report_File(const std::string& output_root, const std::string& snapshot_root, int snapshot_index, double interval_seconds, uint64_t run_id, double mass_gev, double sigma_cm2, const Snapshot_Report_State& report, bool snapshot_evaporation_log_enabled, EvaporationLogState* evaporation_log_state)
 {
 	if(snapshot_evaporation_log_enabled && evaporation_log_state != NULL)
 	{
@@ -1267,12 +1279,32 @@ bool Write_Snapshot_Report_File(const std::string& snapshot_root, int snapshot_i
 			snapshot_events.push_back(Make_Log_Event(entry.rank, entry.entry));
 		if(!Write_Evaporation_Block_File(snapshot_root, snapshot_index, interval_seconds, run_id, mass_gev, sigma_cm2, snapshot_events, *evaporation_log_state))
 			return false;
+
+		std::vector<CompactEvaporationEvent> snapshot_events_written;
+		EvaporationLogState snapshot_event_state;
+		const std::string block_path = Snapshot_Evaporation_Block_Path(snapshot_root, snapshot_index);
+		if(!File_Is_Empty_Or_Missing(block_path)
+		   && !Read_Evaporation_Block_Events(block_path, snapshot_events_written, snapshot_event_state))
+			return false;
+		if(!Write_Final_Evaporation_Time_File(Snapshot_Evaporation_Time_File_Path(snapshot_root, snapshot_index, interval_seconds), mass_gev, sigma_cm2, snapshot_events_written))
+			return false;
+
+		const std::string live_evaporation_path = Evaporation_Log_Path_From_Output_Dir(output_root);
+		if(!Recover_Evaporation_Time_File_From_Blocks(snapshot_root, live_evaporation_path, run_id, mass_gev, sigma_cm2))
+		{
+			const std::vector<CompactEvaporationEvent> no_events;
+			if(!Write_Final_Evaporation_Time_File(live_evaporation_path, mass_gev, sigma_cm2, no_events))
+				return false;
+		}
 	}
 
 	if(!Write_Text_File_Atomically(Snapshot_Text_File_Path(snapshot_root, snapshot_index, interval_seconds), snapshot_index, [&](std::ofstream& file)
 	{
 		file << "# snapshot_status = merged\n";
 		file << "# Cumulative snapshot report\n";
+		file << "# snapshot_state_wall_time_min_s = " << std::scientific << std::setprecision(10) << report.rank_elapsed_wall_time_min_sec << "\n";
+		file << "# snapshot_state_wall_time_max_s = " << std::scientific << std::setprecision(10) << report.rank_elapsed_wall_time_max_sec << "\n";
+		file << "# snapshot_time_semantics = asynchronous_rank_checkpoint_range\n";
 		Write_Report_Header(file, mass_gev, sigma_cm2, report.total_trajectories, report.captured_particles, false, report.snapshot_time_label, report.snapshot_interval_seconds);
 
 		double snapshot_captured_samples = static_cast<double>(report.snapshot_bincount_captured_samples);
@@ -1299,7 +1331,7 @@ bool Write_Snapshot_Report_File(const std::string& snapshot_root, int snapshot_i
 	return true;
 }
 
-bool Try_Write_Merged_Snapshot(const std::string& snapshot_root, const std::string& rank_snapshot_dir, int snapshot_index, double interval_seconds, int mpi_processes, uint64_t run_id, double mass_gev, double sigma_cm2, int caller_rank, bool snapshot_evaporation_log_enabled, EvaporationLogState* evaporation_log_state)
+bool Try_Write_Merged_Snapshot(const std::string& output_root, const std::string& snapshot_root, const std::string& rank_snapshot_dir, int snapshot_index, double interval_seconds, int mpi_processes, uint64_t run_id, double mass_gev, double sigma_cm2, int caller_rank, bool snapshot_evaporation_log_enabled, EvaporationLogState* evaporation_log_state)
 {
 	if(caller_rank != 0)
 		return false;
@@ -1312,7 +1344,7 @@ bool Try_Write_Merged_Snapshot(const std::string& snapshot_root, const std::stri
 			Snapshot_Report_State report;
 			if(Load_Snapshot_Report_State(rank_snapshot_dir, snapshot_index, interval_seconds, mpi_processes, run_id, report))
 			{
-				if(!Write_Snapshot_Report_File(snapshot_root, snapshot_index, interval_seconds, run_id, mass_gev, sigma_cm2, report, snapshot_evaporation_log_enabled, evaporation_log_state))
+				if(!Write_Snapshot_Report_File(output_root, snapshot_root, snapshot_index, interval_seconds, run_id, mass_gev, sigma_cm2, report, snapshot_evaporation_log_enabled, evaporation_log_state))
 					return false;
 			}
 		}
@@ -1324,7 +1356,7 @@ bool Try_Write_Merged_Snapshot(const std::string& snapshot_root, const std::stri
 	if(!Load_Snapshot_Report_State(rank_snapshot_dir, snapshot_index, interval_seconds, mpi_processes, run_id, report))
 		return false;
 
-	if(!Write_Snapshot_Report_File(snapshot_root, snapshot_index, interval_seconds, run_id, mass_gev, sigma_cm2, report, snapshot_evaporation_log_enabled, evaporation_log_state))
+	if(!Write_Snapshot_Report_File(output_root, snapshot_root, snapshot_index, interval_seconds, run_id, mass_gev, sigma_cm2, report, snapshot_evaporation_log_enabled, evaporation_log_state))
 		return false;
 
 	Cleanup_Snapshot_Checkpoints(rank_snapshot_dir, snapshot_index, interval_seconds, mpi_processes);
@@ -1495,7 +1527,8 @@ void Simulation_Data::Generate_Data(obscura::DM_Particle& DM, Solar_Model& solar
 				snapshot_run_id = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::system_clock::now().time_since_epoch()).count());
 				if(snapshot_evaporation_log_enabled
 				   && (!Ensure_Directory_Exists(Snapshot_Evaporation_Block_Dir(snapshot_root))
-				       || !Write_Snapshot_Run_Manifest(snapshot_root, snapshot_run_id, snapshot_interval, snapshot_mass_gev, snapshot_sigma_cm2)))
+				       || !Write_Snapshot_Run_Manifest(snapshot_root, snapshot_run_id, snapshot_interval, snapshot_mass_gev, snapshot_sigma_cm2)
+				       || !Write_Final_Evaporation_Time_File(Evaporation_Log_Path_From_Output_Dir(output_root), snapshot_mass_gev, snapshot_sigma_cm2, std::vector<CompactEvaporationEvent>())))
 				{
 					std::cerr << "Warning in Generate_Data(): failed to initialize snapshot evaporation block metadata; snapshots disabled for this run." << std::endl;
 					snapshot_init_ok = 0;
@@ -1580,7 +1613,7 @@ void Simulation_Data::Generate_Data(obscura::DM_Particle& DM, Solar_Model& solar
 		bool all_snapshots_merged = true;
 		for(int snapshot_index = last_committed_snapshot_index + 1; snapshot_index <= max_snapshot_index; snapshot_index++)
 		{
-			if(!Try_Write_Merged_Snapshot(snapshot_root, rank_snapshot_dir, snapshot_index, snapshot_interval, mpi_processes, snapshot_run_id, snapshot_mass_gev, snapshot_sigma_cm2, mpi_rank, snapshot_evaporation_log_enabled, &evaporation_log_state))
+			if(!Try_Write_Merged_Snapshot(output_root, snapshot_root, rank_snapshot_dir, snapshot_index, snapshot_interval, mpi_processes, snapshot_run_id, snapshot_mass_gev, snapshot_sigma_cm2, mpi_rank, snapshot_evaporation_log_enabled, &evaporation_log_state))
 			{
 				all_snapshots_merged = false;
 				break;
@@ -1727,7 +1760,7 @@ void Simulation_Data::Generate_Data(obscura::DM_Particle& DM, Solar_Model& solar
 
 	publish_checkpoint_snapshots();
 
-	// Final snapshot state: keep per-rank binary under snapshot/rank_snapshot and merge on interval boundaries.
+	// Final snapshot state lets rank 0 merge only intervals that the run actually reached.
 	if(snapshot_cfg.enabled)
 	{
 		Rank_Snapshot_State final_state = build_rank_snapshot_state(true, computing_time, first_uncommitted_evaporation_entry, compact_evaporation_events.size());
@@ -1737,8 +1770,8 @@ void Simulation_Data::Generate_Data(obscura::DM_Particle& DM, Solar_Model& solar
 		MPI_Barrier(MPI_COMM_WORLD);
 		double final_snapshot_elapsed = computing_time;
 		MPI_Allreduce(MPI_IN_PLACE, &final_snapshot_elapsed, 1, MPI_DOUBLE, MPI_MAX, MPI_COMM_WORLD);
-		int final_snapshot_index = std::max(1, static_cast<int>(std::ceil(final_snapshot_elapsed / snapshot_interval)));
-		if(try_write_ready_snapshots(final_snapshot_index))
+		int final_snapshot_index = std::max(0, static_cast<int>(std::floor(final_snapshot_elapsed / snapshot_interval)));
+		if(final_snapshot_index == 0 || try_write_ready_snapshots(final_snapshot_index))
 			Cleanup_Final_Snapshot_States(rank_snapshot_dir, mpi_processes);
 	}
 

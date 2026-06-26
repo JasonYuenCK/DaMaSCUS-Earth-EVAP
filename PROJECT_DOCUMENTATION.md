@@ -486,8 +486,9 @@ Snapshot 会合并各 rank 的当前进度，包括已完成轨迹的 captured /
 每个 snapshot 时间点在 `snapshot/` 目录下生成主报告文件：
 
 - `snapshot_{time}s.txt`：主 snapshot 报告，输出累计统计和 bincount histogram。
+- `snapshot_{time}s_evaporation_times.txt`：该 snapshot 间隔内新完成的、有效的蒸发事件。
 
-Snapshot 不再输出旧名 `snapshot_*_evaporation.txt`，也不再生成 `snapshot_*_completed_evaporation_diagnostic.txt`。所有 snapshot 蒸发信息只追加到 `evaporation_times.txt`，并按轨迹完成 wall time 严格归入 `(T_{k-1}, T_k]` 区间；完整 survival/数值诊断只在最终 `evaporation_diagnostics.txt` 中可选输出一次。
+每个已合并 snapshot 会原子更新根目录的 `evaporation_times.txt`，其中包含当前为止所有完整、有效的蒸发事件；`snapshot_{time}s_evaporation_times.txt` 只包含该时间区间 `(T_{k-1}, T_k]` 的增量。主 snapshot 报告同时写入各 rank 实际 checkpoint wall time 的最小值和最大值。该实现是异步 checkpoint 合并，时间范围用于描述各 rank 状态的可见性，不能把它当作严格同步的全局时刻。完整 survival/数值诊断只在最终 `evaporation_diagnostics.txt` 中可选输出一次。
 
 各 rank 的二进制 checkpoint 临时文件位于 `snapshot/rank_snapshot/`，只用于合并中间状态；snapshot 合并成功后会清理对应 checkpoint。
 

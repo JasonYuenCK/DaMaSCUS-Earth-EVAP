@@ -67,8 +67,9 @@ For each parameter point, the main generated files are:
 When `snapshot_enabled = true`, intermediate files are written under `snapshot/`:
 
 - `snapshot_{time}s.txt` — Cumulative snapshot report and bincount histogram.
+- `snapshot_{time}s_evaporation_times.txt` — Complete, valid evaporation events newly finished in that snapshot interval.
 
-Snapshot evaporation deltas are appended only to the single `evaporation_times.txt` file using the same compact event-only format. Full evaporation diagnostics are controlled separately by `evaporation_diagnostics_enabled` and written once to `evaporation_diagnostics.txt`.
+At each merged snapshot, `evaporation_times.txt` is atomically refreshed with all complete, valid evaporation events observed so far. Snapshot reports also record the minimum and maximum rank checkpoint wall times; these describe an asynchronous checkpoint range rather than an exact globally synchronized instant. Full evaporation diagnostics are controlled separately by `evaporation_diagnostics_enabled` and written once to `evaporation_diagnostics.txt`.
 
 ## References
 

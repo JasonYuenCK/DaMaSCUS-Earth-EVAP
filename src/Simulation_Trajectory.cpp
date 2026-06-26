@@ -39,6 +39,7 @@ constexpr double OPTICAL_DEPTH_ABSOLUTE_TOLERANCE = 1.0e-12 * MAX_OPTICAL_DEPTH_
 constexpr unsigned int MAX_OPTICAL_DEPTH_RETRIES = 100;
 constexpr std::size_t MAX_OPTICAL_DEPTH_PIECES = 4;
 constexpr std::size_t CAPTURE_MODE_OPTICAL_DEPTH_PIECES = 2;
+constexpr unsigned long int SNAPSHOT_PROGRESS_STEP_INTERVAL = 16;
 
 struct OpticalDepthPiece
 {
@@ -850,7 +851,7 @@ TrajectoryTerminationReason Trajectory_Simulator::Propagate_Freely(Event& curren
 		optical_depth_retries = 0;
 		const bool captured_now = commit_accepted_event(accepted_event);
 		current_event = accepted_event;
-		if((time_steps & 0xFFu) == 0u)
+		if((time_steps % SNAPSHOT_PROGRESS_STEP_INTERVAL) == 0u)
 			Publish_Snapshot_Progress();
 		if(terminate_on_capture && captured_now)
 			return TrajectoryTerminationReason::CaptureMode;
