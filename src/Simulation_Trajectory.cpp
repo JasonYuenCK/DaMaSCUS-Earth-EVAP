@@ -40,6 +40,7 @@ constexpr unsigned int MAX_OPTICAL_DEPTH_RETRIES = 100;
 constexpr std::size_t MAX_OPTICAL_DEPTH_PIECES = 4;
 constexpr std::size_t CAPTURE_MODE_OPTICAL_DEPTH_PIECES = 2;
 constexpr unsigned long int SNAPSHOT_PROGRESS_STEP_INTERVAL = 16;
+constexpr unsigned long int TARGET_VELOCITY_MAX_REJECTION_ATTEMPTS = 1000000UL;
 
 struct OpticalDepthPiece
 {
@@ -92,6 +93,29 @@ bool Outward_Escaping_At_Boundary(const Event& event, Solar_Model& solar_model, 
 double Clamp_Unit_Interval(double value)
 {
 	return std::max(0.0, std::min(1.0, value));
+}
+
+double Clamp_Cosine(double value)
+{
+	return std::max(-1.0, std::min(1.0, value));
+}
+
+libphysica::Vector Unit_Vector_At_Angle_From_Axis(double cos_theta, double phi, const libphysica::Vector& axis)
+{
+	const double axis_norm = axis.Norm();
+	if(!std::isfinite(axis_norm) || axis_norm <= 0.0)
+		throw std::runtime_error("Unit_Vector_At_Angle_From_Axis(): axis is zero or non-finite.");
+
+	libphysica::Vector e3 = axis / axis_norm;
+	libphysica::Vector reference = (std::fabs(e3[2]) < 0.9)
+	                             ? libphysica::Vector({0.0, 0.0, 1.0})
+	                             : libphysica::Vector({1.0, 0.0, 0.0});
+	libphysica::Vector e1 = reference.Cross(e3).Normalized();
+	libphysica::Vector e2 = e3.Cross(e1).Normalized();
+
+	cos_theta = Clamp_Cosine(cos_theta);
+	const double sin_theta = sqrt(std::max(0.0, 1.0 - cos_theta * cos_theta));
+	return cos_theta * e3 + sin_theta * cos(phi) * e1 + sin_theta * sin(phi) * e2;
 }
 
 Event Interpolate_Event(const Event& before, const Event& after, double fraction)
@@ -612,6 +636,25 @@ TrajectoryTerminationReason Trajectory_Simulator::Propagate_Freely(Event& curren
 	const double optical_depth_step_limit = fast_capture_mode ? CAPTURE_MODE_MAX_OPTICAL_DEPTH_STEP : MAX_OPTICAL_DEPTH_STEP;
 	const std::size_t optical_depth_piece_target = fast_capture_mode ? CAPTURE_MODE_OPTICAL_DEPTH_PIECES : MAX_OPTICAL_DEPTH_PIECES;
 
+	auto abort_if_wall_time_exceeded = [&](const char* phase)
+	{
+		if(max_trajectory_wall_time_sec <= 0.0)
+			return false;
+
+		double traj_wall = Current_Trajectory_Wall_Time_Seconds();
+		if(traj_wall <= max_trajectory_wall_time_sec)
+			return false;
+
+		std::cerr << "\nWarning in Propagate_Freely(): trajectory wall-time budget exceeded (rank "
+		          << current_mpi_rank << ", traj " << current_trajectory_id
+		          << ", phase=" << phase << ", step_attempts=" << step_attempts
+		          << ", traj_wall=" << traj_wall << "s > " << max_trajectory_wall_time_sec
+		          << "s). Aborting trajectory." << std::endl;
+		Publish_Snapshot_Progress();
+		current_event = particle_propagator.Event_In_3D();
+		return true;
+	};
+
 	auto commit_accepted_event = [&](const Event& accepted_event)
 	{
 		const double t_now_sec = In_Units(accepted_event.time, sec);
@@ -639,6 +682,9 @@ TrajectoryTerminationReason Trajectory_Simulator::Propagate_Freely(Event& curren
 	while(time_steps < maximum_time_steps && outcome == TrajectoryTerminationReason::MaxFreeSteps)
 	{
 		step_attempts++;
+		if(abort_if_wall_time_exceeded("before_step"))
+			return TrajectoryTerminationReason::WallTimeLimit;
+
 		Event event_before = particle_propagator.Event_In_3D();
 		double r_before = particle_propagator.Current_Radius();
 		double v_before = particle_propagator.Current_Speed();
@@ -715,22 +761,8 @@ TrajectoryTerminationReason Trajectory_Simulator::Propagate_Freely(Event& curren
 			return TrajectoryTerminationReason::SpeedLimit;
 		}
 
-		// 单条轨迹 wall-clock 预算：防止任何一条轨迹把整个 rank 永远拖住。
-		// 正式统计默认不限制；若配置为正值，每 256 步检查一次。
-		if(max_trajectory_wall_time_sec > 0.0 && (step_attempts & 0xFFu) == 0u)
-		{
-			double traj_wall = Current_Trajectory_Wall_Time_Seconds();
-			if(traj_wall > max_trajectory_wall_time_sec)
-			{
-				std::cerr << "\nWarning in Propagate_Freely(): trajectory wall-time budget exceeded (rank "
-				          << current_mpi_rank << ", traj " << current_trajectory_id << ", traj_wall="
-				          << traj_wall << "s > " << max_trajectory_wall_time_sec
-				          << "s). Aborting trajectory." << std::endl;
-				Publish_Snapshot_Progress();
-				current_event = particle_propagator.Event_In_3D();
-				return TrajectoryTerminationReason::WallTimeLimit;
-			}
-		}
+		if(abort_if_wall_time_exceeded("after_rk45_step"))
+			return TrajectoryTerminationReason::WallTimeLimit;
 
 		// Check for scatterings and reflection
 		bool scattering = false;
@@ -914,8 +946,16 @@ libphysica::Vector Trajectory_Simulator::Sample_Target_Velocity(double temperatu
 	double y  = kappa * vDM;
 	double x  = y;
 	double mu = 1.0;
-	while(sqrt(x * x + y * y - 2.0 * x * y * mu) / (x + y) < libphysica::Sample_Uniform(PRNG, 0.0, 1.0))
+	unsigned long int rejection_attempts = 0;
+	auto relative_speed_ratio = [&]() {
+		const double relative_speed_sqr = std::max(0.0, x * x + y * y - 2.0 * x * y * mu);
+		return sqrt(relative_speed_sqr) / (x + y);
+	};
+	while(relative_speed_ratio() < libphysica::Sample_Uniform(PRNG, 0.0, 1.0))
 	{
+		rejection_attempts++;
+		if(rejection_attempts > TARGET_VELOCITY_MAX_REJECTION_ATTEMPTS)
+			throw std::runtime_error("Sample_Target_Velocity(): rejection sampling exceeded maximum attempts.");
 		mu			= libphysica::Sample_Uniform(PRNG, -1.0, 1.0);
 		double xi_1 = libphysica::Sample_Uniform(PRNG, 0.0, 1.0);
 		if(xi_1 < 2.0 / (sqrt(M_PI) * y + 2.0))
@@ -937,20 +977,8 @@ libphysica::Vector Trajectory_Simulator::Sample_Target_Velocity(double temperatu
 	// 2. Construct the target velocity vel_T
 	double vT		 = x / kappa;
 	double cos_theta = mu;
-	double sin_theta = sqrt(1.0 - cos_theta * cos_theta);
 	double phi		 = libphysica::Sample_Uniform(PRNG, 0.0, 2.0 * M_PI);
-	double cos_phi	 = cos(phi);
-	double sin_phi	 = sin(phi);
-
-	libphysica::Vector u = vel_DM.Normalized();
-	libphysica::Vector reference = (std::fabs(u[2]) < 0.9)
-	                             ? libphysica::Vector({0.0, 0.0, 1.0})
-	                             : libphysica::Vector({1.0, 0.0, 0.0});
-	libphysica::Vector e1 = reference.Cross(u).Normalized();
-	libphysica::Vector e2 = u.Cross(e1).Normalized();
-	libphysica::Vector unit_vector_T = cos_theta * u
-	                                 + sin_theta * cos_phi * e1
-	                                 + sin_theta * sin_phi * e2;
+	libphysica::Vector unit_vector_T = Unit_Vector_At_Angle_From_Axis(cos_theta, phi, vel_DM);
 
 	return vT * unit_vector_T;
 }
@@ -959,7 +987,7 @@ libphysica::Vector Trajectory_Simulator::New_DM_Velocity(double cos_scattering_a
 {
 	// Construction of n, the unit vector pointing into the direction of vfinal.
 	double phi			 = libphysica::Sample_Uniform(PRNG, 0.0, 2.0 * M_PI);
-	libphysica::Vector n = libphysica::Spherical_Coordinates(1.0, acos(cos_scattering_angle), phi, vel_DM);
+	libphysica::Vector n = Unit_Vector_At_Angle_From_Axis(cos_scattering_angle, phi, vel_DM);
 
 	double relative_speed = (vel_target - vel_DM).Norm();
 

@@ -423,14 +423,31 @@ bool Clear_Directory_Contents(const std::string& directory)
 
 bool Ensure_Directory_Exists(const std::string& directory)
 {
+	if(directory.empty())
+		return false;
+
+	std::string normalized = directory;
+	while(normalized.size() > 1 && normalized.back() == '/')
+		normalized.pop_back();
+
 	struct stat info;
-	if(stat(directory.c_str(), &info) != 0)
+	if(stat(normalized.c_str(), &info) == 0)
+		return S_ISDIR(info.st_mode);
+
+	const std::size_t separator = normalized.find_last_of('/');
+	if(separator != std::string::npos)
 	{
-		if(mkdir(directory.c_str(), 0755) != 0 && errno != EEXIST)
-			return false;
-		if(stat(directory.c_str(), &info) != 0)
+		std::string parent = normalized.substr(0, separator);
+		if(parent.empty())
+			parent = "/";
+		if(parent != normalized && !Ensure_Directory_Exists(parent))
 			return false;
 	}
+
+	if(mkdir(normalized.c_str(), 0755) != 0 && errno != EEXIST)
+		return false;
+	if(stat(normalized.c_str(), &info) != 0)
+		return false;
 	return S_ISDIR(info.st_mode);
 }
 
@@ -1629,10 +1646,11 @@ void Simulation_Data::Write_Output_Files(const std::string& output_dir, obscura:
 	if(mpi_rank != 0)
 		return;
 
-	// Create output directory
-	struct stat info;
-	if(stat(output_dir.c_str(), &info) != 0)
-		mkdir(output_dir.c_str(), 0755);
+	if(!Ensure_Directory_Exists(output_dir))
+	{
+		std::cerr << "Warning in Write_Output_Files(): failed to create output directory " << output_dir << std::endl;
+		return;
+	}
 
 	double mass_gev = In_Units(DM.mass, GeV);
 	double sigma_cm2 = In_Units(DM.Sigma_Proton(), cm * cm);
