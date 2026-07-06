@@ -1082,7 +1082,8 @@ bool Recover_Evaporation_Time_File_From_Blocks(const std::string& snapshot_root,
 #endif
 
 Simulation_Data::Simulation_Data(unsigned int sample_size, unsigned int max_trajectories, double u_min, unsigned int iso_rings)
-: number_of_trajectories(0), number_of_free_particles(0), number_of_reflected_particles(0), number_of_captured_particles(0),
+: requested_captured_particles(sample_size),
+  number_of_trajectories(0), number_of_free_particles(0), number_of_reflected_particles(0), number_of_captured_particles(0),
   number_of_complete_evaporation_particles(0), number_of_censored_captured_particles(0),
   number_of_invalid_survival_captured_particles(0),
   average_number_of_scatterings(0.0), computing_time(0.0), early_stopped(false),
@@ -1093,7 +1094,6 @@ Simulation_Data::Simulation_Data(unsigned int sample_size, unsigned int max_traj
     MPI_Comm_size(MPI_COMM_WORLD, &mpi_processes);
     MPI_Comm_rank(MPI_COMM_WORLD, &mpi_rank);
 
-    target_captured_per_rank = (sample_size + mpi_processes - 1) / mpi_processes;  // ceil division
     if(max_trajectories == 0)
         max_trajectories_per_rank = std::numeric_limits<unsigned long int>::max();  // no limit
     else
@@ -1292,92 +1292,135 @@ void Simulation_Data::Generate_Data(obscura::DM_Particle& DM, Solar_Model& solar
 			publish_checkpoint_snapshots();
 		});
 
-	while(local_captured < target_captured_per_rank && local_total < max_trajectories_per_rank)
+	unsigned long int global_captured = 0;
+	auto select_rank_for_next_trajectory = [&](unsigned long int remaining_captures, bool local_can_simulate, int& capable_ranks, int& selected_ranks)
 	{
-		Event IC = Initial_Conditions(halo_model, solar_model, simulator.PRNG);
-		Hyperbolic_Kepler_Shift(IC, initial_and_final_radius);
+		const int local_can_int = local_can_simulate ? 1 : 0;
+		std::vector<int> can_simulate(mpi_processes, 0);
+		MPI_Allgather(&local_can_int, 1, MPI_INT, can_simulate.data(), 1, MPI_INT, MPI_COMM_WORLD);
 
-		Trajectory_Result trajectory = simulator.Simulate(IC, DM, mpi_rank);
-		const double trajectory_completion_wall_time_sec = elapsed_since_start();
-
-		local_total++;
-		number_of_trajectories++;
-		average_number_of_scatterings = 1.0 / number_of_trajectories * ((number_of_trajectories - 1) * average_number_of_scatterings + trajectory.number_of_scatterings);
-		const bool completed_outward_escape = Completed_Outward_Escape(trajectory.bincount.termination_reason);
-
-		if(trajectory.bincount.is_captured)
+		capable_ranks = 0;
+		selected_ranks = 0;
+		bool selected_this_rank = false;
+		for(int rank = 0; rank < mpi_processes; rank++)
 		{
-			number_of_captured_particles++;
-			local_captured++;
-			if(!capture_mode)
+			if(!can_simulate[rank])
+				continue;
+			capable_ranks++;
+			if(static_cast<unsigned long int>(selected_ranks) < remaining_captures)
 			{
-				if(trajectory.bincount.event_observed)
-					number_of_complete_evaporation_particles++;
-				else
-					number_of_invalid_survival_captured_particles++;
+				if(rank == mpi_rank)
+					selected_this_rank = true;
+				selected_ranks++;
 			}
-
-			if(!capture_mode)
-			{
-				// Accumulate captured bincount
-				for(int b = 0; b < NUM_BINS; b++)
-				{
-					captured_dt_hist[b]   += trajectory.bincount.dt_hist[b];
-					captured_v2dt_hist[b] += trajectory.bincount.v2dt_hist[b];
-					captured_dt_sq_hist[b]   += trajectory.bincount.dt_hist[b] * trajectory.bincount.dt_hist[b];
-					captured_v2dt_sq_hist[b] += trajectory.bincount.v2dt_hist[b] * trajectory.bincount.v2dt_hist[b];
-				}
-
-				EvaporationRecord rec;
-				if(Build_Evaporation_Record(trajectory.bincount, mpi_rank, number_of_trajectories, trajectory_completion_wall_time_sec, rec))
-				{
-					if(evaporation_diagnostics_enabled)
-						evaporation_records.push_back(rec);
-					CompactEvaporationEvent event;
-					if(Make_Compact_Evaporation_Event(rec, event))
-						compact_evaporation_events.push_back(event);
-				}
-			}
-
 		}
-		else
+		return selected_this_rank;
+	};
+
+	while(global_captured < requested_captured_particles)
+	{
+		const unsigned long int remaining_captures = requested_captured_particles - global_captured;
+		const bool local_can_simulate = local_total < max_trajectories_per_rank;
+		int capable_ranks = 0;
+		int selected_ranks = 0;
+		const bool simulate_this_round =
+		    select_rank_for_next_trajectory(remaining_captures, local_can_simulate, capable_ranks, selected_ranks);
+		if(selected_ranks == 0 || capable_ranks == 0)
 		{
-			if(!capture_mode && completed_outward_escape)
+			early_stopped = true;
+			break;
+		}
+
+		if(simulate_this_round)
+		{
+			Event IC = Initial_Conditions(halo_model, solar_model, simulator.PRNG);
+			Hyperbolic_Kepler_Shift(IC, initial_and_final_radius);
+
+			Trajectory_Result trajectory = simulator.Simulate(IC, DM, mpi_rank);
+			const double trajectory_completion_wall_time_sec = elapsed_since_start();
+
+			local_total++;
+			number_of_trajectories++;
+			average_number_of_scatterings = 1.0 / number_of_trajectories * ((number_of_trajectories - 1) * average_number_of_scatterings + trajectory.number_of_scatterings);
+			const bool completed_outward_escape = Completed_Outward_Escape(trajectory.bincount.termination_reason);
+
+			if(trajectory.bincount.is_captured)
 			{
-				// Accumulate non-captured bincount
-				for(int b = 0; b < NUM_BINS; b++)
+				number_of_captured_particles++;
+				local_captured++;
+				if(!capture_mode)
 				{
-					not_captured_dt_hist[b]   += trajectory.bincount.dt_hist[b];
-					not_captured_v2dt_hist[b] += trajectory.bincount.v2dt_hist[b];
-					not_captured_dt_sq_hist[b]   += trajectory.bincount.dt_hist[b] * trajectory.bincount.dt_hist[b];
-					not_captured_v2dt_sq_hist[b] += trajectory.bincount.v2dt_hist[b] * trajectory.bincount.v2dt_hist[b];
+					if(trajectory.bincount.event_observed)
+						number_of_complete_evaporation_particles++;
+					else
+						number_of_invalid_survival_captured_particles++;
 				}
 
-				if(trajectory.Particle_Free())
-					number_of_free_particles++;
-				else if(trajectory.Particle_Reflected())
+				if(!capture_mode)
 				{
-					number_of_reflected_particles++;
-					Hyperbolic_Kepler_Shift(trajectory.final_event, 1.0 * AU);
-					const double v_final = trajectory.final_event.Speed();
-					if(trajectory.number_of_scatterings >= minimum_number_of_scatterings
-					   && v_final > KDE_boundary_correction_factor * minimum_speed_threshold)
+					// Accumulate captured bincount
+					for(int b = 0; b < NUM_BINS; b++)
 					{
-						const unsigned int isoreflection_ring =
-						    (isoreflection_rings == 1)
-						    ? 0
-						    : trajectory.final_event.Isoreflection_Ring(obscura::Sun_Velocity(), isoreflection_rings);
-						data[isoreflection_ring].push_back(libphysica::DataPoint(v_final));
+						captured_dt_hist[b]   += trajectory.bincount.dt_hist[b];
+						captured_v2dt_hist[b] += trajectory.bincount.v2dt_hist[b];
+						captured_dt_sq_hist[b]   += trajectory.bincount.dt_hist[b] * trajectory.bincount.dt_hist[b];
+						captured_v2dt_sq_hist[b] += trajectory.bincount.v2dt_hist[b] * trajectory.bincount.v2dt_hist[b];
+					}
+
+					EvaporationRecord rec;
+					if(Build_Evaporation_Record(trajectory.bincount, mpi_rank, number_of_trajectories, trajectory_completion_wall_time_sec, rec))
+					{
+						if(evaporation_diagnostics_enabled)
+							evaporation_records.push_back(rec);
+						CompactEvaporationEvent event;
+						if(Make_Compact_Evaporation_Event(rec, event))
+							compact_evaporation_events.push_back(event);
 					}
 				}
-			}
 
+			}
+			else
+			{
+				if(!capture_mode && completed_outward_escape)
+				{
+					// Accumulate non-captured bincount
+					for(int b = 0; b < NUM_BINS; b++)
+					{
+						not_captured_dt_hist[b]   += trajectory.bincount.dt_hist[b];
+						not_captured_v2dt_hist[b] += trajectory.bincount.v2dt_hist[b];
+						not_captured_dt_sq_hist[b]   += trajectory.bincount.dt_hist[b] * trajectory.bincount.dt_hist[b];
+						not_captured_v2dt_sq_hist[b] += trajectory.bincount.v2dt_hist[b] * trajectory.bincount.v2dt_hist[b];
+					}
+
+					if(trajectory.Particle_Free())
+						number_of_free_particles++;
+					else if(trajectory.Particle_Reflected())
+					{
+						number_of_reflected_particles++;
+						Hyperbolic_Kepler_Shift(trajectory.final_event, 1.0 * AU);
+						const double v_final = trajectory.final_event.Speed();
+						if(trajectory.number_of_scatterings >= minimum_number_of_scatterings
+						   && v_final > KDE_boundary_correction_factor * minimum_speed_threshold)
+						{
+							const unsigned int isoreflection_ring =
+							    (isoreflection_rings == 1)
+							    ? 0
+							    : trajectory.final_event.Isoreflection_Ring(obscura::Sun_Velocity(), isoreflection_rings);
+							data[isoreflection_ring].push_back(libphysica::DataPoint(v_final));
+						}
+					}
+				}
+
+			}
 		}
+
+		MPI_Allreduce(&local_captured, &global_captured, 1, MPI_UNSIGNED_LONG, MPI_SUM, MPI_COMM_WORLD);
 
 		// Progress bar (every 20%)
 		if(mpi_rank == 0)
 		{
-			double progress = std::min(1.0, 1.0 * local_captured / target_captured_per_rank);
+			const double denominator = std::max(1u, requested_captured_particles);
+			double progress = std::min(1.0, static_cast<double>(global_captured) / denominator);
 			int milestone = static_cast<int>(progress * 5);  // 0=0%,1=20%,...,5=100%
 			if(milestone > last_progress_milestone)
 			{
@@ -1390,7 +1433,7 @@ void Simulation_Data::Generate_Data(obscura::DM_Particle& DM, Solar_Model& solar
 		publish_checkpoint_snapshots();
 	}
 
-	if(local_total >= max_trajectories_per_rank && local_captured < target_captured_per_rank)
+	if(global_captured < requested_captured_particles)
 		early_stopped = true;
 
 	auto time_end  = std::chrono::system_clock::now();

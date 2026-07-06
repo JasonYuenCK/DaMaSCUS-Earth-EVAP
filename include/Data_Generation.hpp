@@ -57,7 +57,7 @@ class Simulation_Data
 {
   private:
 	// Configuration
-	unsigned int target_captured_per_rank;   // ceil(sample_size / N_ranks)
+	unsigned int requested_captured_particles;
 	unsigned long int max_trajectories_per_rank;
 	double initial_and_final_radius = 2.0 * libphysica::natural_units::rSun;
 	unsigned int minimum_number_of_scatterings = 1;
