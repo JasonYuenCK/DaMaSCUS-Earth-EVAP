@@ -118,6 +118,65 @@ libphysica::Vector Unit_Vector_At_Angle_From_Axis(double cos_theta, double phi, 
 	return cos_theta * e3 + sin_theta * cos(phi) * e1 + sin_theta * sin(phi) * e2;
 }
 
+double Radial_Velocity(const Event& event)
+{
+	const double radius = event.Radius();
+	if(radius <= 0.0)
+		return 0.0;
+	return event.position.Dot(event.velocity) / radius;
+}
+
+bool Bound_Kepler_Return_At_Same_Radius(const Event& outward_event, Event& inbound_event)
+{
+	// Bound particles outside the Sun can spend very long times on Kepler arcs.
+	// Fast-forward only this scatter-free exterior segment; this is not a
+	// termination or censoring condition, the trajectory continues inbound.
+	const double radius = outward_event.Radius();
+	const double speed = outward_event.Speed();
+	const double radial_velocity = Radial_Velocity(outward_event);
+	if(!std::isfinite(radius) || !std::isfinite(speed) || !std::isfinite(radial_velocity)
+	   || radius <= rSun || speed <= 0.0 || radial_velocity <= 0.0)
+		return false;
+
+	const double mu = G_Newton * mSun;
+	const double specific_energy = 0.5 * speed * speed - mu / radius;
+	if(!std::isfinite(specific_energy) || specific_energy >= 0.0)
+		return false;
+
+	const double angular_momentum = outward_event.Angular_Momentum();
+	if(!std::isfinite(angular_momentum))
+		return false;
+
+	const double semi_major_axis = -mu / (2.0 * specific_energy);
+	if(!std::isfinite(semi_major_axis) || semi_major_axis <= 0.0)
+		return false;
+
+	double eccentricity_sqr = 1.0 + 2.0 * specific_energy * angular_momentum * angular_momentum / (mu * mu);
+	if(!std::isfinite(eccentricity_sqr) || eccentricity_sqr < 0.0)
+		return false;
+	eccentricity_sqr = std::max(0.0, eccentricity_sqr);
+	const double eccentricity = sqrt(eccentricity_sqr);
+	if(eccentricity <= 1.0e-14 || eccentricity >= 1.0)
+		return false;
+
+	const double cos_eccentric_anomaly = Clamp_Cosine((1.0 - radius / semi_major_axis) / eccentricity);
+	const double eccentric_anomaly = acos(cos_eccentric_anomaly);
+	const double sin_eccentric_anomaly = sqrt(std::max(0.0, 1.0 - cos_eccentric_anomaly * cos_eccentric_anomaly));
+	const double mean_motion = sqrt(mu / (semi_major_axis * semi_major_axis * semi_major_axis));
+	if(!std::isfinite(mean_motion) || mean_motion <= 0.0)
+		return false;
+
+	const double return_time = (2.0 * M_PI - 2.0 * eccentric_anomaly + 2.0 * eccentricity * sin_eccentric_anomaly) / mean_motion;
+	if(!std::isfinite(return_time) || return_time <= 0.0)
+		return false;
+
+	const libphysica::Vector radial_unit = outward_event.position / radius;
+	inbound_event = outward_event;
+	inbound_event.time += return_time;
+	inbound_event.velocity = outward_event.velocity - 2.0 * radial_velocity * radial_unit;
+	return inbound_event.time > outward_event.time && std::isfinite(inbound_event.Speed());
+}
+
 Event Interpolate_Event(const Event& before, const Event& after, double fraction)
 {
 	fraction = Clamp_Unit_Interval(fraction);
@@ -626,7 +685,13 @@ TrajectoryTerminationReason Trajectory_Simulator::Propagate_Freely(Event& curren
 	if(Outward_Escaping_At_Boundary(current_event, solar_model, maximum_distance))
 		return TrajectoryTerminationReason::OutwardEscape;
 
-	Free_Particle_Propagator particle_propagator(current_event);
+	// Keep each free-propagation segment near t=0. Otherwise a captured particle
+	// with a large absolute lifetime can make small RK45 increments disappear in
+	// double precision, producing dt=0 and an apparent hang.
+	double time_origin = current_event.time;
+	Event local_initial_event = current_event;
+	local_initial_event.time = 0.0;
+	Free_Particle_Propagator particle_propagator(local_initial_event);
 	double minus_log_xi = -log(libphysica::Sample_Uniform(PRNG));
 	TrajectoryTerminationReason outcome = TrajectoryTerminationReason::MaxFreeSteps;
 	unsigned long int time_steps = 0;
@@ -635,6 +700,26 @@ TrajectoryTerminationReason Trajectory_Simulator::Propagate_Freely(Event& curren
 	const bool fast_capture_mode = terminate_on_capture;
 	const double optical_depth_step_limit = fast_capture_mode ? CAPTURE_MODE_MAX_OPTICAL_DEPTH_STEP : MAX_OPTICAL_DEPTH_STEP;
 	const std::size_t optical_depth_piece_target = fast_capture_mode ? CAPTURE_MODE_OPTICAL_DEPTH_PIECES : MAX_OPTICAL_DEPTH_PIECES;
+
+	if(!terminate_on_capture && prev_time_sec >= 0.0)
+		prev_time_sec = 0.0;
+
+	auto to_absolute_event = [&](const Event& local_event)
+	{
+		Event absolute_event = local_event;
+		absolute_event.time += time_origin;
+		return absolute_event;
+	};
+
+	auto reset_propagator_at_absolute_event = [&](const Event& absolute_event)
+	{
+		time_origin = absolute_event.time;
+		Event local_event = absolute_event;
+		local_event.time = 0.0;
+		particle_propagator = Free_Particle_Propagator(local_event);
+		if(!terminate_on_capture && prev_time_sec >= 0.0)
+			prev_time_sec = 0.0;
+	};
 
 	auto abort_if_wall_time_exceeded = [&](const char* phase)
 	{
@@ -651,17 +736,17 @@ TrajectoryTerminationReason Trajectory_Simulator::Propagate_Freely(Event& curren
 		          << ", traj_wall=" << traj_wall << "s > " << max_trajectory_wall_time_sec
 		          << "s). Aborting trajectory." << std::endl;
 		Publish_Snapshot_Progress();
-		current_event = particle_propagator.Event_In_3D();
+		current_event = to_absolute_event(particle_propagator.Event_In_3D());
 		return true;
 	};
 
-	auto commit_accepted_event = [&](const Event& accepted_event)
+	auto commit_accepted_event = [&](const Event& local_accepted_event)
 	{
-		const double t_now_sec = In_Units(accepted_event.time, sec);
+		const double t_now_sec = In_Units(local_accepted_event.time, sec);
 		if(!terminate_on_capture)
 		{
-			const double r_now_km  = In_Units(accepted_event.Radius(), km);
-			const double v_now_kms = In_Units(accepted_event.Speed(), km / sec);
+			const double r_now_km  = In_Units(local_accepted_event.Radius(), km);
+			const double v_now_kms = In_Units(local_accepted_event.Speed(), km / sec);
 			const double v2_now    = v_now_kms * v_now_kms;
 
 			if(prev_time_sec >= 0.0)
@@ -676,7 +761,8 @@ TrajectoryTerminationReason Trajectory_Simulator::Propagate_Freely(Event& curren
 			prev_v2_km2s2 = v2_now;
 		}
 
-		return Update_Capture_State(accepted_event.Radius(), accepted_event.Speed(), accepted_event.time, DM, false);
+		const Event absolute_accepted_event = to_absolute_event(local_accepted_event);
+		return Update_Capture_State(absolute_accepted_event.Radius(), absolute_accepted_event.Speed(), absolute_accepted_event.time, DM, false);
 	};
 
 	while(time_steps < maximum_time_steps && outcome == TrajectoryTerminationReason::MaxFreeSteps)
@@ -713,7 +799,7 @@ TrajectoryTerminationReason Trajectory_Simulator::Propagate_Freely(Event& curren
 				          << current_mpi_rank << ", traj " << current_trajectory_id
 				          << ", rate=" << rate_before << "). Marking trajectory as numerically failed." << std::endl;
 				Publish_Snapshot_Progress();
-				current_event = particle_propagator.Event_In_3D();
+				current_event = to_absolute_event(particle_propagator.Event_In_3D());
 				return TrajectoryTerminationReason::NumericalFailure;
 			}
 			if(rate_before > 0.0)
@@ -736,7 +822,7 @@ TrajectoryTerminationReason Trajectory_Simulator::Propagate_Freely(Event& curren
 			          << current_mpi_rank << ", traj " << current_trajectory_id
 			          << "). Marking trajectory as numerically failed." << std::endl;
 			Publish_Snapshot_Progress();
-			current_event = particle_propagator.Event_In_3D();
+			current_event = to_absolute_event(particle_propagator.Event_In_3D());
 			return TrajectoryTerminationReason::NumericalFailure;
 		}
 
@@ -748,7 +834,7 @@ TrajectoryTerminationReason Trajectory_Simulator::Propagate_Freely(Event& curren
 			          << ", traj " << current_trajectory_id << ", r=" << r_after
 			          << ", v=" << v_after << ", dt=" << actual_dt << "). Aborting trajectory." << std::endl;
 			Publish_Snapshot_Progress();
-			current_event = particle_propagator.Event_In_3D();
+			current_event = to_absolute_event(particle_propagator.Event_In_3D());
 			return TrajectoryTerminationReason::NonFiniteState;
 		}
 
@@ -757,7 +843,7 @@ TrajectoryTerminationReason Trajectory_Simulator::Propagate_Freely(Event& curren
 			std::cerr << "\nWarning in Propagate_Freely(): DM speed exceeds the maximum of v_max = " << v_max << std::endl
 					  << "\tAbort simulation." << std::endl;
 			Publish_Snapshot_Progress();
-			current_event = particle_propagator.Event_In_3D();
+			current_event = to_absolute_event(particle_propagator.Event_In_3D());
 			return TrajectoryTerminationReason::SpeedLimit;
 		}
 
@@ -804,7 +890,7 @@ TrajectoryTerminationReason Trajectory_Simulator::Propagate_Freely(Event& curren
 				          << current_mpi_rank << ", traj " << current_trajectory_id
 				          << "). Marking trajectory as numerically failed." << std::endl;
 				Publish_Snapshot_Progress();
-				current_event = event_after;
+				current_event = to_absolute_event(event_after);
 				return TrajectoryTerminationReason::NumericalFailure;
 			}
 
@@ -824,7 +910,7 @@ TrajectoryTerminationReason Trajectory_Simulator::Propagate_Freely(Event& curren
 						          << ", relative_error=" << tau_relative_error
 						          << "). Marking trajectory as numerically failed." << std::endl;
 						Publish_Snapshot_Progress();
-						current_event = event_before;
+						current_event = to_absolute_event(event_before);
 						return TrajectoryTerminationReason::NumericalFailure;
 					}
 
@@ -872,17 +958,44 @@ TrajectoryTerminationReason Trajectory_Simulator::Propagate_Freely(Event& curren
 
 		if(!scattering)
 		{
-			if(r_after >= maximum_distance && r_after >= r_before && v_after > solar_model.Local_Escape_Speed(r_after))
+			Event boundary_event = event_after;
+			double r_boundary = r_after;
+			double v_boundary = v_after;
+			if(r_before < maximum_distance && r_after >= maximum_distance && r_after > r_before)
 			{
+				const double boundary_fraction = (maximum_distance - r_before) / (r_after - r_before);
+				boundary_event = Interpolate_Event(event_before, event_after, boundary_fraction);
+				r_boundary = boundary_event.Radius();
+				v_boundary = boundary_event.Speed();
+			}
+
+			if(r_boundary >= maximum_distance && r_boundary >= r_before && v_boundary > solar_model.Local_Escape_Speed(r_boundary))
+			{
+				accepted_event = boundary_event;
 				reflection = true;
 				outcome = TrajectoryTerminationReason::OutwardEscape;
+			}
+			else if(r_boundary >= maximum_distance && r_boundary >= r_before)
+			{
+				Event inbound_boundary_event;
+				if(Bound_Kepler_Return_At_Same_Radius(boundary_event, inbound_boundary_event))
+				{
+					time_steps++;
+					optical_depth_retries = 0;
+					commit_accepted_event(boundary_event);
+					current_event = to_absolute_event(inbound_boundary_event);
+					reset_propagator_at_absolute_event(current_event);
+					if((time_steps % SNAPSHOT_PROGRESS_STEP_INTERVAL) == 0u)
+						Publish_Snapshot_Progress();
+					continue;
+				}
 			}
 		}
 
 		time_steps++;
 		optical_depth_retries = 0;
 		const bool captured_now = commit_accepted_event(accepted_event);
-		current_event = accepted_event;
+		current_event = to_absolute_event(accepted_event);
 		if((time_steps % SNAPSHOT_PROGRESS_STEP_INTERVAL) == 0u)
 			Publish_Snapshot_Progress();
 		if(terminate_on_capture && captured_now)
@@ -1108,13 +1221,21 @@ Trajectory_Result Trajectory_Simulator::Simulate(const Event& initial_condition,
 				current_bincount.event_observed = false;
 			}
 		}
-		if(!current_bincount.event_observed)
-			current_bincount.t_final_unbinding_scatter = std::numeric_limits<double>::quiet_NaN();
-		current_bincount.truncated = !current_bincount.event_observed;
 	}
 
 	if(TrajectoryTerminationInvalidatesSurvival(termination_reason))
 		current_bincount.survival_valid = false;
+
+	if(current_bincount.is_captured)
+	{
+		if(!current_bincount.event_observed)
+		{
+			current_bincount.t_final_unbinding_scatter = std::numeric_limits<double>::quiet_NaN();
+			if(termination_reason != TrajectoryTerminationReason::CaptureMode)
+				current_bincount.survival_valid = false;
+		}
+		current_bincount.truncated = false;
+	}
 
 	return Trajectory_Result(initial_condition, current_event, number_of_scatterings, current_bincount);
 }  

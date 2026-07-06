@@ -100,8 +100,11 @@ bool Build_Evaporation_Record(const TrajectoryBincount& bincount, int mpi_rank, 
 	rec.boundary_escape_observed = survival_valid && bincount.boundary_escape_observed;
 	rec.survival_valid = survival_valid;
 	rec.numerically_invalid_escape = numerically_invalid_escape;
-	rec.censored = survival_valid && !event_observed;
-	rec.truncated = rec.censored;
+	// Normal evaporation output only accepts completed unbinding events. A
+	// captured trajectory that has not completed is invalid for this estimator,
+	// not a right-censored observation.
+	rec.censored = false;
+	rec.truncated = false;
 	rec.termination_reason = bincount.termination_reason;
 	rec.max_free_energy_drift_eV = bincount.max_free_energy_drift_eV;
 	rec.max_free_energy_drift_rel = bincount.max_free_energy_drift_rel;
@@ -1306,12 +1309,13 @@ void Simulation_Data::Generate_Data(obscura::DM_Particle& DM, Solar_Model& solar
 		{
 			number_of_captured_particles++;
 			local_captured++;
-			if(trajectory.bincount.event_observed)
-				number_of_complete_evaporation_particles++;
-			else if(!trajectory.bincount.survival_valid)
-				number_of_invalid_survival_captured_particles++;
-			else
-				number_of_censored_captured_particles++;
+			if(!capture_mode)
+			{
+				if(trajectory.bincount.event_observed)
+					number_of_complete_evaporation_particles++;
+				else
+					number_of_invalid_survival_captured_particles++;
+			}
 
 			if(!capture_mode)
 			{
