@@ -24,6 +24,7 @@ CMakeLists.txt.user
 *.exe
 *.out
 /lib/
+/bin/
 /bin/DaMaSCUS-SUN
 /tests/test_Dark_Photon
 /tests/test_Data_Generation
