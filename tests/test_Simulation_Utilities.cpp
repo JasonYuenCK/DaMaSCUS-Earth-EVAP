@@ -226,6 +226,24 @@ TEST(TestSimulationUtilities, TestHyperbolicKeplerShift)
 	}
 }
 
+TEST(TestSimulationUtilities, TestHyperbolicKeplerShiftReturnsFalseForInvalidBranches)
+{
+	Event inside_sun(0.0, libphysica::Vector({0.5 * rSun, 0.0, 0.0}), libphysica::Vector({-1000.0 * km / sec, 0.0, 0.0}));
+	EXPECT_FALSE(Hyperbolic_Kepler_Shift(inside_sun, 2.0 * rSun));
+
+	Event inbound_outward_request(0.0, libphysica::Vector({5.0 * rSun, 0.0, 0.0}), libphysica::Vector({-1000.0 * km / sec, 0.0, 0.0}));
+	Event inbound_outward_original = inbound_outward_request;
+	EXPECT_FALSE(Hyperbolic_Kepler_Shift(inbound_outward_request, 6.0 * rSun));
+	for(int i = 0; i < 3; i++)
+	{
+		EXPECT_DOUBLE_EQ(inbound_outward_request.position[i], inbound_outward_original.position[i]);
+		EXPECT_DOUBLE_EQ(inbound_outward_request.velocity[i], inbound_outward_original.velocity[i]);
+	}
+
+	Event bound_orbit(0.0, libphysica::Vector({2.0 * rSun, 0.0, 0.0}), libphysica::Vector({-1.0 * km / sec, 0.0, 0.0}));
+	EXPECT_FALSE(Hyperbolic_Kepler_Shift(bound_orbit, rSun));
+}
+
 // 4. Equiareal isodetection rings
 TEST(TestSimulationUtilities, TestIsoreflectionRingAngles)
 {

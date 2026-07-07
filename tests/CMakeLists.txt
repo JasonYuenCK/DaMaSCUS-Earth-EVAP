@@ -1,6 +1,6 @@
 # 1. Test executable
 add_test(NAME executable_test
-	COMMAND DaMaSCUS-SUN ${PROJECT_SOURCE_DIR}/results/ctest_executable_smoke/ctest_executable_smoke.cfg
+	COMMAND DaMaSCUS-SUN ${PROJECT_SOURCE_DIR}/tests/config_executable_smoke.cfg
 	WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
 
 # 2. Unit tests: Dark_Photon.xpp	

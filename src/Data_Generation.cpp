@@ -47,6 +47,8 @@ void MPI_Trace_Point(int mpi_rank, const std::string& label)
 }
 
 constexpr unsigned long int CAPTURE_MODE_MPI_SYNC_INTERVAL = 32UL;
+constexpr double NUMERICAL_FAILURE_WARNING_FRACTION = 1.0e-4;
+constexpr double NUMERICAL_FAILURE_ABORT_FRACTION = 1.0e-2;
 
 bool Is_Completed_Evaporation_Record(const EvaporationRecord& rec)
 {
@@ -1096,6 +1098,7 @@ Simulation_Data::Simulation_Data(unsigned int sample_size, unsigned int max_traj
   number_of_trajectories(0), number_of_free_particles(0), number_of_reflected_particles(0), number_of_captured_particles(0),
   number_of_complete_evaporation_particles(0), number_of_censored_captured_particles(0),
   number_of_invalid_survival_captured_particles(0),
+  number_of_initial_shift_failures(0), number_of_final_reflection_shift_failures(0), number_of_numerical_failures(0),
   average_number_of_scatterings(0.0), computing_time(0.0), early_stopped(false),
   mpi_rank(0), mpi_processes(1), isoreflection_rings(iso_rings), minimum_speed_threshold(u_min),
   number_of_data_points(std::vector<unsigned long int>(iso_rings, 0)),
@@ -1135,6 +1138,7 @@ void Simulation_Data::Generate_Data(obscura::DM_Particle& DM, Solar_Model& solar
 	auto time_start = std::chrono::system_clock::now();
 	unsigned long int local_captured = 0;
 	unsigned long int local_total = 0;
+	bool initial_shift_failure_warning_emitted = false;
 
 	// Configure the simulator
 	Trajectory_Simulator simulator(solar_model, maximum_free_time_steps, maximum_number_of_scatterings, initial_and_final_radius);
@@ -1356,6 +1360,11 @@ void Simulation_Data::Generate_Data(obscura::DM_Particle& DM, Solar_Model& solar
 			failed_bincount.termination_reason = TrajectoryTerminationReason::NumericalFailure;
 			failed_bincount.survival_valid = false;
 			const bool initial_shift_ok = Hyperbolic_Kepler_Shift(IC, initial_and_final_radius);
+			if(!initial_shift_ok)
+			{
+				number_of_initial_shift_failures++;
+				number_of_numerical_failures++;
+			}
 			Trajectory_Result trajectory = initial_shift_ok
 			                                   ? simulator.Simulate(IC, DM, mpi_rank)
 			                                   : Trajectory_Result(IC, IC, 0, failed_bincount);
@@ -1432,6 +1441,11 @@ void Simulation_Data::Generate_Data(obscura::DM_Particle& DM, Solar_Model& solar
 								data[isoreflection_ring].push_back(libphysica::DataPoint(v_final));
 							}
 						}
+						else
+						{
+							number_of_final_reflection_shift_failures++;
+							number_of_numerical_failures++;
+						}
 					}
 				}
 
@@ -1439,6 +1453,38 @@ void Simulation_Data::Generate_Data(obscura::DM_Particle& DM, Solar_Model& solar
 		}
 
 		MPI_Allreduce(&local_captured, &global_captured, 1, MPI_UNSIGNED_LONG, MPI_SUM, MPI_COMM_WORLD);
+		unsigned long int global_attempted_trajectories = 0;
+		unsigned long int global_initial_shift_failures = 0;
+		MPI_Allreduce(&number_of_trajectories, &global_attempted_trajectories, 1, MPI_UNSIGNED_LONG, MPI_SUM, MPI_COMM_WORLD);
+		MPI_Allreduce(&number_of_initial_shift_failures, &global_initial_shift_failures, 1, MPI_UNSIGNED_LONG, MPI_SUM, MPI_COMM_WORLD);
+
+		if(global_attempted_trajectories > 0)
+		{
+			const double initial_shift_failure_fraction =
+			    static_cast<double>(global_initial_shift_failures) / static_cast<double>(global_attempted_trajectories);
+			if(initial_shift_failure_fraction > NUMERICAL_FAILURE_ABORT_FRACTION)
+			{
+				if(mpi_rank == 0)
+					std::cerr << "Error in Generate_Data(): initial Kepler shift failure fraction "
+					          << initial_shift_failure_fraction
+					          << " exceeds abort threshold "
+					          << NUMERICAL_FAILURE_ABORT_FRACTION
+					          << ". Stopping this run to avoid biased capture statistics." << std::endl;
+				early_stopped = true;
+				break;
+			}
+			if(!initial_shift_failure_warning_emitted
+			   && initial_shift_failure_fraction > NUMERICAL_FAILURE_WARNING_FRACTION)
+			{
+				if(mpi_rank == 0)
+					std::cerr << "Warning in Generate_Data(): initial Kepler shift failure fraction "
+					          << initial_shift_failure_fraction
+					          << " exceeds warning threshold "
+					          << NUMERICAL_FAILURE_WARNING_FRACTION
+					          << "." << std::endl;
+				initial_shift_failure_warning_emitted = true;
+			}
+		}
 
 		// Progress bar (every 20%)
 		if(mpi_rank == 0)
@@ -1497,6 +1543,12 @@ void Simulation_Data::Perform_MPI_Reductions(bool capture_mode)
 	MPI_Allreduce(MPI_IN_PLACE, &number_of_trajectories, 1, MPI_UNSIGNED_LONG, MPI_SUM, MPI_COMM_WORLD);
 	MPI_Trace_Point(mpi_rank, "before allreduce number_of_captured_particles");
 	MPI_Allreduce(MPI_IN_PLACE, &number_of_captured_particles, 1, MPI_UNSIGNED_LONG, MPI_SUM, MPI_COMM_WORLD);
+	MPI_Trace_Point(mpi_rank, "before allreduce number_of_initial_shift_failures");
+	MPI_Allreduce(MPI_IN_PLACE, &number_of_initial_shift_failures, 1, MPI_UNSIGNED_LONG, MPI_SUM, MPI_COMM_WORLD);
+	MPI_Trace_Point(mpi_rank, "before allreduce number_of_final_reflection_shift_failures");
+	MPI_Allreduce(MPI_IN_PLACE, &number_of_final_reflection_shift_failures, 1, MPI_UNSIGNED_LONG, MPI_SUM, MPI_COMM_WORLD);
+	MPI_Trace_Point(mpi_rank, "before allreduce number_of_numerical_failures");
+	MPI_Allreduce(MPI_IN_PLACE, &number_of_numerical_failures, 1, MPI_UNSIGNED_LONG, MPI_SUM, MPI_COMM_WORLD);
 	MPI_Trace_Point(mpi_rank, "before allreduce average_number_of_scatterings");
 	MPI_Allreduce(MPI_IN_PLACE, &average_number_of_scatterings, 1, MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
 	average_number_of_scatterings = (number_of_trajectories > 0) ? average_number_of_scatterings / number_of_trajectories : 0.0;
@@ -1725,6 +1777,12 @@ void Simulation_Data::Write_Output_Files(const std::string& output_dir, obscura:
 
 	auto write_header = [&](std::ofstream& f) {
 		Write_Report_Header(f, mass_gev, sigma_cm2, number_of_trajectories, number_of_captured_particles, early_stopped);
+		f << "# valid_trajectories = " << Valid_Trajectories() << "\n";
+		f << "# numerical_failures = " << number_of_numerical_failures << "\n";
+		f << "# initial_shift_failures = " << number_of_initial_shift_failures << "\n";
+		f << "# final_reflection_shift_failures = " << number_of_final_reflection_shift_failures << "\n";
+		f << "# capture_rate_valid = " << std::fixed << std::setprecision(8) << Capture_Ratio_Valid() << "\n";
+		f << "# numerical_failure_rate = " << std::fixed << std::setprecision(8) << Numerical_Failure_Ratio() << "\n";
 	};
 
 	std::remove((output_dir + "/captured_bincount.txt").c_str());
@@ -1776,18 +1834,51 @@ void Simulation_Data::Write_Output_Files(const std::string& output_dir, obscura:
 
 double Simulation_Data::Free_Ratio() const
 {
-	return 1.0 * number_of_free_particles / number_of_trajectories;
+	return (number_of_trajectories > 0) ? 1.0 * number_of_free_particles / number_of_trajectories : 0.0;
 }
 double Simulation_Data::Capture_Ratio() const
 {
-	return 1.0 * number_of_captured_particles / number_of_trajectories;
+	return (number_of_trajectories > 0) ? 1.0 * number_of_captured_particles / number_of_trajectories : 0.0;
 }
 double Simulation_Data::Reflection_Ratio(int isoreflection_ring) const
 {
 	if(isoreflection_ring < 0)
-		return 1.0 * number_of_reflected_particles / number_of_trajectories;
+		return (number_of_trajectories > 0) ? 1.0 * number_of_reflected_particles / number_of_trajectories : 0.0;
 	else
-		return 1.0 * data[isoreflection_ring].size() / number_of_trajectories;
+		return (number_of_trajectories > 0) ? 1.0 * data[isoreflection_ring].size() / number_of_trajectories : 0.0;
+}
+
+unsigned long int Simulation_Data::Valid_Trajectories() const
+{
+	return (number_of_trajectories > number_of_initial_shift_failures) ? (number_of_trajectories - number_of_initial_shift_failures) : 0UL;
+}
+
+double Simulation_Data::Free_Ratio_Valid() const
+{
+	const unsigned long int valid_trajectories = Valid_Trajectories();
+	return (valid_trajectories > 0) ? 1.0 * number_of_free_particles / valid_trajectories : 0.0;
+}
+
+double Simulation_Data::Capture_Ratio_Valid() const
+{
+	const unsigned long int valid_trajectories = Valid_Trajectories();
+	return (valid_trajectories > 0) ? 1.0 * number_of_captured_particles / valid_trajectories : 0.0;
+}
+
+double Simulation_Data::Reflection_Ratio_Valid(int isoreflection_ring) const
+{
+	const unsigned long int valid_trajectories = Valid_Trajectories();
+	if(valid_trajectories == 0)
+		return 0.0;
+	if(isoreflection_ring < 0)
+		return 1.0 * number_of_reflected_particles / valid_trajectories;
+	else
+		return 1.0 * data[isoreflection_ring].size() / valid_trajectories;
+}
+
+double Simulation_Data::Numerical_Failure_Ratio() const
+{
+	return (number_of_trajectories > 0) ? 1.0 * number_of_numerical_failures / number_of_trajectories : 0.0;
 }
 
 double Simulation_Data::Minimum_Speed() const
@@ -1810,7 +1901,8 @@ void Simulation_Data::Print_Capture_Mode_Summary(unsigned int mpi_rank)
 	if(mpi_rank == 0)
 	{
 		double N = static_cast<double>(number_of_trajectories);
-		double p = (N > 0.0) ? static_cast<double>(number_of_captured_particles) / N : 0.0;
+		double p = Capture_Ratio();
+		double p_valid = Capture_Ratio_Valid();
 		double z = 1.96;
 		double ci_lower = p;
 		double ci_upper = p;
@@ -1831,14 +1923,23 @@ void Simulation_Data::Print_Capture_Mode_Summary(unsigned int mpi_rank)
 		          << "Termination condition:\t\tpost-scatter E < 0" << std::endl
 		          << "File output:\t\t\tdisabled" << std::endl
 		          << "Simulated trajectories:\t\t" << number_of_trajectories << std::endl
+		          << "Valid trajectories:\t\t" << Valid_Trajectories() << std::endl
 		          << "Captured count:\t\t\t" << number_of_captured_particles << std::endl
-		          << "Capture rate:\t\t\t" << std::fixed << std::setprecision(8) << p << std::endl
+		          << "Capture rate raw:\t\t" << std::fixed << std::setprecision(8) << p << std::endl
+		          << "Capture rate valid:\t\t" << std::fixed << std::setprecision(8) << p_valid << std::endl
 		          << "Capture rate -error (95%):\t" << std::fixed << std::setprecision(8) << (p - ci_lower) << std::endl
 		          << "Capture rate +error (95%):\t" << std::fixed << std::setprecision(8) << (ci_upper - p) << std::endl
-		          << "Capture rate 95% CI:\t\t[" << std::fixed << std::setprecision(8) << ci_lower << ", " << ci_upper << "]" << std::endl;
+		          << "Capture rate 95% CI raw:\t[" << std::fixed << std::setprecision(8) << ci_lower << ", " << ci_upper << "]" << std::endl
+		          << "Numerical failure count:\t" << number_of_numerical_failures << std::endl
+		          << "Initial shift failures:\t\t" << number_of_initial_shift_failures << std::endl
+		          << "Final reflection shift failures:\t" << number_of_final_reflection_shift_failures << std::endl
+		          << "Numerical failure rate:\t\t" << std::fixed << std::setprecision(8) << Numerical_Failure_Ratio() << std::endl;
 
 		if(early_stopped)
 			std::cout << "*** EARLY STOP: max_trajectories reached ***" << std::endl;
+		if(Numerical_Failure_Ratio() > NUMERICAL_FAILURE_WARNING_FRACTION)
+			std::cout << "*** WARNING: numerical failure rate exceeded "
+			          << NUMERICAL_FAILURE_WARNING_FRACTION << " ***" << std::endl;
 
 		std::cout << "Simulation time:\t\t" << libphysica::Time_Display(computing_time) << std::endl
 		          << SEPARATOR << std::endl;
@@ -1854,11 +1955,19 @@ void Simulation_Data::Print_Summary(unsigned int mpi_rank)
 				  << std::endl
 				  << "Results:" << std::endl
 				  << "Simulated trajectories:\t\t" << number_of_trajectories << std::endl
+				  << "Valid trajectories:\t\t" << Valid_Trajectories() << std::endl
 				  << "Average # of scatterings:\t" << libphysica::Round(average_number_of_scatterings) << std::endl
-				  << "Free particles [%]:\t\t" << libphysica::Round(100.0 * Free_Ratio()) << std::endl
-				  << "Reflected particles [%]:\t" << libphysica::Round(100.0 * Reflection_Ratio()) << std::endl
-				  << "Captured particles [%]:\t\t" << libphysica::Round(100.0 * Capture_Ratio()) << std::endl
+				  << "Free particles raw [%]:\t\t" << libphysica::Round(100.0 * Free_Ratio()) << std::endl
+				  << "Reflected particles raw [%]:\t" << libphysica::Round(100.0 * Reflection_Ratio()) << std::endl
+				  << "Captured particles raw [%]:\t" << libphysica::Round(100.0 * Capture_Ratio()) << std::endl
+				  << "Free particles valid [%]:\t" << libphysica::Round(100.0 * Free_Ratio_Valid()) << std::endl
+				  << "Reflected particles valid [%]:\t" << libphysica::Round(100.0 * Reflection_Ratio_Valid()) << std::endl
+				  << "Captured particles valid [%]:\t" << libphysica::Round(100.0 * Capture_Ratio_Valid()) << std::endl
 				  << "Captured count:\t\t\t" << number_of_captured_particles << std::endl
+				  << "Numerical failure count:\t" << number_of_numerical_failures << std::endl
+				  << "Initial shift failures:\t\t" << number_of_initial_shift_failures << std::endl
+				  << "Final reflection shift failures:\t" << number_of_final_reflection_shift_failures << std::endl
+				  << "Numerical failure rate:\t\t" << std::fixed << std::setprecision(6) << Numerical_Failure_Ratio() << std::endl
 				  << "Complete evaporation count:\t" << number_of_complete_evaporation_particles << std::endl
 				  << "Censored captured count:\t" << number_of_censored_captured_particles << std::endl
 				  << "Invalid survival count:\t\t" << number_of_invalid_survival_captured_particles << std::endl;
@@ -1885,6 +1994,9 @@ void Simulation_Data::Print_Summary(unsigned int mpi_rank)
 
 		if(early_stopped)
 			std::cout << "*** EARLY STOP: max_trajectories reached ***" << std::endl;
+		if(Numerical_Failure_Ratio() > NUMERICAL_FAILURE_WARNING_FRACTION)
+			std::cout << "*** WARNING: numerical failure rate exceeded "
+			          << NUMERICAL_FAILURE_WARNING_FRACTION << " ***" << std::endl;
 
 		// Median for observed unbinding events only; censored records belong in survival analysis.
 		std::vector<double> observed_unbinding_lifetimes;

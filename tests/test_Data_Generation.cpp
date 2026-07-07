@@ -258,6 +258,25 @@ TEST(TestDataGeneration, TestConfigure)
 	// ASSERT_EQ(data_set.data[0].size(), sample_size);
 }
 
+TEST(TestDataGeneration, TestInitialShiftFailureIsReported)
+{
+	Solar_Model SSM;
+	obscura::Standard_Halo_Model SHM;
+
+	obscura::DM_Particle_SI DM(0.01 * GeV);
+	DM.Set_Low_Mass_Mode(true);
+	DM.Set_Sigma_Proton(1.0e-100 * pb);
+	DM.Set_Sigma_Electron(1.0e-100 * pb);
+
+	Simulation_Data data_set(1, 1);
+	data_set.Configure(0.5 * rSun, 0, 1, 10);
+	data_set.Generate_Data(DM, SSM, SHM);
+
+	EXPECT_EQ(data_set.Valid_Trajectories(), 0UL);
+	EXPECT_DOUBLE_EQ(data_set.Numerical_Failure_Ratio(), 1.0);
+	EXPECT_DOUBLE_EQ(data_set.Capture_Ratio_Valid(), 0.0);
+}
+
 TEST(TestDataGeneration, TestDataFreeRatio)
 {
 	// ARRANGE
