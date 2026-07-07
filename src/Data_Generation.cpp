@@ -46,6 +46,8 @@ void MPI_Trace_Point(int mpi_rank, const std::string& label)
 	std::cerr << "[mpi-trace rank " << mpi_rank << "] " << label << std::endl;
 }
 
+constexpr unsigned long int CAPTURE_MODE_MPI_SYNC_INTERVAL = 32UL;
+
 bool Is_Completed_Evaporation_Record(const EvaporationRecord& rec)
 {
 	return rec.survival_valid
@@ -1301,45 +1303,53 @@ void Simulation_Data::Generate_Data(obscura::DM_Particle& DM, Solar_Model& solar
 		});
 
 	unsigned long int global_captured = 0;
-	auto select_rank_for_next_trajectory = [&](unsigned long int remaining_captures, bool local_can_simulate, int& capable_ranks, int& selected_ranks)
+	const unsigned long int mpi_sync_interval = capture_mode ? CAPTURE_MODE_MPI_SYNC_INTERVAL : 1UL;
+	auto select_trajectory_batch = [&](unsigned long int remaining_captures, unsigned long int& total_assigned)
 	{
-		const int local_can_int = local_can_simulate ? 1 : 0;
-		std::vector<int> can_simulate(mpi_processes, 0);
-		MPI_Allgather(&local_can_int, 1, MPI_INT, can_simulate.data(), 1, MPI_INT, MPI_COMM_WORLD);
+		total_assigned = 0;
+		unsigned long int local_round_capacity = 0;
+		if(local_total < max_trajectories_per_rank)
+		{
+			const unsigned long int local_capacity = max_trajectories_per_rank - local_total;
+			local_round_capacity = std::min(local_capacity, mpi_sync_interval);
+		}
 
-		capable_ranks = 0;
-		selected_ranks = 0;
-		bool selected_this_rank = false;
+		std::vector<unsigned long int> round_capacities(mpi_processes, 0);
+		MPI_Allgather(&local_round_capacity, 1, MPI_UNSIGNED_LONG, round_capacities.data(), 1, MPI_UNSIGNED_LONG, MPI_COMM_WORLD);
+
+		unsigned long int total_round_capacity = 0;
+		for(const auto capacity : round_capacities)
+			total_round_capacity += capacity;
+		if(total_round_capacity == 0)
+			return 0UL;
+
+		const unsigned long int attempt_budget = std::min(remaining_captures, total_round_capacity);
+		unsigned long int local_batch = 0;
 		for(int rank = 0; rank < mpi_processes; rank++)
 		{
-			if(!can_simulate[rank])
-				continue;
-			capable_ranks++;
-			if(static_cast<unsigned long int>(selected_ranks) < remaining_captures)
-			{
-				if(rank == mpi_rank)
-					selected_this_rank = true;
-				selected_ranks++;
-			}
+			if(total_assigned >= attempt_budget)
+				break;
+			const unsigned long int assigned = std::min(round_capacities[rank], attempt_budget - total_assigned);
+			if(rank == mpi_rank)
+				local_batch = assigned;
+			total_assigned += assigned;
 		}
-		return selected_this_rank;
+		return local_batch;
 	};
 
 	while(global_captured < requested_captured_particles)
 	{
 		const unsigned long int remaining_captures = requested_captured_particles - global_captured;
-		const bool local_can_simulate = local_total < max_trajectories_per_rank;
-		int capable_ranks = 0;
-		int selected_ranks = 0;
-		const bool simulate_this_round =
-		    select_rank_for_next_trajectory(remaining_captures, local_can_simulate, capable_ranks, selected_ranks);
-		if(selected_ranks == 0 || capable_ranks == 0)
+		unsigned long int assigned_trajectories = 0;
+		const unsigned long int local_trajectories_this_round =
+		    select_trajectory_batch(remaining_captures, assigned_trajectories);
+		if(assigned_trajectories == 0)
 		{
 			early_stopped = true;
 			break;
 		}
 
-		if(simulate_this_round)
+		for(unsigned long int trajectory_in_round = 0; trajectory_in_round < local_trajectories_this_round; trajectory_in_round++)
 		{
 			Event IC = Initial_Conditions(halo_model, solar_model, simulator.PRNG);
 			Hyperbolic_Kepler_Shift(IC, initial_and_final_radius);

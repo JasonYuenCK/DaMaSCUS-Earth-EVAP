@@ -19,10 +19,18 @@ using namespace libphysica::natural_units;
 
 int main(int argc, char* argv[])
 {
-	MPI_Init(NULL, NULL);
+	MPI_Init(&argc, &argv);
 	int mpi_processes, mpi_rank;
 	MPI_Comm_size(MPI_COMM_WORLD, &mpi_processes);
 	MPI_Comm_rank(MPI_COMM_WORLD, &mpi_rank);
+
+	if(argc < 2)
+	{
+		if(mpi_rank == 0)
+			std::cerr << "Usage: " << argv[0] << " <config.cfg>" << std::endl;
+		MPI_Finalize();
+		return 1;
+	}
 
 	// Initial terminal output
 	auto time_start	  = std::chrono::system_clock::now();
