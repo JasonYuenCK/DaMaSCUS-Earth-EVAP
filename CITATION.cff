@@ -1,0 +1,26 @@
+cff-version: 1.2.0
+message: "If you use this software, please cite it using the metadata below and cite the original DaMaSCUS-SUN work where appropriate."
+title: "DaMaSCUS-SUN-EVAP"
+type: software
+authors:
+  - family-names: Xia
+    given-names: Lingyu
+abstract: "DaMaSCUS-SUN evaporation branch for Monte Carlo studies of dark matter capture and evaporation in the Sun."
+version: "0.1.1"
+repository-code: "https://github.com/Funyday-k/DaMaSCUS-SUN-EVAP"
+license: MIT
+keywords:
+  - dark matter
+  - solar capture
+  - evaporation
+  - Monte Carlo
+  - DaMaSCUS-SUN
+references:
+  - type: software
+    title: "DaMaSCUS-SUN"
+    authors:
+      - family-names: Emken
+        given-names: Timon
+      - family-names: Kouvaris
+        given-names: Chris
+    repository-code: "https://github.com/temken/DaMaSCUS-SUN"

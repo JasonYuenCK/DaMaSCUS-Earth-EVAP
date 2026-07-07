@@ -92,6 +92,10 @@ __pycache__/
 *.swo
 *~
 
+# Local project notes not tracked in this branch
+/Change.md
+/BASH_MANUAL.md
+
 # OS files
 .DS_Store
 *.DS_Store

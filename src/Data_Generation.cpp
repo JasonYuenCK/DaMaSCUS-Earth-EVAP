@@ -7,6 +7,7 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <fstream>
 #include <functional>
 #include <iomanip>
@@ -36,6 +37,13 @@ namespace
 bool Has_Positive_Evaporation_Time(double t_evap)
 {
 	return std::isfinite(t_evap) && t_evap > 0.0;
+}
+
+void MPI_Trace_Point(int mpi_rank, const std::string& label)
+{
+	if(std::getenv("DAMASCUS_MPI_TRACE") == nullptr)
+		return;
+	std::cerr << "[mpi-trace rank " << mpi_rank << "] " << label << std::endl;
 }
 
 bool Is_Completed_Evaporation_Record(const EvaporationRecord& rec)
@@ -1467,43 +1475,65 @@ void Simulation_Data::Generate_Data(obscura::DM_Particle& DM, Solar_Model& solar
 
 void Simulation_Data::Perform_MPI_Reductions(bool capture_mode)
 {
+	MPI_Trace_Point(mpi_rank, "enter Perform_MPI_Reductions");
 	average_number_of_scatterings *= number_of_trajectories;
+	MPI_Trace_Point(mpi_rank, "before allreduce number_of_trajectories");
 	MPI_Allreduce(MPI_IN_PLACE, &number_of_trajectories, 1, MPI_UNSIGNED_LONG, MPI_SUM, MPI_COMM_WORLD);
+	MPI_Trace_Point(mpi_rank, "before allreduce number_of_captured_particles");
 	MPI_Allreduce(MPI_IN_PLACE, &number_of_captured_particles, 1, MPI_UNSIGNED_LONG, MPI_SUM, MPI_COMM_WORLD);
+	MPI_Trace_Point(mpi_rank, "before allreduce average_number_of_scatterings");
 	MPI_Allreduce(MPI_IN_PLACE, &average_number_of_scatterings, 1, MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
 	average_number_of_scatterings = (number_of_trajectories > 0) ? average_number_of_scatterings / number_of_trajectories : 0.0;
 
 	// Reduce early_stopped flag (any rank early stopped => global flag)
 	int local_es = early_stopped ? 1 : 0;
 	int global_es = 0;
+	MPI_Trace_Point(mpi_rank, "before allreduce early_stopped");
 	MPI_Allreduce(&local_es, &global_es, 1, MPI_INT, MPI_MAX, MPI_COMM_WORLD);
 	early_stopped = (global_es > 0);
 
 	if(capture_mode)
 	{
+		MPI_Trace_Point(mpi_rank, "before allreduce computing_time capture");
 		MPI_Allreduce(MPI_IN_PLACE, &computing_time, 1, MPI_DOUBLE, MPI_MAX, MPI_COMM_WORLD);
+		MPI_Trace_Point(mpi_rank, "leave Perform_MPI_Reductions capture");
 		return;
 	}
 
+	MPI_Trace_Point(mpi_rank, "before allreduce number_of_free_particles");
 	MPI_Allreduce(MPI_IN_PLACE, &number_of_free_particles, 1, MPI_UNSIGNED_LONG, MPI_SUM, MPI_COMM_WORLD);
+	MPI_Trace_Point(mpi_rank, "before allreduce number_of_reflected_particles");
 	MPI_Allreduce(MPI_IN_PLACE, &number_of_reflected_particles, 1, MPI_UNSIGNED_LONG, MPI_SUM, MPI_COMM_WORLD);
+	MPI_Trace_Point(mpi_rank, "before allreduce number_of_complete_evaporation_particles");
 	MPI_Allreduce(MPI_IN_PLACE, &number_of_complete_evaporation_particles, 1, MPI_UNSIGNED_LONG, MPI_SUM, MPI_COMM_WORLD);
+	MPI_Trace_Point(mpi_rank, "before allreduce number_of_censored_captured_particles");
 	MPI_Allreduce(MPI_IN_PLACE, &number_of_censored_captured_particles, 1, MPI_UNSIGNED_LONG, MPI_SUM, MPI_COMM_WORLD);
+	MPI_Trace_Point(mpi_rank, "before allreduce number_of_invalid_survival_captured_particles");
 	MPI_Allreduce(MPI_IN_PLACE, &number_of_invalid_survival_captured_particles, 1, MPI_UNSIGNED_LONG, MPI_SUM, MPI_COMM_WORLD);
 
 	// Reduce bincount histograms across all ranks
+	MPI_Trace_Point(mpi_rank, "before allreduce captured_dt_hist");
 	MPI_Allreduce(MPI_IN_PLACE, captured_dt_hist.data(), NUM_BINS, MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
+	MPI_Trace_Point(mpi_rank, "before allreduce captured_v2dt_hist");
 	MPI_Allreduce(MPI_IN_PLACE, captured_v2dt_hist.data(), NUM_BINS, MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
+	MPI_Trace_Point(mpi_rank, "before allreduce not_captured_dt_hist");
 	MPI_Allreduce(MPI_IN_PLACE, not_captured_dt_hist.data(), NUM_BINS, MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
+	MPI_Trace_Point(mpi_rank, "before allreduce not_captured_v2dt_hist");
 	MPI_Allreduce(MPI_IN_PLACE, not_captured_v2dt_hist.data(), NUM_BINS, MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
+	MPI_Trace_Point(mpi_rank, "before allreduce captured_dt_sq_hist");
 	MPI_Allreduce(MPI_IN_PLACE, captured_dt_sq_hist.data(), NUM_BINS, MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
+	MPI_Trace_Point(mpi_rank, "before allreduce captured_v2dt_sq_hist");
 	MPI_Allreduce(MPI_IN_PLACE, captured_v2dt_sq_hist.data(), NUM_BINS, MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
+	MPI_Trace_Point(mpi_rank, "before allreduce not_captured_dt_sq_hist");
 	MPI_Allreduce(MPI_IN_PLACE, not_captured_dt_sq_hist.data(), NUM_BINS, MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
+	MPI_Trace_Point(mpi_rank, "before allreduce not_captured_v2dt_sq_hist");
 	MPI_Allreduce(MPI_IN_PLACE, not_captured_v2dt_sq_hist.data(), NUM_BINS, MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
+	MPI_Trace_Point(mpi_rank, "after histogram allreduces");
 	if(evaporation_diagnostics_enabled)
 	{
 		const int local_evap_count = static_cast<int>(evaporation_records.size());
 		std::vector<int> evap_counts(mpi_processes, 0);
+		MPI_Trace_Point(mpi_rank, "before gather diagnostic evap counts");
 		MPI_Gather(&local_evap_count, 1, MPI_INT, mpi_rank == 0 ? evap_counts.data() : nullptr, 1, MPI_INT, 0, MPI_COMM_WORLD);
 
 		constexpr int EVAPORATION_MPI_INT_FIELDS = 8;
@@ -1552,6 +1582,7 @@ void Simulation_Data::Perform_MPI_Reductions(bool capture_mode)
 			Build_MPI_Gatherv_Layout(evap_counts, EVAPORATION_MPI_INT_FIELDS, recv_counts, displacements, total_evap);
 			global_evap_ints.resize(total_evap * EVAPORATION_MPI_INT_FIELDS);
 		}
+		MPI_Trace_Point(mpi_rank, "before gatherv diagnostic evap ints");
 		MPI_Gatherv(local_evap_ints.data(), local_evap_count * EVAPORATION_MPI_INT_FIELDS, MPI_INT,
 		            mpi_rank == 0 ? global_evap_ints.data() : nullptr,
 		            mpi_rank == 0 ? recv_counts.data() : nullptr,
@@ -1563,6 +1594,7 @@ void Simulation_Data::Perform_MPI_Reductions(bool capture_mode)
 			Build_MPI_Gatherv_Layout(evap_counts, EVAPORATION_MPI_UINT_FIELDS, recv_counts, displacements, total_evap);
 			global_evap_uints.resize(total_evap * EVAPORATION_MPI_UINT_FIELDS);
 		}
+		MPI_Trace_Point(mpi_rank, "before gatherv diagnostic evap uints");
 		MPI_Gatherv(local_evap_uints.data(), local_evap_count * EVAPORATION_MPI_UINT_FIELDS, MPI_UNSIGNED_LONG_LONG,
 		            mpi_rank == 0 ? global_evap_uints.data() : nullptr,
 		            mpi_rank == 0 ? recv_counts.data() : nullptr,
@@ -1574,6 +1606,7 @@ void Simulation_Data::Perform_MPI_Reductions(bool capture_mode)
 			Build_MPI_Gatherv_Layout(evap_counts, EVAPORATION_MPI_DOUBLE_FIELDS, recv_counts, displacements, total_evap);
 			global_evap_doubles.resize(total_evap * EVAPORATION_MPI_DOUBLE_FIELDS);
 		}
+		MPI_Trace_Point(mpi_rank, "before gatherv diagnostic evap doubles");
 		MPI_Gatherv(local_evap_doubles.data(), local_evap_count * EVAPORATION_MPI_DOUBLE_FIELDS, MPI_DOUBLE,
 		            mpi_rank == 0 ? global_evap_doubles.data() : nullptr,
 		            mpi_rank == 0 ? recv_counts.data() : nullptr,
@@ -1617,75 +1650,47 @@ void Simulation_Data::Perform_MPI_Reductions(bool capture_mode)
 	{
 		const int local_evap_count = static_cast<int>(compact_evaporation_events.size());
 		std::vector<int> evap_counts(mpi_processes, 0);
+		MPI_Trace_Point(mpi_rank, "before gather compact evap counts");
 		MPI_Gather(&local_evap_count, 1, MPI_INT, mpi_rank == 0 ? evap_counts.data() : nullptr, 1, MPI_INT, 0, MPI_COMM_WORLD);
 
-		constexpr int EVAPORATION_COMPACT_MPI_INT_FIELDS = 1;
-		constexpr int EVAPORATION_COMPACT_MPI_UINT_FIELDS = 1;
-		constexpr int EVAPORATION_COMPACT_MPI_DOUBLE_FIELDS = 2;
-		std::vector<int> local_evap_ints(local_evap_count * EVAPORATION_COMPACT_MPI_INT_FIELDS);
-		std::vector<unsigned long long> local_evap_uints(local_evap_count * EVAPORATION_COMPACT_MPI_UINT_FIELDS);
-		std::vector<double> local_evap_doubles(local_evap_count * EVAPORATION_COMPACT_MPI_DOUBLE_FIELDS);
+		int max_evap_count = 0;
+		MPI_Trace_Point(mpi_rank, "before allreduce compact evap max count");
+		MPI_Allreduce(&local_evap_count, &max_evap_count, 1, MPI_INT, MPI_MAX, MPI_COMM_WORLD);
+
+		std::vector<CompactEvaporationEvent> local_evap_padded(max_evap_count);
 		for(int i = 0; i < local_evap_count; i++)
-		{
-			local_evap_ints[EVAPORATION_COMPACT_MPI_INT_FIELDS*i] = compact_evaporation_events[i].rank;
-			local_evap_uints[EVAPORATION_COMPACT_MPI_UINT_FIELDS*i] = static_cast<unsigned long long>(compact_evaporation_events[i].trajectory_id);
-			local_evap_doubles[EVAPORATION_COMPACT_MPI_DOUBLE_FIELDS*i] = compact_evaporation_events[i].completion_wall_time_sec;
-			local_evap_doubles[EVAPORATION_COMPACT_MPI_DOUBLE_FIELDS*i + 1] = compact_evaporation_events[i].lifetime_unbinding;
-		}
+			local_evap_padded[i] = compact_evaporation_events[i];
 
-		std::vector<int> recv_counts, displacements;
-		std::vector<int> global_evap_ints;
-		std::vector<unsigned long long> global_evap_uints;
-		std::vector<double> global_evap_doubles;
-		int total_evap = 0;
+		std::vector<CompactEvaporationEvent> global_evap_padded;
 		if(mpi_rank == 0)
-		{
-			Build_MPI_Gatherv_Layout(evap_counts, EVAPORATION_COMPACT_MPI_INT_FIELDS, recv_counts, displacements, total_evap);
-			global_evap_ints.resize(total_evap * EVAPORATION_COMPACT_MPI_INT_FIELDS);
-		}
-		MPI_Gatherv(local_evap_ints.data(), local_evap_count * EVAPORATION_COMPACT_MPI_INT_FIELDS, MPI_INT,
-		            mpi_rank == 0 ? global_evap_ints.data() : nullptr,
-		            mpi_rank == 0 ? recv_counts.data() : nullptr,
-		            mpi_rank == 0 ? displacements.data() : nullptr,
-		            MPI_INT, 0, MPI_COMM_WORLD);
+			global_evap_padded.resize(static_cast<size_t>(mpi_processes) * static_cast<size_t>(max_evap_count));
 
-		if(mpi_rank == 0)
-		{
-			Build_MPI_Gatherv_Layout(evap_counts, EVAPORATION_COMPACT_MPI_UINT_FIELDS, recv_counts, displacements, total_evap);
-			global_evap_uints.resize(total_evap * EVAPORATION_COMPACT_MPI_UINT_FIELDS);
-		}
-		MPI_Gatherv(local_evap_uints.data(), local_evap_count * EVAPORATION_COMPACT_MPI_UINT_FIELDS, MPI_UNSIGNED_LONG_LONG,
-		            mpi_rank == 0 ? global_evap_uints.data() : nullptr,
-		            mpi_rank == 0 ? recv_counts.data() : nullptr,
-		            mpi_rank == 0 ? displacements.data() : nullptr,
-		            MPI_UNSIGNED_LONG_LONG, 0, MPI_COMM_WORLD);
-
-		if(mpi_rank == 0)
-		{
-			Build_MPI_Gatherv_Layout(evap_counts, EVAPORATION_COMPACT_MPI_DOUBLE_FIELDS, recv_counts, displacements, total_evap);
-			global_evap_doubles.resize(total_evap * EVAPORATION_COMPACT_MPI_DOUBLE_FIELDS);
-		}
-		MPI_Gatherv(local_evap_doubles.data(), local_evap_count * EVAPORATION_COMPACT_MPI_DOUBLE_FIELDS, MPI_DOUBLE,
-		            mpi_rank == 0 ? global_evap_doubles.data() : nullptr,
-		            mpi_rank == 0 ? recv_counts.data() : nullptr,
-		            mpi_rank == 0 ? displacements.data() : nullptr,
-		            MPI_DOUBLE, 0, MPI_COMM_WORLD);
+		const int padded_evap_bytes = max_evap_count * static_cast<int>(sizeof(CompactEvaporationEvent));
+		MPI_Trace_Point(mpi_rank, "before gather compact evap padded bytes");
+		MPI_Gather(max_evap_count == 0 ? nullptr : static_cast<void*>(local_evap_padded.data()),
+		            padded_evap_bytes,
+		            MPI_BYTE,
+		            mpi_rank == 0 && max_evap_count > 0 ? static_cast<void*>(global_evap_padded.data()) : nullptr,
+		            padded_evap_bytes,
+		            MPI_BYTE, 0, MPI_COMM_WORLD);
 
 		compact_evaporation_events.clear();
 		if(mpi_rank == 0)
 		{
-			compact_evaporation_events.resize(total_evap);
-			for(int i = 0; i < total_evap; i++)
+			int total_evap = std::accumulate(evap_counts.begin(), evap_counts.end(), 0);
+			compact_evaporation_events.reserve(total_evap);
+			for(int rank = 0; rank < mpi_processes; rank++)
 			{
-				compact_evaporation_events[i].rank = global_evap_ints[EVAPORATION_COMPACT_MPI_INT_FIELDS*i];
-				compact_evaporation_events[i].trajectory_id = static_cast<uint64_t>(global_evap_uints[EVAPORATION_COMPACT_MPI_UINT_FIELDS*i]);
-				compact_evaporation_events[i].completion_wall_time_sec = global_evap_doubles[EVAPORATION_COMPACT_MPI_DOUBLE_FIELDS*i];
-				compact_evaporation_events[i].lifetime_unbinding = global_evap_doubles[EVAPORATION_COMPACT_MPI_DOUBLE_FIELDS*i + 1];
+				const size_t rank_offset = static_cast<size_t>(rank) * static_cast<size_t>(max_evap_count);
+				for(int i = 0; i < evap_counts[rank]; i++)
+					compact_evaporation_events.push_back(global_evap_padded[rank_offset + static_cast<size_t>(i)]);
 			}
 		}
 	}
 
+	MPI_Trace_Point(mpi_rank, "before allreduce computing_time final");
 	MPI_Allreduce(MPI_IN_PLACE, &computing_time, 1, MPI_DOUBLE, MPI_MAX, MPI_COMM_WORLD);
+	MPI_Trace_Point(mpi_rank, "leave Perform_MPI_Reductions");
 }
 
 void Simulation_Data::Write_Output_Files(const std::string& output_dir, obscura::DM_Particle& DM)

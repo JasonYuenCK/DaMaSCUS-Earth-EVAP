@@ -29,9 +29,12 @@ set(EXTERNAL_DIR  ${PROJECT_SOURCE_DIR}/external)
 find_package(MPI REQUIRED)
 include_directories(${MPI_INCLUDE_PATH})
 
-# Prefer a local Boost with C++11-compatible Boost.Math quadrature headers.
-set(BOOST_ROOT "/opt/homebrew/opt/boost@1.75" CACHE PATH "Preferred Boost root")
-set(Boost_NO_SYSTEM_PATHS ON CACHE BOOL "Prefer BOOST_ROOT over system Boost")
+# Prefer Homebrew Boost on local macOS builds, but do not force that path on
+# clusters where Boost is supplied by the module environment.
+if(NOT DEFINED BOOST_ROOT AND NOT DEFINED Boost_ROOT AND EXISTS "/opt/homebrew/opt/boost@1.75")
+  set(BOOST_ROOT "/opt/homebrew/opt/boost@1.75" CACHE PATH "Preferred Boost root")
+  set(Boost_NO_SYSTEM_PATHS ON CACHE BOOL "Prefer BOOST_ROOT over system Boost")
+endif()
 find_package(Boost 1.65 REQUIRED)
 
 include(FetchContent)
