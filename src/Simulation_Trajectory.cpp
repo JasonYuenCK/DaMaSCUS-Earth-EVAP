@@ -118,6 +118,20 @@ libphysica::Vector Unit_Vector_At_Angle_From_Axis(double cos_theta, double phi, 
 	return cos_theta * e3 + sin_theta * cos(phi) * e1 + sin_theta * sin(phi) * e2;
 }
 
+void Build_Stable_Orthonormal_Basis(const libphysica::Vector& axis, libphysica::Vector& e1, libphysica::Vector& e2, libphysica::Vector& e3)
+{
+	const double axis_norm = axis.Norm();
+	if(!std::isfinite(axis_norm) || axis_norm <= 0.0)
+		throw std::runtime_error("Build_Stable_Orthonormal_Basis(): axis is zero or non-finite.");
+
+	e1 = axis / axis_norm;
+	libphysica::Vector reference = (std::fabs(e1[2]) < 0.9)
+	                             ? libphysica::Vector({0.0, 0.0, 1.0})
+	                             : libphysica::Vector({1.0, 0.0, 0.0});
+	e2 = reference.Cross(e1).Normalized();
+	e3 = e1.Cross(e2).Normalized();
+}
+
 double Radial_Velocity(const Event& event)
 {
 	const double radius = event.Radius();
@@ -1243,17 +1257,60 @@ Trajectory_Result Trajectory_Simulator::Simulate(const Event& initial_condition,
 // 3. Equation of motion solution with Runge-Kutta-Fehlberg
 Free_Particle_Propagator::Free_Particle_Propagator(const Event& event)
 {
-	// 1. Coordinate system
-	axis_x = event.position.Normalized();
-	axis_z = event.position.Cross(event.velocity).Normalized();
-	axis_y = axis_z.Cross(axis_x);
+	time = event.time;
+	radius = event.Radius();
+	phi = 0.0;
+	radial_mode = false;
 
-	// 2. Coordinates
-	time			 = event.time;
-	radius			 = event.Radius();
-	phi				 = 0.0;
-	v_radial		 = (radius == 0) ? event.Speed() : event.position.Dot(event.velocity) / radius;
-	angular_momentum = (event.position.Cross(event.velocity)).Dot(axis_z);
+	const double speed = event.Speed();
+	const double radius_eps = 1.0e-12 * km;
+	const double angular_scale = std::max(radius * speed, 1.0 * km * km / sec);
+	const double angular_eps = 1.0e-12 * angular_scale;
+	const libphysica::Vector angular_momentum_vector = event.position.Cross(event.velocity);
+	const double angular_momentum_norm = angular_momentum_vector.Norm();
+
+	if(std::isfinite(radius) && radius > radius_eps)
+	{
+		axis_x = event.position / radius;
+		v_radial = event.position.Dot(event.velocity) / radius;
+	}
+	else if(std::isfinite(speed) && speed > 0.0)
+	{
+		axis_x = event.velocity / speed;
+		v_radial = speed;
+		radius = 0.0;
+		radial_mode = true;
+	}
+	else
+	{
+		axis_x = libphysica::Vector({1.0, 0.0, 0.0});
+		v_radial = 0.0;
+		radius = 0.0;
+		radial_mode = true;
+	}
+
+	if(!radial_mode && std::isfinite(angular_momentum_norm) && angular_momentum_norm > angular_eps)
+	{
+		axis_z = angular_momentum_vector / angular_momentum_norm;
+		axis_y = axis_z.Cross(axis_x);
+		const double axis_y_norm = axis_y.Norm();
+		if(std::isfinite(axis_y_norm) && axis_y_norm > 0.0)
+		{
+			axis_y = axis_y / axis_y_norm;
+			axis_x = axis_y.Cross(axis_z).Normalized();
+			angular_momentum = angular_momentum_norm;
+		}
+		else
+			radial_mode = true;
+	}
+	else
+		radial_mode = true;
+
+	if(radial_mode)
+	{
+		Build_Stable_Orthonormal_Basis(axis_x, axis_x, axis_y, axis_z);
+		angular_momentum = 0.0;
+	}
 
 	// 3. Error tolerances (fixed-size array, no heap allocation)
 	error_tolerances[0] = 1.0 * km;
@@ -1277,6 +1334,8 @@ double Free_Particle_Propagator::dv_dt(double r, double mass)
 
 double Free_Particle_Propagator::dphi_dt(double r)
 {
+	if(radial_mode || angular_momentum == 0.0 || r <= 0.0)
+		return 0.0;
 	return angular_momentum / r / r;
 }
 
@@ -1510,9 +1569,17 @@ double Free_Particle_Propagator::Current_Speed()
 
 Event Free_Particle_Propagator::Event_In_3D()
 {
-	double v_phi			= angular_momentum / pow(radius, 2);
-	libphysica::Vector xNew = radius * (cos(phi) * axis_x + sin(phi) * axis_y);
-	libphysica::Vector vNew = (v_radial * cos(phi) - v_phi * radius * sin(phi)) * axis_x + (v_radial * sin(phi) + radius * v_phi * cos(phi)) * axis_y;
+	const double safe_radius = (std::isfinite(radius) && radius > 0.0) ? radius : 0.0;
+	if(radial_mode || angular_momentum == 0.0 || safe_radius == 0.0)
+	{
+		libphysica::Vector xRadial = safe_radius * axis_x;
+		libphysica::Vector vRadial = v_radial * axis_x;
+		return Event(time, xRadial, vRadial);
+	}
+
+	double v_phi			= angular_momentum / pow(safe_radius, 2);
+	libphysica::Vector xNew = safe_radius * (cos(phi) * axis_x + sin(phi) * axis_y);
+	libphysica::Vector vNew = (v_radial * cos(phi) - v_phi * safe_radius * sin(phi)) * axis_x + (v_radial * sin(phi) + safe_radius * v_phi * cos(phi)) * axis_y;
 
 	return Event(time, xNew, vNew);
 }

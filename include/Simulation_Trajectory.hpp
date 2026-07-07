@@ -183,6 +183,7 @@ class Free_Particle_Propagator
 	double time, radius, phi, v_radial;
 	double angular_momentum;
 	libphysica::Vector axis_x, axis_y, axis_z;
+	bool radial_mode;
 
 	double dr_dt(double v);
 	double dv_dt(double r, double mass);

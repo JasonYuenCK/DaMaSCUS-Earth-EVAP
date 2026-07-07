@@ -375,3 +375,44 @@ TEST(TestSimulationTrajectory, TestPropagatorEventIn3D)
 	for(int i = 0; i < 3; i++)
 		EXPECT_DOUBLE_EQ(propagator.Event_In_3D().velocity[i], v[i]);
 }
+
+TEST(TestSimulationTrajectory, TestPropagatorEventIn3DRadialTrajectory)
+{
+	double t = 13 * sec;
+	libphysica::Vector r({2.0 * rSun, 0.0, 0.0});
+	libphysica::Vector v({-100.0 * km / sec, 0.0, 0.0});
+	Event event(t, r, v);
+	Free_Particle_Propagator propagator(event);
+
+	Event recovered = propagator.Event_In_3D();
+
+	EXPECT_DOUBLE_EQ(recovered.time, t);
+	for(int i = 0; i < 3; i++)
+	{
+		EXPECT_TRUE(std::isfinite(recovered.position[i]));
+		EXPECT_TRUE(std::isfinite(recovered.velocity[i]));
+		EXPECT_DOUBLE_EQ(recovered.position[i], r[i]);
+		EXPECT_DOUBLE_EQ(recovered.velocity[i], v[i]);
+	}
+}
+
+TEST(TestSimulationTrajectory, TestPropagatorEventIn3DZeroRadius)
+{
+	double t = 13 * sec;
+	double v0 = 123.0 * km / sec;
+	libphysica::Vector r({0.0, 0.0, 0.0});
+	libphysica::Vector v({0.0, v0, 0.0});
+	Event event(t, r, v);
+	Free_Particle_Propagator propagator(event);
+
+	Event recovered = propagator.Event_In_3D();
+
+	EXPECT_DOUBLE_EQ(recovered.time, t);
+	for(int i = 0; i < 3; i++)
+	{
+		EXPECT_TRUE(std::isfinite(recovered.position[i]));
+		EXPECT_TRUE(std::isfinite(recovered.velocity[i]));
+		EXPECT_DOUBLE_EQ(recovered.position[i], r[i]);
+		EXPECT_DOUBLE_EQ(recovered.velocity[i], v[i]);
+	}
+}

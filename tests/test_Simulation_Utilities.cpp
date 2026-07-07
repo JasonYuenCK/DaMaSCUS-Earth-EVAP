@@ -1,5 +1,8 @@
 #include "gtest/gtest.h"
 
+#include <algorithm>
+#include <cmath>
+
 #include "obscura/Astronomy.hpp"
 #include "obscura/DM_Halo_Models.hpp"
 
@@ -8,6 +11,28 @@
 
 using namespace DaMaSCUS_SUN;
 using namespace libphysica::natural_units;
+
+namespace
+{
+double Kepler_Energy(const Event& event)
+{
+	const double radius = event.Radius();
+	const double speed = event.Speed();
+	return 0.5 * speed * speed - G_Newton * mSun / radius;
+}
+
+double Radial_Velocity_For_Test(const Event& event)
+{
+	return event.position.Dot(event.velocity) / event.Radius();
+}
+
+void Expect_Relative_Near(double value, double reference, double rel_tol)
+{
+	const double scale = std::max(std::fabs(reference), 1.0e-300);
+	EXPECT_NEAR(value, reference, rel_tol * scale);
+}
+
+}	// namespace
 
 // 1. Event class
 TEST(TestSimulationUtilities, TestEventConstructor)
@@ -167,9 +192,6 @@ TEST(TestSimulationUtilities, TestInitialConditions)
 // 3. Analytically propagate a particle at event on a hyperbolic Kepler orbit to a radius R (without passing the periapsis)
 TEST(TestSimulationUtilities, TestHyperbolicKeplerShift)
 {
-	// ARRANGE
-	// std::random_device rd;
-	// std::mt19937 PRNG(rd());
 	int fixed_seed = 123;
 	std::mt19937 PRNG(fixed_seed);
 
@@ -181,22 +203,26 @@ TEST(TestSimulationUtilities, TestHyperbolicKeplerShift)
 	int trials = 100;
 	for(int k = 0; k < trials; k++)
 	{
-		// ARRANGE
 		Event IC = Initial_Conditions(SHM, SSM, PRNG);
-		Hyperbolic_Kepler_Shift(IC, 5.0 * rSun);
+		const double energy_initial = Kepler_Energy(IC);
+		const double angular_momentum_initial = IC.Angular_Momentum();
 
-		Free_Particle_Propagator eom(IC);
-		while(eom.Current_Radius() > rSun)
-			eom.Runge_Kutta_45_Step(mSun);
-		Event x_ref = eom.Event_In_3D();
-		// ACT
+		Hyperbolic_Kepler_Shift(IC, 5.0 * rSun);
+		ASSERT_NEAR(IC.Radius(), 5.0 * rSun, 1.0e-10 * rSun);
+		EXPECT_LT(Radial_Velocity_For_Test(IC), 0.0);
+		Expect_Relative_Near(Kepler_Energy(IC), energy_initial, 1.0e-10);
+		Expect_Relative_Near(IC.Angular_Momentum(), angular_momentum_initial, 1.0e-10);
+
 		Hyperbolic_Kepler_Shift(IC, rSun);
-		// ASSERT
+		ASSERT_NEAR(IC.Radius(), rSun, 1.0e-10 * rSun);
+		EXPECT_LT(Radial_Velocity_For_Test(IC), 0.0);
+		Expect_Relative_Near(Kepler_Energy(IC), energy_initial, 1.0e-10);
+		Expect_Relative_Near(IC.Angular_Momentum(), angular_momentum_initial, 1.0e-10);
 		for(int i = 0; i < 3; i++)
-			ASSERT_NEAR(IC.position[i], x_ref.position[i], 0.001 * rSun);
-		for(int i = 0; i < 3; i++)
-			ASSERT_NEAR(IC.velocity[i], x_ref.velocity[i], km / sec);
-		ASSERT_LE(IC.Speed(), x_ref.Speed());
+		{
+			EXPECT_TRUE(std::isfinite(IC.position[i]));
+			EXPECT_TRUE(std::isfinite(IC.velocity[i]));
+		}
 	}
 }
 

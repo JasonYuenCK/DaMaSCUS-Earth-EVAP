@@ -1,6 +1,10 @@
 #include "Simulation_Utilities.hpp"
 
+#include <algorithm>
 #include <cmath>
+#include <cstdlib>
+#include <iostream>
+#include <string>
 
 #include "libphysica/Special_Functions.hpp"
 #include "libphysica/Statistics.hpp"
@@ -11,6 +15,28 @@ namespace DaMaSCUS_SUN
 {
 
 using namespace libphysica::natural_units;
+
+namespace
+{
+constexpr double KEPLER_DOMAIN_TOLERANCE = 1.0e-10;
+
+double Clamp_Cosine(double value)
+{
+	return std::max(-1.0, std::min(1.0, value));
+}
+
+void Abort_Hyperbolic_Kepler_Shift(const std::string& message)
+{
+	std::cerr << "Error in Hyperbolic_Kepler_Shift(): " << message << std::endl;
+	std::exit(EXIT_FAILURE);
+}
+
+bool Finite_Positive(double value)
+{
+	return std::isfinite(value) && value > 0.0;
+}
+
+}	// namespace
 
 // 1. Event Class
 Event::Event()
@@ -155,48 +181,72 @@ Event Initial_Conditions(obscura::DM_Distribution& halo_model, Solar_Model& sola
 // 3. Analytically propagate a particle at event on a hyperbolic Kepler orbit to a radius R (without passing the periapsis)
 void Hyperbolic_Kepler_Shift(Event& event, double R_final)
 {
-	// 1. Initial event
-	double R_initial		= event.Radius();
-	double v_initial		= event.Speed();
-	double angular_momentum = event.Angular_Momentum();
+	const double mu = G_Newton * mSun;
+	const double R_initial = event.Radius();
+	const double speed = event.Speed();
 
 	if(R_final < rSun || R_initial < rSun)
+		Abort_Hyperbolic_Kepler_Shift("orbits inside the Sun cannot be described analytically.");
+	if(!Finite_Positive(R_final) || !Finite_Positive(R_initial) || !Finite_Positive(speed))
+		Abort_Hyperbolic_Kepler_Shift("initial or final radius/speed is non-finite or non-positive.");
+	if(std::fabs(R_final - R_initial) <= KEPLER_DOMAIN_TOLERANCE * std::max(R_initial, R_final))
+		return;
+
+	const double radial_velocity = event.position.Dot(event.velocity) / R_initial;
+	if(!std::isfinite(radial_velocity) || radial_velocity == 0.0)
+		Abort_Hyperbolic_Kepler_Shift("cannot choose a forward Kepler branch at zero or non-finite radial velocity.");
+
+	const double radial_direction = (radial_velocity < 0.0) ? -1.0 : 1.0;
+	if(radial_direction < 0.0 && R_final > R_initial)
+		Abort_Hyperbolic_Kepler_Shift("requested outward shift while particle is on the inbound branch.");
+	if(radial_direction > 0.0 && R_final < R_initial)
+		Abort_Hyperbolic_Kepler_Shift("requested inward shift while particle is on the outbound branch.");
+
+	const double energy = 0.5 * speed * speed - mu / R_initial;
+	if(!Finite_Positive(energy))
+		Abort_Hyperbolic_Kepler_Shift("orbit is not hyperbolic.");
+
+	const libphysica::Vector r_hat = event.position / R_initial;
+	const libphysica::Vector h_vec = event.position.Cross(event.velocity);
+	const double h = h_vec.Norm();
+	const double h_scale = R_initial * speed;
+
+	if(!std::isfinite(h) || h <= KEPLER_DOMAIN_TOLERANCE * h_scale)
 	{
-		std::cerr << "Error in Hyperbolic_Kepler_Shift(): Orbits inside the Sun cannot be described analytically." << std::endl;
-		std::exit(EXIT_FAILURE);
+		const double final_speed_sqr = 2.0 * (energy + mu / R_final);
+		if(!Finite_Positive(final_speed_sqr))
+			Abort_Hyperbolic_Kepler_Shift("radial branch has non-finite or non-positive final speed.");
+		event.position = R_final * r_hat;
+		event.velocity = radial_direction * sqrt(final_speed_sqr) * r_hat;
+		return;
 	}
 
-	// 2. Asymptotic speed
-	double vEsc = sqrt(2 * G_Newton * mSun / R_initial);
-	double u2	= v_initial * v_initial - vEsc * vEsc;
+	const double p = h * h / mu;
+	const libphysica::Vector eccentricity_vector = event.velocity.Cross(h_vec) / mu - r_hat;
+	const double eccentricity = eccentricity_vector.Norm();
+	if(!Finite_Positive(p) || !std::isfinite(eccentricity) || eccentricity <= 1.0)
+		Abort_Hyperbolic_Kepler_Shift("invalid hyperbolic orbital elements.");
 
-	// 3. Kepler orbit parameter
-	double semi_major_axis	= G_Newton * mSun / u2;
-	double semilatus_rectum = angular_momentum * angular_momentum / G_Newton / mSun;
-	double eccentricity		= sqrt(1.0 + semilatus_rectum / semi_major_axis);
-	// double perihelion		= semi_major_axis * ( eccentricity - 1.0);
+	const double cos_theta_final_raw = (p / R_final - 1.0) / eccentricity;
+	if(!std::isfinite(cos_theta_final_raw)
+	   || cos_theta_final_raw > 1.0 + KEPLER_DOMAIN_TOLERANCE
+	   || cos_theta_final_raw < -1.0 - KEPLER_DOMAIN_TOLERANCE)
+		Abort_Hyperbolic_Kepler_Shift("target radius is not reachable on this Kepler orbit.");
 
-	// 4. Initial and final orbital angle
-	double theta_initial = libphysica::Sign(R_final - R_initial) * acos(1.0 / eccentricity * (semilatus_rectum / R_initial - 1.0));
-	double theta_final	 = libphysica::Sign(R_final - R_initial) * acos(1.0 / eccentricity * (semilatus_rectum / R_final - 1.0));
-
-	// 5. Axis vectors of orbital coordinate system
-	libphysica::Vector axis_z = event.position.Cross(event.velocity).Normalized();
-	libphysica::Vector axis_x = cos(theta_initial) * event.position.Normalized() + sin(theta_initial) * event.position.Normalized().Cross(axis_z);
+	libphysica::Vector axis_x = eccentricity_vector / eccentricity;
+	libphysica::Vector axis_z = h_vec / h;
 	libphysica::Vector axis_y = axis_z.Cross(axis_x);
+	const double axis_y_norm = axis_y.Norm();
+	if(!Finite_Positive(axis_y_norm))
+		Abort_Hyperbolic_Kepler_Shift("failed to construct orbital basis.");
+	axis_y = axis_y / axis_y_norm;
+	axis_x = axis_y.Cross(axis_z).Normalized();
 
-	// 6. Final time, position, and velocity
-	// 6.1 Time
-	// double F1 = acosh((eccentricity + cos(theta_initial)) / (1.0 + eccentricity * cos(theta_initial)));
-	// double M1 = eccentricity * sinh(F1) - F1;
-	// double t1 = sqrt(pow(+semi_major_axis, 3) / G_Newton / mSun) * M1;
-	// double F2 = acosh((eccentricity + cos(theta_final)) / (1.0 + eccentricity * cos(theta_final)));
-	// double M2 = eccentricity * sinh(F2) - F2;
-	// double t2 = sqrt(pow(+semi_major_axis, 3) / G_Newton / mSun) * M2;
-	// event.time += libphysica::Sign(R_final - R_initial) * (t2 - t1);
-	// 6.2 Position and Velocity
-	event.position = R_final * cos(theta_final) * axis_x + R_final * sin(theta_final) * axis_y;
-	event.velocity = sqrt(G_Newton * mSun / semilatus_rectum) * (eccentricity * sin(theta_final) * event.position.Normalized() + (1.0 + eccentricity * cos(theta_final)) * axis_z.Cross(event.position.Normalized()));
+	const double theta_final_abs = acos(Clamp_Cosine(cos_theta_final_raw));
+	const double theta_final = radial_direction * theta_final_abs;
+
+	event.position = R_final * (cos(theta_final) * axis_x + sin(theta_final) * axis_y);
+	event.velocity = sqrt(mu / p) * (-sin(theta_final) * axis_x + (eccentricity + cos(theta_final)) * axis_y);
 }
 
 // 4. Equiareal isodetection rings
