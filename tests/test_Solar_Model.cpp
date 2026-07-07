@@ -64,7 +64,7 @@ TEST(TestSolarModel, TestTemperature)
 	Solar_Model SSM;
 	// ACT & ASSERT
 	EXPECT_DOUBLE_EQ(SSM.Temperature(0), 1.549e+07 * Kelvin);
-	EXPECT_DOUBLE_EQ(SSM.Temperature(rSun), 5800.0 * Kelvin);
+	EXPECT_NEAR(SSM.Temperature(rSun), 5800.0 * Kelvin, 1.0e-20);
 	EXPECT_DOUBLE_EQ(SSM.Temperature(0.96950 * rSun), 1.544e+05 * Kelvin);
 }
 

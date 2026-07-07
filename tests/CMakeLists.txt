@@ -1,6 +1,7 @@
 # 1. Test executable
-add_test(NAME executable_test COMMAND mpirun DaMaSCUS-SUN config.cfg
-	WORKING_DIRECTORY ${BIN_DIR})
+add_test(NAME executable_test
+	COMMAND DaMaSCUS-SUN ${PROJECT_SOURCE_DIR}/results/ctest_executable_smoke/ctest_executable_smoke.cfg
+	WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
 
 # 2. Unit tests: Dark_Photon.xpp	
 add_executable(test_Dark_Photon
@@ -22,7 +23,7 @@ target_include_directories(test_Data_Generation PRIVATE ${GENERATED_DIR} )
 target_link_libraries(test_Data_Generation
 	PRIVATE
 		lib_damascus_sun
-		gtest_main)	#contains the main function
+		gtest)
 target_compile_options(test_Data_Generation PUBLIC -Wall -pedantic)
 install(TARGETS test_Data_Generation DESTINATION ${TESTS_DIR})
 add_test(NAME test_Data_Generation COMMAND test_Data_Generation

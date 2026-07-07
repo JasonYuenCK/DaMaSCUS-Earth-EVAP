@@ -1352,9 +1352,13 @@ void Simulation_Data::Generate_Data(obscura::DM_Particle& DM, Solar_Model& solar
 		for(unsigned long int trajectory_in_round = 0; trajectory_in_round < local_trajectories_this_round; trajectory_in_round++)
 		{
 			Event IC = Initial_Conditions(halo_model, solar_model, simulator.PRNG);
-			Hyperbolic_Kepler_Shift(IC, initial_and_final_radius);
-
-			Trajectory_Result trajectory = simulator.Simulate(IC, DM, mpi_rank);
+			TrajectoryBincount failed_bincount;
+			failed_bincount.termination_reason = TrajectoryTerminationReason::NumericalFailure;
+			failed_bincount.survival_valid = false;
+			const bool initial_shift_ok = Hyperbolic_Kepler_Shift(IC, initial_and_final_radius);
+			Trajectory_Result trajectory = initial_shift_ok
+			                                   ? simulator.Simulate(IC, DM, mpi_rank)
+			                                   : Trajectory_Result(IC, IC, 0, failed_bincount);
 			const double trajectory_completion_wall_time_sec = elapsed_since_start();
 
 			local_total++;
@@ -1415,16 +1419,18 @@ void Simulation_Data::Generate_Data(obscura::DM_Particle& DM, Solar_Model& solar
 					else if(trajectory.Particle_Reflected())
 					{
 						number_of_reflected_particles++;
-						Hyperbolic_Kepler_Shift(trajectory.final_event, 1.0 * AU);
-						const double v_final = trajectory.final_event.Speed();
-						if(trajectory.number_of_scatterings >= minimum_number_of_scatterings
-						   && v_final > KDE_boundary_correction_factor * minimum_speed_threshold)
+						if(Hyperbolic_Kepler_Shift(trajectory.final_event, 1.0 * AU))
 						{
-							const unsigned int isoreflection_ring =
-							    (isoreflection_rings == 1)
-							    ? 0
-							    : trajectory.final_event.Isoreflection_Ring(obscura::Sun_Velocity(), isoreflection_rings);
-							data[isoreflection_ring].push_back(libphysica::DataPoint(v_final));
+							const double v_final = trajectory.final_event.Speed();
+							if(trajectory.number_of_scatterings >= minimum_number_of_scatterings
+							   && v_final > KDE_boundary_correction_factor * minimum_speed_threshold)
+							{
+								const unsigned int isoreflection_ring =
+								    (isoreflection_rings == 1)
+								    ? 0
+								    : trajectory.final_event.Isoreflection_Ring(obscura::Sun_Velocity(), isoreflection_rings);
+								data[isoreflection_ring].push_back(libphysica::DataPoint(v_final));
+							}
 						}
 					}
 				}

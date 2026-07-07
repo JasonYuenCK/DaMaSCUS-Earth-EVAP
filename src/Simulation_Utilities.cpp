@@ -25,10 +25,15 @@ double Clamp_Cosine(double value)
 	return std::max(-1.0, std::min(1.0, value));
 }
 
-void Abort_Hyperbolic_Kepler_Shift(const std::string& message)
+bool Report_Hyperbolic_Kepler_Shift_Failure(const std::string& message)
 {
-	std::cerr << "Error in Hyperbolic_Kepler_Shift(): " << message << std::endl;
-	std::exit(EXIT_FAILURE);
+	static unsigned int warning_count = 0;
+	if(warning_count < 10)
+		std::cerr << "Warning in Hyperbolic_Kepler_Shift(): " << message << std::endl;
+	else if(warning_count == 10)
+		std::cerr << "Warning in Hyperbolic_Kepler_Shift(): additional failures suppressed." << std::endl;
+	warning_count++;
+	return false;
 }
 
 bool Finite_Positive(double value)
@@ -179,32 +184,32 @@ Event Initial_Conditions(obscura::DM_Distribution& halo_model, Solar_Model& sola
 }
 
 // 3. Analytically propagate a particle at event on a hyperbolic Kepler orbit to a radius R (without passing the periapsis)
-void Hyperbolic_Kepler_Shift(Event& event, double R_final)
+bool Hyperbolic_Kepler_Shift(Event& event, double R_final)
 {
 	const double mu = G_Newton * mSun;
 	const double R_initial = event.Radius();
 	const double speed = event.Speed();
 
 	if(R_final < rSun || R_initial < rSun)
-		Abort_Hyperbolic_Kepler_Shift("orbits inside the Sun cannot be described analytically.");
+		return Report_Hyperbolic_Kepler_Shift_Failure("orbits inside the Sun cannot be described analytically.");
 	if(!Finite_Positive(R_final) || !Finite_Positive(R_initial) || !Finite_Positive(speed))
-		Abort_Hyperbolic_Kepler_Shift("initial or final radius/speed is non-finite or non-positive.");
+		return Report_Hyperbolic_Kepler_Shift_Failure("initial or final radius/speed is non-finite or non-positive.");
 	if(std::fabs(R_final - R_initial) <= KEPLER_DOMAIN_TOLERANCE * std::max(R_initial, R_final))
-		return;
+		return true;
 
 	const double radial_velocity = event.position.Dot(event.velocity) / R_initial;
 	if(!std::isfinite(radial_velocity) || radial_velocity == 0.0)
-		Abort_Hyperbolic_Kepler_Shift("cannot choose a forward Kepler branch at zero or non-finite radial velocity.");
+		return Report_Hyperbolic_Kepler_Shift_Failure("cannot choose a forward Kepler branch at zero or non-finite radial velocity.");
 
 	const double radial_direction = (radial_velocity < 0.0) ? -1.0 : 1.0;
 	if(radial_direction < 0.0 && R_final > R_initial)
-		Abort_Hyperbolic_Kepler_Shift("requested outward shift while particle is on the inbound branch.");
+		return Report_Hyperbolic_Kepler_Shift_Failure("requested outward shift while particle is on the inbound branch.");
 	if(radial_direction > 0.0 && R_final < R_initial)
-		Abort_Hyperbolic_Kepler_Shift("requested inward shift while particle is on the outbound branch.");
+		return Report_Hyperbolic_Kepler_Shift_Failure("requested inward shift while particle is on the outbound branch.");
 
 	const double energy = 0.5 * speed * speed - mu / R_initial;
 	if(!Finite_Positive(energy))
-		Abort_Hyperbolic_Kepler_Shift("orbit is not hyperbolic.");
+		return Report_Hyperbolic_Kepler_Shift_Failure("orbit is not hyperbolic.");
 
 	const libphysica::Vector r_hat = event.position / R_initial;
 	const libphysica::Vector h_vec = event.position.Cross(event.velocity);
@@ -215,30 +220,30 @@ void Hyperbolic_Kepler_Shift(Event& event, double R_final)
 	{
 		const double final_speed_sqr = 2.0 * (energy + mu / R_final);
 		if(!Finite_Positive(final_speed_sqr))
-			Abort_Hyperbolic_Kepler_Shift("radial branch has non-finite or non-positive final speed.");
+			return Report_Hyperbolic_Kepler_Shift_Failure("radial branch has non-finite or non-positive final speed.");
 		event.position = R_final * r_hat;
 		event.velocity = radial_direction * sqrt(final_speed_sqr) * r_hat;
-		return;
+		return true;
 	}
 
 	const double p = h * h / mu;
 	const libphysica::Vector eccentricity_vector = event.velocity.Cross(h_vec) / mu - r_hat;
 	const double eccentricity = eccentricity_vector.Norm();
 	if(!Finite_Positive(p) || !std::isfinite(eccentricity) || eccentricity <= 1.0)
-		Abort_Hyperbolic_Kepler_Shift("invalid hyperbolic orbital elements.");
+		return Report_Hyperbolic_Kepler_Shift_Failure("invalid hyperbolic orbital elements.");
 
 	const double cos_theta_final_raw = (p / R_final - 1.0) / eccentricity;
 	if(!std::isfinite(cos_theta_final_raw)
 	   || cos_theta_final_raw > 1.0 + KEPLER_DOMAIN_TOLERANCE
 	   || cos_theta_final_raw < -1.0 - KEPLER_DOMAIN_TOLERANCE)
-		Abort_Hyperbolic_Kepler_Shift("target radius is not reachable on this Kepler orbit.");
+		return Report_Hyperbolic_Kepler_Shift_Failure("target radius is not reachable on this Kepler orbit.");
 
 	libphysica::Vector axis_x = eccentricity_vector / eccentricity;
 	libphysica::Vector axis_z = h_vec / h;
 	libphysica::Vector axis_y = axis_z.Cross(axis_x);
 	const double axis_y_norm = axis_y.Norm();
 	if(!Finite_Positive(axis_y_norm))
-		Abort_Hyperbolic_Kepler_Shift("failed to construct orbital basis.");
+		return Report_Hyperbolic_Kepler_Shift_Failure("failed to construct orbital basis.");
 	axis_y = axis_y / axis_y_norm;
 	axis_x = axis_y.Cross(axis_z).Normalized();
 
@@ -247,6 +252,7 @@ void Hyperbolic_Kepler_Shift(Event& event, double R_final)
 
 	event.position = R_final * (cos(theta_final) * axis_x + sin(theta_final) * axis_y);
 	event.velocity = sqrt(mu / p) * (-sin(theta_final) * axis_x + (eccentricity + cos(theta_final)) * axis_y);
+	return true;
 }
 
 // 4. Equiareal isodetection rings

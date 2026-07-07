@@ -85,13 +85,18 @@ void Configuration::Import_Parameter_Scan_Parameter()
 	}
 	if(run_mode == "Capture")
 		capture_mode = true;
+	const bool parameter_scan_mode = (run_mode == "Parameter scan");
 	try
 	{
 		isoreflection_rings = config.lookup("isoreflection_rings");
 	}
 	catch(const SettingNotFoundException& nfex)
 	{
-		std::cerr << "No 'isoreflection_rings' setting in configuration file." << std::endl;
+		isoreflection_rings = 1;
+	}
+	if(isoreflection_rings == 0)
+	{
+		std::cerr << "Error in Configuration::Import_Parameter_Scan_Parameter(): 'isoreflection_rings' must be positive." << std::endl;
 		std::exit(EXIT_FAILURE);
 	}
 	try
@@ -100,8 +105,7 @@ void Configuration::Import_Parameter_Scan_Parameter()
 	}
 	catch(const SettingNotFoundException& nfex)
 	{
-		std::cerr << "No 'interpolation_points' setting in configuration file." << std::endl;
-		std::exit(EXIT_FAILURE);
+		interpolation_points = 0;
 	}
 	try
 	{
@@ -110,8 +114,12 @@ void Configuration::Import_Parameter_Scan_Parameter()
 	}
 	catch(const SettingNotFoundException& nfex)
 	{
-		std::cerr << "No 'cross_section_min' setting in configuration file." << std::endl;
-		std::exit(EXIT_FAILURE);
+		if(parameter_scan_mode)
+		{
+			std::cerr << "No 'cross_section_min' setting in configuration file." << std::endl;
+			std::exit(EXIT_FAILURE);
+		}
+		cross_section_min = 0.0;
 	}
 
 	try
@@ -121,8 +129,12 @@ void Configuration::Import_Parameter_Scan_Parameter()
 	}
 	catch(const SettingNotFoundException& nfex)
 	{
-		std::cerr << "No 'cross_section_max' setting in configuration file." << std::endl;
-		std::exit(EXIT_FAILURE);
+		if(parameter_scan_mode)
+		{
+			std::cerr << "No 'cross_section_max' setting in configuration file." << std::endl;
+			std::exit(EXIT_FAILURE);
+		}
+		cross_section_max = 0.0;
 	}
 
 	try
@@ -131,8 +143,12 @@ void Configuration::Import_Parameter_Scan_Parameter()
 	}
 	catch(const SettingNotFoundException& nfex)
 	{
-		std::cerr << "No 'cross_sections' setting in configuration file." << std::endl;
-		std::exit(EXIT_FAILURE);
+		if(parameter_scan_mode)
+		{
+			std::cerr << "No 'cross_sections' setting in configuration file." << std::endl;
+			std::exit(EXIT_FAILURE);
+		}
+		cross_sections = 0;
 	}
 
 	try
@@ -141,8 +157,12 @@ void Configuration::Import_Parameter_Scan_Parameter()
 	}
 	catch(const SettingNotFoundException& nfex)
 	{
-		std::cerr << "No 'compute_halo_constraints' setting in configuration file." << std::endl;
-		std::exit(EXIT_FAILURE);
+		if(parameter_scan_mode)
+		{
+			std::cerr << "No 'compute_halo_constraints' setting in configuration file." << std::endl;
+			std::exit(EXIT_FAILURE);
+		}
+		compute_halo_constraints = false;
 	}
 	try
 	{
@@ -150,8 +170,12 @@ void Configuration::Import_Parameter_Scan_Parameter()
 	}
 	catch(const SettingNotFoundException& nfex)
 	{
-		std::cerr << "No 'perform_full_scan' setting in configuration file." << std::endl;
-		std::exit(EXIT_FAILURE);
+		if(parameter_scan_mode)
+		{
+			std::cerr << "No 'perform_full_scan' setting in configuration file." << std::endl;
+			std::exit(EXIT_FAILURE);
+		}
+		perform_full_scan = false;
 	}
 	try
 	{
@@ -159,8 +183,7 @@ void Configuration::Import_Parameter_Scan_Parameter()
 	}
 	catch(const SettingNotFoundException& nfex)
 	{
-		std::cerr << "No 'output_dir' setting in configuration file." << std::endl;
-		std::exit(EXIT_FAILURE);
+		g_top_level_dir = "./";
 	}
 	try
 	{

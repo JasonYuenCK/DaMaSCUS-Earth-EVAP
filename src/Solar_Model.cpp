@@ -354,6 +354,7 @@ void Solar_Model::Interpolate_Total_DM_Scattering_Rate(obscura::DM_Particle& DM,
 		MPI_Scatter(global_radii.data(), local_N_radius, MPI_DOUBLE, local_radii.data(), local_N_radius, MPI_DOUBLE, 0, MPI_COMM_WORLD);
 		std::vector<double> speeds = libphysica::Linear_Space(0, vMax, N_speed);
 		std::vector<double> local_rates;
+		local_rates.reserve(static_cast<size_t>(local_N_radius) * N_speed);
 		std::vector<double> global_rates(N_speed * global_N_radius, 0.0);
 		for(auto& radius : local_radii)
 			for(auto& speed : speeds)
@@ -362,6 +363,7 @@ void Solar_Model::Interpolate_Total_DM_Scattering_Rate(obscura::DM_Particle& DM,
 
 		// Re-organize into a 2D array and interpolate.
 		std::vector<std::vector<double>> rates;
+		rates.reserve(static_cast<size_t>(global_N_radius) * N_speed);
 		int i = 0;
 		for(auto& radius : global_radii)
 			for(auto& speed : speeds)

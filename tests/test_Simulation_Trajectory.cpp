@@ -234,7 +234,7 @@ TEST(TestSimulationTrajectory, TestSimulate)
 	for(int i = 0; i < trials; i++)
 	{
 		Event IC = Initial_Conditions(SHM, SSM, simulator.PRNG);
-		Hyperbolic_Kepler_Shift(IC, 1.5 * rSun);
+		ASSERT_TRUE(Hyperbolic_Kepler_Shift(IC, 1.5 * rSun));
 		Trajectory_Result result = simulator.Simulate(IC, DM, 0);
 		if(result.Particle_Reflected() || result.Particle_Free())
 			ASSERT_GE(result.final_event.Radius(), simulator.maximum_distance);
@@ -253,7 +253,7 @@ TEST(TestSimulationTrajectory, TestSimulatorPrintSummary)
 	obscura::Standard_Halo_Model SHM;
 	// ACT
 	Event IC = Initial_Conditions(SHM, SSM, simulator.PRNG);
-	Hyperbolic_Kepler_Shift(IC, 1.5 * rSun);
+	ASSERT_TRUE(Hyperbolic_Kepler_Shift(IC, 1.5 * rSun));
 	Trajectory_Result result = simulator.Simulate(IC, DM, 0);
 	// ASSERT
 	result.Print_Summary(SSM);

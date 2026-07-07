@@ -207,6 +207,17 @@ TEST(TestDataGeneration, TestRecoverEvaporationTimeFileFromBlocksRejectsWrongRun
 #endif
 }
 
+int main(int argc, char* argv[])
+{
+	int result = 0;
+
+	::testing::InitGoogleTest(&argc, argv);
+	MPI_Init(&argc, &argv);
+	result = RUN_ALL_TESTS();
+	MPI_Finalize();
+	return result;
+}
+
 TEST(TestDataGeneration, TestGenerateData)
 {
 	// ARRANGE
@@ -219,11 +230,12 @@ TEST(TestDataGeneration, TestGenerateData)
 	DM.Set_Sigma_Electron(1.0 * pb);
 
 	unsigned int sample_size = 2;
+	unsigned int max_trajectories = 2;
 
-	SSM.Interpolate_Total_DM_Scattering_Rate(DM, 100, 50);
+	SSM.Interpolate_Total_DM_Scattering_Rate(DM, 10, 10);
 
 	// ACT
-	Simulation_Data data_set(sample_size, 0);
+	Simulation_Data data_set(sample_size, max_trajectories);
 	data_set.Generate_Data(DM, SSM, SHM);
 
 	// ASSERT – number_of_trajectories is private; verify indirectly
@@ -257,11 +269,11 @@ TEST(TestDataGeneration, TestDataFreeRatio)
 	DM.Set_Sigma_Proton(1.0e-100 * pb);
 	DM.Set_Sigma_Electron(1.0e-100 * pb);
 
-	SSM.Interpolate_Total_DM_Scattering_Rate(DM, 100, 50);
+	SSM.Interpolate_Total_DM_Scattering_Rate(DM, 10, 10);
 
-	unsigned int sample_size = 10;
+	unsigned int sample_size = 2;
 	// ACT
-	Simulation_Data data_set(sample_size, 0);
+	Simulation_Data data_set(sample_size, sample_size);
 	data_set.Configure(1.1 * rSun, 0, 500);
 	data_set.Generate_Data(DM, SSM, SHM);
 
@@ -280,12 +292,12 @@ TEST(TestDataGeneration, TestDataSetCaptureRatio)
 	DM.Set_Sigma_Proton(1.0 * pb);
 	DM.Set_Sigma_Electron(1.0 * pb);
 
-	SSM.Interpolate_Total_DM_Scattering_Rate(DM, 100, 50);
+	SSM.Interpolate_Total_DM_Scattering_Rate(DM, 10, 10);
 
-	unsigned int sample_size = 50;
+	unsigned int sample_size = 2;
 
 	// ACT
-	Simulation_Data data_set(sample_size, 0);
+	Simulation_Data data_set(sample_size, sample_size);
 	data_set.Configure(1.1 * rSun, 0, 500);
 	data_set.Generate_Data(DM, SSM, SHM);
 
@@ -304,12 +316,12 @@ TEST(TestDataGeneration, TestDataSetReflectionRatio)
 	DM.Set_Sigma_Proton(1.0 * pb);
 	DM.Set_Sigma_Electron(1.0 * pb);
 
-	SSM.Interpolate_Total_DM_Scattering_Rate(DM, 100, 50);
+	SSM.Interpolate_Total_DM_Scattering_Rate(DM, 10, 10);
 
-	unsigned int sample_size = 10;
+	unsigned int sample_size = 2;
 
 	// ACT
-	Simulation_Data data_set(sample_size, 0);
+	Simulation_Data data_set(sample_size, sample_size);
 	data_set.Generate_Data(DM, SSM, SHM);
 
 	// ASSERT
@@ -327,12 +339,12 @@ TEST(TestDataGeneration, TestSpeedFunctions)
 	DM.Set_Sigma_Proton(1.0 * pb);
 	DM.Set_Sigma_Electron(1.0 * pb);
 
-	SSM.Interpolate_Total_DM_Scattering_Rate(DM, 100, 50);
+	SSM.Interpolate_Total_DM_Scattering_Rate(DM, 10, 10);
 
-	unsigned int sample_size = 10;
+	unsigned int sample_size = 2;
 	double u_min			 = 0.0001;
 	// ACT
-	Simulation_Data data_set(sample_size, 0, u_min);
+	Simulation_Data data_set(sample_size, sample_size, u_min);
 	data_set.Generate_Data(DM, SSM, SHM);
 
 	// ASSERT

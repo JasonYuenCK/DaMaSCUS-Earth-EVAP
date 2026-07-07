@@ -207,13 +207,13 @@ TEST(TestSimulationUtilities, TestHyperbolicKeplerShift)
 		const double energy_initial = Kepler_Energy(IC);
 		const double angular_momentum_initial = IC.Angular_Momentum();
 
-		Hyperbolic_Kepler_Shift(IC, 5.0 * rSun);
+		ASSERT_TRUE(Hyperbolic_Kepler_Shift(IC, 5.0 * rSun));
 		ASSERT_NEAR(IC.Radius(), 5.0 * rSun, 1.0e-10 * rSun);
 		EXPECT_LT(Radial_Velocity_For_Test(IC), 0.0);
 		Expect_Relative_Near(Kepler_Energy(IC), energy_initial, 1.0e-10);
 		Expect_Relative_Near(IC.Angular_Momentum(), angular_momentum_initial, 1.0e-10);
 
-		Hyperbolic_Kepler_Shift(IC, rSun);
+		ASSERT_TRUE(Hyperbolic_Kepler_Shift(IC, rSun));
 		ASSERT_NEAR(IC.Radius(), rSun, 1.0e-10 * rSun);
 		EXPECT_LT(Radial_Velocity_For_Test(IC), 0.0);
 		Expect_Relative_Near(Kepler_Energy(IC), energy_initial, 1.0e-10);
