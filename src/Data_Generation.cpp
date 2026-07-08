@@ -334,6 +334,7 @@ void Write_Evaporation_Log_File_Header(std::ofstream& file, double mass_gev, dou
 	file << "# format_version = 3\n";
 	file << "# DM_mass_GeV = " << std::scientific << std::setprecision(6) << mass_gev << "\n";
 	file << "# DM_sigma_cm2 = " << std::scientific << std::setprecision(6) << sigma_cm2 << "\n";
+	file << "# sorted_by = lifetime_unbinding_sec rank trajectory_id\n";
 	file << "# rank trajectory_id lifetime_unbinding_sec\n";
 }
 
@@ -345,6 +346,8 @@ void Write_Evaporation_Log_Event(std::ostream& file, const CompactEvaporationEve
 
 bool Evaporation_Event_Order(const CompactEvaporationEvent& lhs, const CompactEvaporationEvent& rhs)
 {
+	if(lhs.lifetime_unbinding != rhs.lifetime_unbinding)
+		return lhs.lifetime_unbinding < rhs.lifetime_unbinding;
 	if(lhs.rank != rhs.rank)
 		return lhs.rank < rhs.rank;
 	return lhs.trajectory_id < rhs.trajectory_id;

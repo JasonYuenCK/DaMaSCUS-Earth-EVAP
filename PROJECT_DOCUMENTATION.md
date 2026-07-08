@@ -465,7 +465,7 @@ $$\int \sum_i n_i \frac{m_\chi m_i}{(m_\chi + m_i)^2} \langle v_\text{rel} \rang
 普通 `Parameter point` 模式直接在 `Data_Generation.cpp` 中输出以下文件：
 
 - `bincount.txt`：captured 与 not_captured 的径向占据时间 $\sum \Delta t$、速度二阶矩 $\sum v^2\Delta t$，以及逐 bin 误差估计。
-- `evaporation_times.txt`：始终只写完整、有效、未删失的真实蒸发事件，列为 `rank trajectory_id lifetime_unbinding_sec`。
+- `evaporation_times.txt`：始终只写完整、有效、未删失的真实蒸发事件，列为 `rank trajectory_id lifetime_unbinding_sec`，并按 `lifetime_unbinding_sec` 升序输出，`rank trajectory_id` 只作为并列时的稳定排序键。
 
 `capture_rate`、`capture_rate_err` 和 `capture_rate_CI_95_lower/upper` 会写入这些文件头部；Capture Mode 不写这些文件，只在终端打印同类捕获率统计。
 
@@ -483,7 +483,7 @@ Snapshot 会合并各 rank 的当前进度，包括已完成轨迹的 captured /
 每个 snapshot 时间点在 `snapshot/` 目录下生成主报告文件：
 
 - `snapshot_{time}s.txt`：主 snapshot 报告，输出累计统计和 bincount histogram。
-- `snapshot_{time}s_evaporation_times.txt`：该 snapshot 间隔内新完成的、有效的蒸发事件。
+- `snapshot_{time}s_evaporation_times.txt`：该 snapshot 间隔内新完成的、有效的蒸发事件，文件内部同样按 `lifetime_unbinding_sec` 升序输出。
 
 每个已合并 snapshot 只写入自身的两个固定文件，不会修改根目录最终报告。`snapshot_{time}s_evaporation_times.txt` 只包含该时间区间 `(T_{k-1}, T_k]` 的增量。模拟完成、MPI 汇总后，根目录只输出 `evaporation_times.txt` 与 `bincount.txt`。
 

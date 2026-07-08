@@ -127,13 +127,15 @@ reduction:
 - `bincount.txt`: captured and not-captured time-weighted radial histograms with
   error estimates.
 - `evaporation_times.txt`: compact complete-event table with
-  `rank trajectory_id lifetime_unbinding_sec`.
+  `rank trajectory_id lifetime_unbinding_sec`, sorted by
+  `lifetime_unbinding_sec` with `rank trajectory_id` tie-breakers.
 
 When snapshots are enabled, intermediate files are written under `snapshot/`:
 
 - `snapshot_{time}s.txt`: cumulative progress report at the snapshot wall time.
 - `snapshot_{time}s_evaporation_times.txt`: complete valid evaporation events
-  newly finished in that snapshot interval.
+  newly finished in that snapshot interval, sorted by
+  `lifetime_unbinding_sec`.
 
 Snapshot files are progress diagnostics. They do not replace the final
 post-reduction `bincount.txt` and `evaporation_times.txt` products.
