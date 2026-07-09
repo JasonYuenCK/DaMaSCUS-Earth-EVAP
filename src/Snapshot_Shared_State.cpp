@@ -1,0 +1,193 @@
+#include "Snapshot_Shared_State.hpp"
+
+#include <algorithm>
+
+namespace DaMaSCUS_SUN
+{
+
+void SnapshotSharedState::Initialize(uint64_t run_id, int rank)
+{
+	std::lock_guard<std::mutex> lock(mutex_);
+	run_id_ = run_id;
+	rank_ = rank;
+	trajectory_in_progress_ = false;
+	current_trajectory_captured_ = false;
+	current_trajectory_id_ = 0;
+	current_dt_hist_.fill(0.0);
+	current_v2dt_hist_.fill(0.0);
+	completed_trajectories_ = 0;
+	captured_particles_ = 0;
+	bincount_captured_samples_ = 0;
+	bincount_not_captured_samples_ = 0;
+	captured_dt_hist_.fill(0.0);
+	captured_v2dt_hist_.fill(0.0);
+	captured_dt_sq_hist_.fill(0.0);
+	captured_v2dt_sq_hist_.fill(0.0);
+	not_captured_dt_hist_.fill(0.0);
+	not_captured_v2dt_hist_.fill(0.0);
+	not_captured_dt_sq_hist_.fill(0.0);
+	not_captured_v2dt_sq_hist_.fill(0.0);
+	evaporation_events_.clear();
+}
+
+void SnapshotSharedState::BeginTrajectory(uint64_t trajectory_id)
+{
+	std::lock_guard<std::mutex> lock(mutex_);
+	trajectory_in_progress_ = true;
+	current_trajectory_captured_ = false;
+	current_trajectory_id_ = trajectory_id;
+	current_dt_hist_.fill(0.0);
+	current_v2dt_hist_.fill(0.0);
+}
+
+void SnapshotSharedState::AddCurrentBincountStep(int bin, double dt_sec, double v2dt)
+{
+	if(bin < 0 || bin >= NUM_BINS)
+		return;
+
+	std::lock_guard<std::mutex> lock(mutex_);
+	if(!trajectory_in_progress_)
+		return;
+	current_dt_hist_[bin] += dt_sec;
+	current_v2dt_hist_[bin] += v2dt;
+}
+
+void SnapshotSharedState::MarkCurrentCaptured(bool captured)
+{
+	std::lock_guard<std::mutex> lock(mutex_);
+	if(trajectory_in_progress_)
+		current_trajectory_captured_ = captured;
+}
+
+void SnapshotSharedState::RecordCompletedTrajectory(
+	const TrajectoryBincount& bincount,
+	bool count_as_captured_bincount_sample,
+	bool count_as_not_captured_bincount_sample,
+	const std::vector<SnapshotEvaporationProgressEntry>& new_evaporation_events)
+{
+	std::lock_guard<std::mutex> lock(mutex_);
+	completed_trajectories_++;
+	if(bincount.is_captured)
+		captured_particles_++;
+
+	if(count_as_captured_bincount_sample)
+	{
+		bincount_captured_samples_++;
+		for(int bin = 0; bin < NUM_BINS; bin++)
+		{
+			captured_dt_hist_[bin] += bincount.dt_hist[bin];
+			captured_v2dt_hist_[bin] += bincount.v2dt_hist[bin];
+			captured_dt_sq_hist_[bin] += bincount.dt_hist[bin] * bincount.dt_hist[bin];
+			captured_v2dt_sq_hist_[bin] += bincount.v2dt_hist[bin] * bincount.v2dt_hist[bin];
+		}
+	}
+
+	if(count_as_not_captured_bincount_sample)
+	{
+		bincount_not_captured_samples_++;
+		for(int bin = 0; bin < NUM_BINS; bin++)
+		{
+			not_captured_dt_hist_[bin] += bincount.dt_hist[bin];
+			not_captured_v2dt_hist_[bin] += bincount.v2dt_hist[bin];
+			not_captured_dt_sq_hist_[bin] += bincount.dt_hist[bin] * bincount.dt_hist[bin];
+			not_captured_v2dt_sq_hist_[bin] += bincount.v2dt_hist[bin] * bincount.v2dt_hist[bin];
+		}
+	}
+
+	evaporation_events_.insert(evaporation_events_.end(), new_evaporation_events.begin(), new_evaporation_events.end());
+	ClearCurrentTrajectoryLocked();
+}
+
+SnapshotRankState SnapshotSharedState::CopyForSnapshot(
+	int snapshot_index,
+	double rank_elapsed_wall_sec,
+	double target_wall_sec,
+	size_t evaporation_begin,
+	size_t& evaporation_end) const
+{
+	std::lock_guard<std::mutex> lock(mutex_);
+	evaporation_end = evaporation_begin;
+	while(evaporation_end < evaporation_events_.size()
+	      && evaporation_events_[evaporation_end].completion_wall_time_sec <= target_wall_sec)
+		evaporation_end++;
+	return CopyLocked(snapshot_index, false, rank_elapsed_wall_sec, evaporation_begin, evaporation_end);
+}
+
+SnapshotRankState SnapshotSharedState::CopyFinal(double computing_time_sec, size_t evaporation_begin) const
+{
+	std::lock_guard<std::mutex> lock(mutex_);
+	return CopyLocked(-1, true, computing_time_sec, evaporation_begin, evaporation_events_.size());
+}
+
+void SnapshotSharedState::ClearCurrentTrajectoryLocked()
+{
+	trajectory_in_progress_ = false;
+	current_trajectory_captured_ = false;
+	current_trajectory_id_ = 0;
+	current_dt_hist_.fill(0.0);
+	current_v2dt_hist_.fill(0.0);
+}
+
+SnapshotRankState SnapshotSharedState::CopyLocked(
+	int snapshot_index,
+	bool done,
+	double rank_elapsed_wall_sec,
+	size_t evaporation_begin,
+	size_t evaporation_end) const
+{
+	SnapshotRankState state;
+	state.run_id = run_id_;
+	state.rank = rank_;
+	state.snapshot_index = snapshot_index;
+	state.done = done ? 1 : 0;
+	state.trajectory_in_progress = (!done && trajectory_in_progress_) ? 1 : 0;
+	state.local_captured = captured_particles_;
+	state.local_total = completed_trajectories_;
+	state.bincount_captured_samples = bincount_captured_samples_;
+	state.bincount_not_captured_samples = bincount_not_captured_samples_;
+	state.current_trajectory_id = state.trajectory_in_progress ? current_trajectory_id_ : 0;
+	state.rank_elapsed_wall_sec = rank_elapsed_wall_sec;
+	state.current_trajectory_captured = (state.trajectory_in_progress && current_trajectory_captured_) ? 1 : 0;
+	if(state.trajectory_in_progress)
+	{
+		state.current_trajectory_dt_hist = current_dt_hist_;
+		state.current_trajectory_v2dt_hist = current_v2dt_hist_;
+	}
+	state.captured_dt_hist = captured_dt_hist_;
+	state.captured_v2dt_hist = captured_v2dt_hist_;
+	state.captured_dt_sq_hist = captured_dt_sq_hist_;
+	state.captured_v2dt_sq_hist = captured_v2dt_sq_hist_;
+	state.not_captured_dt_hist = not_captured_dt_hist_;
+	state.not_captured_v2dt_hist = not_captured_v2dt_hist_;
+	state.not_captured_dt_sq_hist = not_captured_dt_sq_hist_;
+	state.not_captured_v2dt_sq_hist = not_captured_v2dt_sq_hist_;
+
+	evaporation_begin = std::min(evaporation_begin, evaporation_events_.size());
+	evaporation_end = std::min(evaporation_end, evaporation_events_.size());
+	state.new_evaporation_events.reserve(evaporation_end - evaporation_begin);
+	for(size_t index = evaporation_begin; index < evaporation_end; index++)
+		state.new_evaporation_events.push_back(evaporation_events_[index]);
+	return state;
+}
+
+SnapshotRecorder::SnapshotRecorder(SnapshotSharedState& state)
+: state_(state)
+{
+}
+
+void SnapshotRecorder::BeginTrajectory(uint64_t trajectory_id)
+{
+	state_.BeginTrajectory(trajectory_id);
+}
+
+void SnapshotRecorder::AddCurrentBincountStep(int bin, double dt_sec, double v2dt)
+{
+	state_.AddCurrentBincountStep(bin, dt_sec, v2dt);
+}
+
+void SnapshotRecorder::MarkCurrentCaptured(bool captured)
+{
+	state_.MarkCurrentCaptured(captured);
+}
+
+}	// namespace DaMaSCUS_SUN

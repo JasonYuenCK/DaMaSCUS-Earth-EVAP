@@ -19,7 +19,8 @@ using namespace libphysica::natural_units;
 
 int main(int argc, char* argv[])
 {
-	MPI_Init(&argc, &argv);
+	int mpi_thread_provided = MPI_THREAD_SINGLE;
+	MPI_Init_thread(&argc, &argv, MPI_THREAD_FUNNELED, &mpi_thread_provided);
 	int mpi_processes, mpi_rank;
 	MPI_Comm_size(MPI_COMM_WORLD, &mpi_processes);
 	MPI_Comm_rank(MPI_COMM_WORLD, &mpi_rank);
@@ -47,6 +48,13 @@ int main(int argc, char* argv[])
 
 	// Configuration parameters
 	Configuration cfg(argv[1], mpi_rank);
+	if(cfg.snapshot_config.enabled && mpi_thread_provided < MPI_THREAD_FUNNELED)
+	{
+		if(mpi_rank == 0)
+			std::cerr << "Warning: MPI implementation does not provide MPI_THREAD_FUNNELED; "
+			          << "heartbeat snapshot is disabled. Final MPI-reduced outputs are unaffected." << std::endl;
+		cfg.snapshot_config.enabled = false;
+	}
 	Solar_Model SSM;
 	cfg.Print_Summary(mpi_rank);
 	MPI_Barrier(MPI_COMM_WORLD);

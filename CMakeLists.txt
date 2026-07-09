@@ -28,6 +28,7 @@ set(EXTERNAL_DIR  ${PROJECT_SOURCE_DIR}/external)
 #External projects
 find_package(MPI REQUIRED)
 include_directories(${MPI_INCLUDE_PATH})
+find_package(Threads REQUIRED)
 
 # Prefer Homebrew Boost on local macOS builds, but do not force that path on
 # clusters where Boost is supplied by the module environment.

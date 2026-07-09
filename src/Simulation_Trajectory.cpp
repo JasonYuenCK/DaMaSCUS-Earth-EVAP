@@ -17,6 +17,7 @@
 #include "libphysica/Statistics.hpp"
 
 #include "obscura/Astronomy.hpp"
+#include "Snapshot_Shared_State.hpp"
 
 namespace DaMaSCUS_SUN
 {
@@ -39,7 +40,6 @@ constexpr double OPTICAL_DEPTH_ABSOLUTE_TOLERANCE = 1.0e-12 * MAX_OPTICAL_DEPTH_
 constexpr unsigned int MAX_OPTICAL_DEPTH_RETRIES = 100;
 constexpr std::size_t MAX_OPTICAL_DEPTH_PIECES = 4;
 constexpr std::size_t CAPTURE_MODE_OPTICAL_DEPTH_PIECES = 2;
-constexpr unsigned long int SNAPSHOT_PROGRESS_STEP_INTERVAL = 16;
 constexpr unsigned long int TARGET_VELOCITY_MAX_REJECTION_ATTEMPTS = 1000000UL;
 
 struct OpticalDepthPiece
@@ -544,28 +544,16 @@ void Trajectory_Result::Print_Summary(Solar_Model& solar_model, unsigned int mpi
 
 // 2. Simulator
 Trajectory_Simulator::Trajectory_Simulator(const Solar_Model& model, unsigned long int max_time_steps, unsigned long int max_scatterings, double max_distance)
-: solar_model(model), free_flight_reference_energy_eV(std::numeric_limits<double>::quiet_NaN()), current_physical_bound_state(false), terminate_on_capture(false), trajectory_in_progress(false), accumulated_snapshot_overhead_sec(0.0), maximum_time_steps(max_time_steps), maximum_scatterings(max_scatterings), maximum_distance(max_distance), current_mpi_rank(0), current_trajectory_id(0)
+: solar_model(model), free_flight_reference_energy_eV(std::numeric_limits<double>::quiet_NaN()), current_physical_bound_state(false), terminate_on_capture(false), snapshot_recorder(nullptr), trajectory_in_progress(false), maximum_time_steps(max_time_steps), maximum_scatterings(max_scatterings), maximum_distance(max_distance), current_mpi_rank(0), current_trajectory_id(0)
 {
 	std::random_device rd;
 	PRNG.seed(rd());
 	rate_nuclei_cache.resize(solar_model.target_isotopes.size());
 }
 
-void Trajectory_Simulator::Publish_Snapshot_Progress() const
+void Trajectory_Simulator::Set_Snapshot_Recorder(SnapshotRecorder* recorder)
 {
-	if(snapshot_progress_callback)
-	{
-		const auto callback_start = std::chrono::steady_clock::now();
-		snapshot_progress_callback(*this);
-		const auto callback_end = std::chrono::steady_clock::now();
-		if(trajectory_in_progress)
-			accumulated_snapshot_overhead_sec += 1.0e-9 * std::chrono::duration_cast<std::chrono::nanoseconds>(callback_end - callback_start).count();
-	}
-}
-
-void Trajectory_Simulator::Set_Snapshot_Progress_Callback(std::function<void(const Trajectory_Simulator&)> callback)
-{
-	snapshot_progress_callback = std::move(callback);
+	snapshot_recorder = recorder;
 }
 
 void Trajectory_Simulator::Enable_Capture_Mode(bool enabled)
@@ -589,7 +577,7 @@ double Trajectory_Simulator::Current_Trajectory_Wall_Time_Seconds() const
 		return 0.0;
 
 	const double total_wall_time_sec = 1.0e-9 * std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - current_trajectory_wall_start).count();
-	return std::max(0.0, total_wall_time_sec - accumulated_snapshot_overhead_sec);
+	return std::max(0.0, total_wall_time_sec);
 }
 
 const TrajectoryBincount& Trajectory_Simulator::Current_Trajectory_Bincount() const
@@ -607,6 +595,8 @@ void Trajectory_Simulator::Accumulate_Bincount_Step(double r_km, double v2_km2s2
 	if(bin_idx >= NUM_BINS) return;
 	current_bincount.dt_hist[bin_idx] += dt_sec;
 	current_bincount.v2dt_hist[bin_idx] += v2_km2s2 * dt_sec;
+	if(snapshot_recorder != nullptr)
+		snapshot_recorder->AddCurrentBincountStep(bin_idx, dt_sec, v2_km2s2 * dt_sec);
 }
 
 void Trajectory_Simulator::Reset_Bincount_Anchor(const Event& event)
@@ -673,10 +663,12 @@ bool Trajectory_Simulator::Update_Capture_State(double radius, double speed, dou
 			current_bincount.t_capture = t_now_sec;
 			current_bincount.t_first_negative = t_now_sec;
 			current_bincount.t_last_bound = t_now_sec;
-			current_bincount.r_first_negative_km = In_Units(radius, km);
-			current_bincount.E_first_negative_eV = E_eV;
-			current_bincount.dE_first_negative_from_prev_eV = dE_from_prev_eV;
-		}
+				current_bincount.r_first_negative_km = In_Units(radius, km);
+				current_bincount.E_first_negative_eV = E_eV;
+				current_bincount.dE_first_negative_from_prev_eV = dE_from_prev_eV;
+				if(snapshot_recorder != nullptr)
+					snapshot_recorder->MarkCurrentCaptured(true);
+			}
 		else if(!was_bound)
 		{
 			current_bincount.t_final_unbinding_scatter = std::numeric_limits<double>::quiet_NaN();
@@ -749,7 +741,6 @@ TrajectoryTerminationReason Trajectory_Simulator::Propagate_Freely(Event& curren
 		          << ", phase=" << phase << ", step_attempts=" << step_attempts
 		          << ", traj_wall=" << traj_wall << "s > " << max_trajectory_wall_time_sec
 		          << "s). Aborting trajectory." << std::endl;
-		Publish_Snapshot_Progress();
 		current_event = to_absolute_event(particle_propagator.Event_In_3D());
 		return true;
 	};
@@ -808,14 +799,13 @@ TrajectoryTerminationReason Trajectory_Simulator::Propagate_Freely(Event& curren
 			particle_propagator.time_step = RK45_Sanitized_Time_Step(particle_propagator.time_step);
 			rate_before = solar_model.Total_DM_Scattering_Rate(DM, r_before, v_before);
 			if(!std::isfinite(rate_before) || rate_before < 0.0)
-			{
-				std::cerr << "\nWarning in Propagate_Freely(): invalid pre-step scattering rate (rank "
-				          << current_mpi_rank << ", traj " << current_trajectory_id
-				          << ", rate=" << rate_before << "). Marking trajectory as numerically failed." << std::endl;
-				Publish_Snapshot_Progress();
-				current_event = to_absolute_event(particle_propagator.Event_In_3D());
-				return TrajectoryTerminationReason::NumericalFailure;
-			}
+				{
+					std::cerr << "\nWarning in Propagate_Freely(): invalid pre-step scattering rate (rank "
+					          << current_mpi_rank << ", traj " << current_trajectory_id
+					          << ", rate=" << rate_before << "). Marking trajectory as numerically failed." << std::endl;
+					current_event = to_absolute_event(particle_propagator.Event_In_3D());
+					return TrajectoryTerminationReason::NumericalFailure;
+				}
 			if(rate_before > 0.0)
 			{
 				particle_propagator.time_step = std::min(particle_propagator.time_step, optical_depth_step_limit / rate_before);
@@ -831,35 +821,31 @@ TrajectoryTerminationReason Trajectory_Simulator::Propagate_Freely(Event& curren
 		Event event_after = particle_propagator.Event_In_3D();
 
 		if(!rk_step_ok)
-		{
-			std::cerr << "\nWarning in Propagate_Freely(): RK45 step failed tolerance after retry limits (rank "
-			          << current_mpi_rank << ", traj " << current_trajectory_id
-			          << "). Marking trajectory as numerically failed." << std::endl;
-			Publish_Snapshot_Progress();
-			current_event = to_absolute_event(particle_propagator.Event_In_3D());
-			return TrajectoryTerminationReason::NumericalFailure;
-		}
+			{
+				std::cerr << "\nWarning in Propagate_Freely(): RK45 step failed tolerance after retry limits (rank "
+				          << current_mpi_rank << ", traj " << current_trajectory_id
+				          << "). Marking trajectory as numerically failed." << std::endl;
+				current_event = to_absolute_event(particle_propagator.Event_In_3D());
+				return TrajectoryTerminationReason::NumericalFailure;
+			}
 
-		if(!std::isfinite(r_after) || !std::isfinite(v_after) || !std::isfinite(actual_dt) || actual_dt <= 0.0)
-		{
-			// 出现 NaN/Inf，轨迹已无法继续。向外传一次进度，再中止这条轨迹，
-			// 避免 rank 被单条坏轨迹卡住导致 snapshot / MPI_Barrier 死锁。
-			std::cerr << "\nWarning in Propagate_Freely(): non-finite state (rank " << current_mpi_rank
-			          << ", traj " << current_trajectory_id << ", r=" << r_after
-			          << ", v=" << v_after << ", dt=" << actual_dt << "). Aborting trajectory." << std::endl;
-			Publish_Snapshot_Progress();
-			current_event = to_absolute_event(particle_propagator.Event_In_3D());
-			return TrajectoryTerminationReason::NonFiniteState;
-		}
+			if(!std::isfinite(r_after) || !std::isfinite(v_after) || !std::isfinite(actual_dt) || actual_dt <= 0.0)
+			{
+				// 出现 NaN/Inf，轨迹已无法继续。中止这条轨迹，避免 rank 被单条坏轨迹卡住。
+				std::cerr << "\nWarning in Propagate_Freely(): non-finite state (rank " << current_mpi_rank
+				          << ", traj " << current_trajectory_id << ", r=" << r_after
+				          << ", v=" << v_after << ", dt=" << actual_dt << "). Aborting trajectory." << std::endl;
+				current_event = to_absolute_event(particle_propagator.Event_In_3D());
+				return TrajectoryTerminationReason::NonFiniteState;
+			}
 
 		if(v_after > v_max)
-		{
-			std::cerr << "\nWarning in Propagate_Freely(): DM speed exceeds the maximum of v_max = " << v_max << std::endl
-					  << "\tAbort simulation." << std::endl;
-			Publish_Snapshot_Progress();
-			current_event = to_absolute_event(particle_propagator.Event_In_3D());
-			return TrajectoryTerminationReason::SpeedLimit;
-		}
+			{
+				std::cerr << "\nWarning in Propagate_Freely(): DM speed exceeds the maximum of v_max = " << v_max << std::endl
+						  << "\tAbort simulation." << std::endl;
+				current_event = to_absolute_event(particle_propagator.Event_In_3D());
+				return TrajectoryTerminationReason::SpeedLimit;
+			}
 
 		if(abort_if_wall_time_exceeded("after_rk45_step"))
 			return TrajectoryTerminationReason::WallTimeLimit;
@@ -899,14 +885,13 @@ TrajectoryTerminationReason Trajectory_Simulator::Propagate_Freely(Event& curren
 				                           delta_tau,
 				                           invalid_rate);
 			if(invalid_rate || !std::isfinite(delta_tau) || delta_tau < 0.0)
-			{
-				std::cerr << "\nWarning in Propagate_Freely(): invalid scattering rate (rank "
-				          << current_mpi_rank << ", traj " << current_trajectory_id
-				          << "). Marking trajectory as numerically failed." << std::endl;
-				Publish_Snapshot_Progress();
-				current_event = to_absolute_event(event_after);
-				return TrajectoryTerminationReason::NumericalFailure;
-			}
+				{
+					std::cerr << "\nWarning in Propagate_Freely(): invalid scattering rate (rank "
+					          << current_mpi_rank << ", traj " << current_trajectory_id
+					          << "). Marking trajectory as numerically failed." << std::endl;
+					current_event = to_absolute_event(event_after);
+					return TrajectoryTerminationReason::NumericalFailure;
+				}
 
 				const double tau_error_scale = std::max(delta_tau, OPTICAL_DEPTH_ABSOLUTE_TOLERANCE);
 				const double tau_relative_error = std::fabs(delta_tau - tau_two_piece) / tau_error_scale;
@@ -917,16 +902,15 @@ TrajectoryTerminationReason Trajectory_Simulator::Propagate_Freely(Event& curren
 					optical_depth_retries++;
 					if(optical_depth_retries > MAX_OPTICAL_DEPTH_RETRIES)
 					{
-						std::cerr << "\nWarning in Propagate_Freely(): optical-depth step rejected more than "
-						          << MAX_OPTICAL_DEPTH_RETRIES << " consecutive times (rank "
-						          << current_mpi_rank << ", traj " << current_trajectory_id
-						          << ", delta_tau=" << delta_tau
-						          << ", relative_error=" << tau_relative_error
-						          << "). Marking trajectory as numerically failed." << std::endl;
-						Publish_Snapshot_Progress();
-						current_event = to_absolute_event(event_before);
-						return TrajectoryTerminationReason::NumericalFailure;
-					}
+							std::cerr << "\nWarning in Propagate_Freely(): optical-depth step rejected more than "
+							          << MAX_OPTICAL_DEPTH_RETRIES << " consecutive times (rank "
+							          << current_mpi_rank << ", traj " << current_trajectory_id
+							          << ", delta_tau=" << delta_tau
+							          << ", relative_error=" << tau_relative_error
+							          << "). Marking trajectory as numerically failed." << std::endl;
+							current_event = to_absolute_event(event_before);
+							return TrajectoryTerminationReason::NumericalFailure;
+						}
 
 					particle_propagator = propagator_before;
 					double factor = RK45_MAX_STEP_FACTOR;
@@ -996,24 +980,20 @@ TrajectoryTerminationReason Trajectory_Simulator::Propagate_Freely(Event& curren
 				{
 					time_steps++;
 					optical_depth_retries = 0;
-					commit_accepted_event(boundary_event);
-					current_event = to_absolute_event(inbound_boundary_event);
-					reset_propagator_at_absolute_event(current_event);
-					if((time_steps % SNAPSHOT_PROGRESS_STEP_INTERVAL) == 0u)
-						Publish_Snapshot_Progress();
-					continue;
+						commit_accepted_event(boundary_event);
+						current_event = to_absolute_event(inbound_boundary_event);
+						reset_propagator_at_absolute_event(current_event);
+						continue;
+					}
 				}
-			}
 		}
 
 		time_steps++;
-		optical_depth_retries = 0;
-		const bool captured_now = commit_accepted_event(accepted_event);
-		current_event = to_absolute_event(accepted_event);
-		if((time_steps % SNAPSHOT_PROGRESS_STEP_INTERVAL) == 0u)
-			Publish_Snapshot_Progress();
-		if(terminate_on_capture && captured_now)
-			return TrajectoryTerminationReason::CaptureMode;
+			optical_depth_retries = 0;
+			const bool captured_now = commit_accepted_event(accepted_event);
+			current_event = to_absolute_event(accepted_event);
+			if(terminate_on_capture && captured_now)
+				return TrajectoryTerminationReason::CaptureMode;
 
 		if(reflection || scattering)
 			break;
@@ -1166,8 +1146,8 @@ Trajectory_Result Trajectory_Simulator::Simulate(const Event& initial_condition,
 	current_trajectory_id++;
 	trajectory_in_progress = true;
 	current_trajectory_wall_start = std::chrono::steady_clock::now();
-	accumulated_snapshot_overhead_sec = 0.0;
-	Publish_Snapshot_Progress();
+	if(snapshot_recorder != nullptr)
+		snapshot_recorder->BeginTrajectory(current_trajectory_id);
 
 	TrajectoryTerminationReason termination_reason = TrajectoryTerminationReason::Unknown;
 	while(number_of_scatterings < maximum_scatterings)
