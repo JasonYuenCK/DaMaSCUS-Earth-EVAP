@@ -47,8 +47,26 @@ void MPI_Trace_Point(int mpi_rank, const std::string& label)
 }
 
 constexpr unsigned long int CAPTURE_MODE_MPI_SYNC_INTERVAL = 32UL;
+constexpr unsigned long int NORMAL_MODE_MPI_SYNC_INTERVAL_FALLBACK = 128UL;
 constexpr double NUMERICAL_FAILURE_WARNING_FRACTION = 1.0e-4;
 constexpr double NUMERICAL_FAILURE_ABORT_FRACTION = 1.0e-2;
+
+unsigned long int Normal_Mode_MPI_Sync_Interval(double sigma_cm2)
+{
+	if(!std::isfinite(sigma_cm2) || sigma_cm2 <= 0.0)
+		return NORMAL_MODE_MPI_SYNC_INTERVAL_FALLBACK;
+	if(sigma_cm2 >= 1.0e-35)
+		return 64UL;
+	if(sigma_cm2 >= 1.0e-36)
+		return 128UL;
+	if(sigma_cm2 >= 1.0e-37)
+		return 1024UL;
+	if(sigma_cm2 >= 1.0e-38)
+		return 8192UL;
+	if(sigma_cm2 >= 1.0e-39)
+		return 65536UL;
+	return 1048576UL;
+}
 
 bool Is_Completed_Evaporation_Record(const EvaporationRecord& rec)
 {
@@ -1098,6 +1116,7 @@ bool Recover_Evaporation_Time_File_From_Blocks(const std::string& snapshot_root,
 
 Simulation_Data::Simulation_Data(unsigned int sample_size, unsigned int max_trajectories, double u_min, unsigned int iso_rings)
 : requested_captured_particles(sample_size),
+  normal_mode_mpi_sync_interval(NORMAL_MODE_MPI_SYNC_INTERVAL_FALLBACK),
   number_of_trajectories(0), number_of_free_particles(0), number_of_reflected_particles(0), number_of_captured_particles(0),
   number_of_complete_evaporation_particles(0), number_of_censored_captured_particles(0),
   number_of_invalid_survival_captured_particles(0),
@@ -1137,6 +1156,7 @@ void Simulation_Data::Generate_Data(obscura::DM_Particle& DM, Solar_Model& solar
 {
 	if(capture_mode)
 		snapshot_cfg.enabled = false;
+	normal_mode_mpi_sync_interval = capture_mode ? 0UL : Normal_Mode_MPI_Sync_Interval(In_Units(DM.Sigma_Proton(), cm * cm));
 
 	auto time_start = std::chrono::system_clock::now();
 	unsigned long int local_captured = 0;
@@ -1310,7 +1330,7 @@ void Simulation_Data::Generate_Data(obscura::DM_Particle& DM, Solar_Model& solar
 		});
 
 	unsigned long int global_captured = 0;
-	const unsigned long int mpi_sync_interval = capture_mode ? CAPTURE_MODE_MPI_SYNC_INTERVAL : 1UL;
+	const unsigned long int mpi_sync_interval = capture_mode ? CAPTURE_MODE_MPI_SYNC_INTERVAL : normal_mode_mpi_sync_interval;
 	auto select_trajectory_batch = [&](unsigned long int remaining_captures, unsigned long int& total_assigned)
 	{
 		total_assigned = 0;
@@ -1330,7 +1350,7 @@ void Simulation_Data::Generate_Data(obscura::DM_Particle& DM, Solar_Model& solar
 		if(total_round_capacity == 0)
 			return 0UL;
 
-		const unsigned long int attempt_budget = std::min(remaining_captures, total_round_capacity);
+		const unsigned long int attempt_budget = capture_mode ? std::min(remaining_captures, total_round_capacity) : total_round_capacity;
 		unsigned long int local_batch = 0;
 		for(int rank = 0; rank < mpi_processes; rank++)
 		{
@@ -1784,6 +1804,7 @@ void Simulation_Data::Write_Output_Files(const std::string& output_dir, obscura:
 		f << "# numerical_failures = " << number_of_numerical_failures << "\n";
 		f << "# initial_shift_failures = " << number_of_initial_shift_failures << "\n";
 		f << "# final_reflection_shift_failures = " << number_of_final_reflection_shift_failures << "\n";
+		f << "# normal_mode_mpi_sync_interval = " << normal_mode_mpi_sync_interval << "\n";
 		f << "# capture_rate_valid = " << std::fixed << std::setprecision(8) << Capture_Ratio_Valid() << "\n";
 		f << "# numerical_failure_rate = " << std::fixed << std::setprecision(8) << Numerical_Failure_Ratio() << "\n";
 	};
@@ -1967,6 +1988,7 @@ void Simulation_Data::Print_Summary(unsigned int mpi_rank)
 				  << "Reflected particles valid [%]:\t" << libphysica::Round(100.0 * Reflection_Ratio_Valid()) << std::endl
 				  << "Captured particles valid [%]:\t" << libphysica::Round(100.0 * Capture_Ratio_Valid()) << std::endl
 				  << "Captured count:\t\t\t" << number_of_captured_particles << std::endl
+				  << "Normal-mode MPI sync interval:\t" << normal_mode_mpi_sync_interval << std::endl
 				  << "Numerical failure count:\t" << number_of_numerical_failures << std::endl
 				  << "Initial shift failures:\t\t" << number_of_initial_shift_failures << std::endl
 				  << "Final reflection shift failures:\t" << number_of_final_reflection_shift_failures << std::endl

@@ -388,7 +388,7 @@ $$\sum \Delta t,\qquad \sum v^2 \Delta t$$
 | **反射（Reflected）** | $N_\text{scat} \geq 1$，$v > v_\text{esc}$，$r > R_\odot$ | 散射后仍保持正能量并逃逸 |
 | **捕获（Captured）** | $E = \frac{1}{2}m_\chi(v^2 - v_\text{esc}^2) < 0$ | 散射后总能量为负，被引力束缚 |
 
-**样本计数逻辑**：`sample_size` 在当前实现中表示目标 captured 数量，而不是固定总入射轨迹数。每个 MPI rank 的目标捕获数为 `ceil(sample_size / N_ranks)`；总轨迹数由实际达到目标捕获数前经历的所有 free / reflected / captured 轨迹共同决定。未设置 `max_trajectories` 时，模拟只在达到该目标后结束；仅在显式设置该参数时，才会达到上限后提前停止并给出 `EARLY STOP` 标记。
+**样本计数逻辑**：`sample_size` 在当前实现中表示目标 captured 数量，而不是固定总入射轨迹数。普通模式下 MPI rank 会按截面自动选择批量生成轨迹后再同步捕获数，因此最终 captured 数量可能略高于 `sample_size`；总轨迹数由实际达到目标捕获数前经历的所有 free / reflected / captured 轨迹共同决定。未设置 `max_trajectories` 时，模拟只在达到该目标后结束；仅在显式设置该参数时，才会达到上限后提前停止并给出 `EARLY STOP` 标记。
 
 ### 5.4 Phase 4: MPI数据汇总
 
@@ -548,7 +548,18 @@ Snapshot 会合并各 rank 的当前进度，包括已完成轨迹的 captured /
 
 ### 7.8 MPI 合并与负载分配
 
-每个 MPI rank 独立生成轨迹，目标捕获数为 `ceil(sample_size / N_ranks)`。如果显式设置 `max_trajectories`，其每 rank 上限为 `ceil(max_trajectories / N_ranks)`；否则不设置轨迹数上限。模拟完成后通过 `MPI_Allreduce` 合并轨迹数、捕获数、bincount、计算时间和 RK45 步数；蒸发记录通过 root-only `MPI_Gather` / `MPI_Gatherv` 汇总到 rank 0，保留产生该轨迹的 `rank`，因此 `(rank, trajectory_id)` 可唯一定位一条轨迹。
+每个 MPI rank 独立生成轨迹。普通模式会根据 DM-nucleon 截面自动选择 MPI 同步批量，在 MPI 同步之间推进，达到 `sample_size` 目标后停止，因此最终 captured 数量可能略有 overshoot。当前源码规则为：
+
+| 截面范围 [cm²] | 每 rank MPI 同步批量 |
+|---|---:|
+| `>= 1e-35` | 64 |
+| `[1e-36, 1e-35)` | 128 |
+| `[1e-37, 1e-36)` | 1024 |
+| `[1e-38, 1e-37)` | 8192 |
+| `[1e-39, 1e-38)` | 65536 |
+| `< 1e-39`，包括 `1e-40` 及更小截面 | 1048576 |
+
+实际使用的批量会写入输出文件头 `normal_mode_mpi_sync_interval`。如果显式设置 `max_trajectories`，其每 rank 上限为 `ceil(max_trajectories / N_ranks)`；否则不设置轨迹数上限。模拟完成后通过 `MPI_Allreduce` 合并轨迹数、捕获数、bincount、计算时间和 RK45 步数；蒸发记录通过 root-only `MPI_Gather` / `MPI_Gatherv` 汇总到 rank 0，保留产生该轨迹的 `rank`，因此 `(rank, trajectory_id)` 可唯一定位一条轨迹。
 
 Snapshot 模式额外使用每 rank 的二进制 checkpoint 文件来合并中间进度，避免长时间运行时只能等最终 `MPI_Allreduce`。
 

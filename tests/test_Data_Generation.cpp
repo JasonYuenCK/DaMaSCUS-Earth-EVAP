@@ -28,6 +28,14 @@ bool FileExists(const std::string& path)
 	return stat(path.c_str(), &info) == 0 && S_ISREG(info.st_mode);
 }
 
+bool FileContains(const std::string& path, const std::string& needle)
+{
+	std::ifstream file(path);
+	std::ostringstream content;
+	content << file.rdbuf();
+	return content.str().find(needle) != std::string::npos;
+}
+
 std::string TestOutputDir(const std::string& name)
 {
 	std::string dir = name + "_" + std::to_string(getpid()) + "/";
@@ -398,6 +406,7 @@ TEST(TestDataGeneration, TestDefaultOutputContract)
 	{
 		EXPECT_TRUE(FileExists(output_dir + "bincount.txt"));
 		EXPECT_TRUE(FileExists(output_dir + "evaporation_times.txt"));
+		EXPECT_TRUE(FileContains(output_dir + "bincount.txt", "# normal_mode_mpi_sync_interval = 1048576"));
 		EXPECT_FALSE(FileExists(output_dir + "evaporation_diagnostics.txt"));
 		EXPECT_FALSE(FileExists(output_dir + std::string("evaporation_") + "summary.txt"));
 		EXPECT_FALSE(FileExists(output_dir + std::string("evaporation_") + "mode_summary.txt"));

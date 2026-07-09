@@ -102,7 +102,7 @@ Configuration files use libconfig syntax. The most important controls are:
 | --- | --- |
 | `run_mode` | `"Parameter point"` for the main evaporation workflow, `"Capture"` for capture-rate runs, or `"Parameter scan"` for the older scan path. |
 | `capture_mode` | Boolean override for capture-only behavior. `run_mode = "Capture"` also enables capture mode. |
-| `sample_size` | Target number of captured particles. In MPI, each rank targets approximately `ceil(sample_size / N_ranks)` captures. |
+| `sample_size` | Target number of captured particles. Normal-mode MPI runs batch trajectories between reductions, so the final captured count may slightly exceed this target. |
 | `max_trajectories` | Optional hard cap on generated trajectories. `0` or unset means no trajectory-count cap. |
 | `interpolation_points` | Scattering-rate interpolation grid size. `0` disables interpolation; production runs should compare representative values before fixing this. |
 | `output_dir` | Root directory for generated result folders. |
@@ -110,6 +110,19 @@ Configuration files use libconfig syntax. The most important controls are:
 | `DM_cross_section_nucleon` | DM-nucleon cross section in cm^2. |
 | `DM_cross_section_electron` | DM-electron cross section in cm^2 where relevant. |
 | `maximum_number_of_scatterings` | Per-trajectory computational cutoff. Cutoff-terminated captures are not treated as clean physical evaporation events. |
+
+Normal-mode MPI synchronization uses an automatic batch size selected from the
+DM-nucleon cross section. The selected value is written to output headers as
+`normal_mode_mpi_sync_interval`.
+
+| `DM_cross_section_nucleon` range [cm^2] | MPI sync interval per rank |
+| --- | ---: |
+| `>= 1e-35` | 64 |
+| `[1e-36, 1e-35)` | 128 |
+| `[1e-37, 1e-36)` | 1024 |
+| `[1e-38, 1e-37)` | 8192 |
+| `[1e-39, 1e-38)` | 65536 |
+| `< 1e-39` including `1e-40` and below | 1048576 |
 | `snapshot_enabled` | Enables intermediate wall-clock progress reports for parameter-point runs. Disabled automatically in capture mode. |
 | `snapshot_interval` | Wall-clock spacing, in seconds, for snapshot reports. Defaults to 60 seconds when snapshots are enabled. |
 | `max_trajectory_wall_time_sec` | Optional per-trajectory wall-time guard. Useful with snapshots so one slow trajectory does not block MPI progress reporting. |
