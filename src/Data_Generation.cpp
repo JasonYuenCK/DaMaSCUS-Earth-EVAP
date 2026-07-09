@@ -176,6 +176,8 @@ struct Rank_Snapshot_State
 	int32_t trajectory_in_progress = 0;
 	uint64_t local_captured = 0;
 	uint64_t local_total = 0;
+	uint64_t bincount_captured_samples = 0;
+	uint64_t bincount_not_captured_samples = 0;
 	uint64_t current_trajectory_id = 0;
 	double rank_elapsed_wall_sec = 0.0;
 	int32_t current_trajectory_captured = 0;
@@ -194,7 +196,7 @@ struct Rank_Snapshot_State
 
 struct Snapshot_Report_State
 {
-	long long snapshot_time_label = 0;
+	double snapshot_target_wall_time_sec = 0.0;
 	double snapshot_interval_seconds = 0.0;
 	uint64_t total_trajectories = 0;
 	uint64_t captured_particles = 0;
@@ -292,11 +294,11 @@ bool Has_Bincount_Contribution(const std::array<double, NUM_BINS>& dt_hist, cons
 	    || std::any_of(v2dt_hist.begin(), v2dt_hist.end(), [](double value) { return value != 0.0; });
 }
 
-void Write_Report_Header(std::ofstream& file, double mass_gev, double sigma_cm2, uint64_t total_trajectories, uint64_t captured_particles, bool early_stopped, long long snapshot_time_label = -1, double snapshot_interval_seconds = 0.0)
+void Write_Report_Header(std::ofstream& file, double mass_gev, double sigma_cm2, uint64_t total_trajectories, uint64_t captured_particles, bool early_stopped, double snapshot_target_wall_time_sec = -1.0, double snapshot_interval_seconds = 0.0)
 {
-	if(snapshot_time_label >= 0)
+	if(snapshot_target_wall_time_sec >= 0.0)
 	{
-		file << "# snapshot_target_wall_time_s = " << snapshot_time_label << "\n";
+		file << "# snapshot_target_wall_time_s = " << std::defaultfloat << std::setprecision(10) << snapshot_target_wall_time_sec << "\n";
 		file << "# snapshot_interval_s = " << std::fixed << std::setprecision(3) << snapshot_interval_seconds << "\n";
 	}
 
@@ -344,7 +346,8 @@ std::string Evaporation_Log_Path_From_Output_Dir(const std::string& output_dir)
 	return Join_Path(output_dir, "evaporation_times.txt");
 }
 
-long long Snapshot_Time_Label_Seconds(int snapshot_index, double interval_seconds);
+double Snapshot_Target_Wall_Time_Seconds(int snapshot_index, double interval_seconds);
+std::string Snapshot_Time_File_Label(int snapshot_index, double interval_seconds);
 
 void Write_Evaporation_Log_File_Header(std::ofstream& file, double mass_gev, double sigma_cm2)
 {
@@ -487,19 +490,45 @@ bool Ensure_Directory_Exists(const std::string& directory)
 	return S_ISDIR(info.st_mode);
 }
 
-long long Snapshot_Time_Label_Seconds(int snapshot_index, double interval_seconds)
+double Snapshot_Target_Wall_Time_Seconds(int snapshot_index, double interval_seconds)
 {
-	return static_cast<long long>(std::llround(snapshot_index * interval_seconds));
+	return snapshot_index * interval_seconds;
+}
+
+std::string Snapshot_Time_File_Label(int snapshot_index, double interval_seconds)
+{
+	const double seconds = Snapshot_Target_Wall_Time_Seconds(snapshot_index, interval_seconds);
+	const long long whole_seconds = static_cast<long long>(std::llround(seconds));
+	if(std::fabs(seconds - static_cast<double>(whole_seconds)) < 1.0e-9)
+		return std::to_string(whole_seconds) + "s";
+
+	const long long milliseconds = static_cast<long long>(std::llround(seconds * 1000.0));
+	if(milliseconds > 0 && std::fabs(seconds - static_cast<double>(milliseconds) / 1000.0) < 1.0e-9)
+		return std::to_string(milliseconds) + "ms";
+
+	const long long microseconds = static_cast<long long>(std::llround(seconds * 1000000.0));
+	if(microseconds > 0 && std::fabs(seconds - static_cast<double>(microseconds) / 1000000.0) < 1.0e-9)
+		return std::to_string(microseconds) + "us";
+
+	std::ostringstream stream;
+	stream << std::fixed << std::setprecision(6) << seconds;
+	std::string label = stream.str();
+	while(!label.empty() && label.back() == '0')
+		label.pop_back();
+	if(!label.empty() && label.back() == '.')
+		label.pop_back();
+	std::replace(label.begin(), label.end(), '.', 'p');
+	return label + "s";
 }
 
 std::string Snapshot_Text_File_Path(const std::string& snapshot_root, int snapshot_index, double interval_seconds)
 {
-	return snapshot_root + "snapshot_" + std::to_string(Snapshot_Time_Label_Seconds(snapshot_index, interval_seconds)) + "s.txt";
+	return snapshot_root + "snapshot_" + Snapshot_Time_File_Label(snapshot_index, interval_seconds) + ".txt";
 }
 
 std::string Snapshot_Evaporation_Time_File_Path(const std::string& snapshot_root, int snapshot_index, double interval_seconds)
 {
-	return snapshot_root + "snapshot_" + std::to_string(Snapshot_Time_Label_Seconds(snapshot_index, interval_seconds)) + "s_evaporation_times.txt";
+	return snapshot_root + "snapshot_" + Snapshot_Time_File_Label(snapshot_index, interval_seconds) + "_evaporation_times.txt";
 }
 
 // Retired block/manifest implementation. Snapshots are now standalone atomic
@@ -762,7 +791,7 @@ bool Snapshot_Text_File_Is_Merged(const std::string& path)
 
 std::string Rank_Snapshot_Checkpoint_Path(const std::string& rank_snapshot_dir, int rank, int snapshot_index, double interval_seconds)
 {
-	return rank_snapshot_dir + "snapshot_" + std::to_string(Snapshot_Time_Label_Seconds(snapshot_index, interval_seconds)) + "s_rank" + std::to_string(rank) + ".bin";
+	return rank_snapshot_dir + "snapshot_" + Snapshot_Time_File_Label(snapshot_index, interval_seconds) + "_rank" + std::to_string(rank) + ".bin";
 }
 
 std::string Rank_Snapshot_Final_Path(const std::string& rank_snapshot_dir, int rank)
@@ -820,10 +849,12 @@ bool Write_Snapshot_Evaporation_Time_File(const std::string& snapshot_root, int 
 	return Write_Text_File_Atomically(path, snapshot_index, [&](std::ofstream& file)
 	{
 		file << "# snapshot_status = merged\n";
-		file << "# snapshot_target_wall_time_s = " << Snapshot_Time_Label_Seconds(snapshot_index, interval_seconds) << "\n";
+		file << "# snapshot_target_wall_time_s = " << std::defaultfloat << std::setprecision(10) << Snapshot_Target_Wall_Time_Seconds(snapshot_index, interval_seconds) << "\n";
 		file << "# snapshot_interval_s = " << std::fixed << std::setprecision(3) << interval_seconds << "\n";
 		file << "# completed_evaporation_events_in_interval_only = 1\n";
+		file << "# DIAGNOSTIC_ONLY = 1\n";
 		file << "# NOT_FOR_FINAL_SURVIVAL_ANALYSIS = 1\n";
+		file << "# completion_time_selected = 1\n";
 		Write_Evaporation_Log_File_Header(file, mass_gev, sigma_cm2);
 		Write_Evaporation_Log_Events(file, events);
 	});
@@ -843,6 +874,8 @@ bool Write_Rank_Snapshot_State(const std::string& path, const Rank_Snapshot_Stat
 	Write_Binary_Value(file, state.trajectory_in_progress);
 	Write_Binary_Value(file, state.local_captured);
 	Write_Binary_Value(file, state.local_total);
+	Write_Binary_Value(file, state.bincount_captured_samples);
+	Write_Binary_Value(file, state.bincount_not_captured_samples);
 	Write_Binary_Value(file, state.current_trajectory_id);
 	Write_Binary_Value(file, state.rank_elapsed_wall_sec);
 	Write_Binary_Value(file, state.current_trajectory_captured);
@@ -890,6 +923,8 @@ bool Read_Rank_Snapshot_State(const std::string& path, uint64_t expected_run_id,
 	Read_Binary_Value(file, state.trajectory_in_progress);
 	Read_Binary_Value(file, state.local_captured);
 	Read_Binary_Value(file, state.local_total);
+	Read_Binary_Value(file, state.bincount_captured_samples);
+	Read_Binary_Value(file, state.bincount_not_captured_samples);
 	Read_Binary_Value(file, state.current_trajectory_id);
 	Read_Binary_Value(file, state.rank_elapsed_wall_sec);
 	Read_Binary_Value(file, state.current_trajectory_captured);
@@ -920,10 +955,10 @@ void Accumulate_Snapshot_Report_State(Snapshot_Report_State& report, const Rank_
 {
 	report.total_trajectories += state.local_total;
 	report.captured_particles += state.local_captured;
-	report.snapshot_bincount_captured_samples += state.local_captured;
-	report.snapshot_bincount_not_captured_samples += (state.local_total - state.local_captured);
-	const double lower_wall_time = (report.snapshot_time_label > report.snapshot_interval_seconds) ? (report.snapshot_time_label - report.snapshot_interval_seconds) : 0.0;
-	const double upper_wall_time = static_cast<double>(report.snapshot_time_label);
+	report.snapshot_bincount_captured_samples += state.bincount_captured_samples;
+	report.snapshot_bincount_not_captured_samples += state.bincount_not_captured_samples;
+	const double lower_wall_time = (report.snapshot_target_wall_time_sec > report.snapshot_interval_seconds) ? (report.snapshot_target_wall_time_sec - report.snapshot_interval_seconds) : 0.0;
+	const double upper_wall_time = report.snapshot_target_wall_time_sec;
 	for(const auto& entry : state.new_evaporation_events)
 	{
 		if(entry.completion_wall_time_sec > lower_wall_time && entry.completion_wall_time_sec <= upper_wall_time)
@@ -981,7 +1016,7 @@ void Accumulate_Snapshot_Report_State(Snapshot_Report_State& report, const Rank_
 bool Load_Snapshot_Report_State(const std::string& rank_snapshot_dir, int snapshot_index, double interval_seconds, int mpi_processes, uint64_t run_id, Snapshot_Report_State& report)
 {
 	report = Snapshot_Report_State();
-	report.snapshot_time_label = Snapshot_Time_Label_Seconds(snapshot_index, interval_seconds);
+	report.snapshot_target_wall_time_sec = Snapshot_Target_Wall_Time_Seconds(snapshot_index, interval_seconds);
 	report.snapshot_interval_seconds = interval_seconds;
 
 	bool all_ranks_ready = true;
@@ -997,7 +1032,7 @@ bool Load_Snapshot_Report_State(const std::string& rank_snapshot_dir, int snapsh
 		}
 
 		const std::string final_path = Rank_Snapshot_Final_Path(rank_snapshot_dir, rank);
-		if(Read_Rank_Snapshot_State(final_path, run_id, state) && state.done && state.rank_elapsed_wall_sec <= report.snapshot_time_label)
+		if(Read_Rank_Snapshot_State(final_path, run_id, state) && state.done && state.rank_elapsed_wall_sec <= report.snapshot_target_wall_time_sec)
 		{
 			Accumulate_Snapshot_Report_State(report, state);
 			continue;
@@ -1018,7 +1053,7 @@ bool Write_Snapshot_Report_File(const std::string& snapshot_root, int snapshot_i
 	{
 		file << "# snapshot_status = merged\n";
 		file << "# Cumulative snapshot report\n";
-		Write_Report_Header(file, mass_gev, sigma_cm2, report.total_trajectories, report.captured_particles, false, report.snapshot_time_label, report.snapshot_interval_seconds);
+		Write_Report_Header(file, mass_gev, sigma_cm2, report.total_trajectories, report.captured_particles, false, report.snapshot_target_wall_time_sec, report.snapshot_interval_seconds);
 
 		double snapshot_captured_samples = static_cast<double>(report.snapshot_bincount_captured_samples);
 		double snapshot_not_captured_samples = static_cast<double>(report.snapshot_bincount_not_captured_samples);
@@ -1257,6 +1292,8 @@ void Simulation_Data::Generate_Data(obscura::DM_Particle& DM, Solar_Model& solar
 		state.trajectory_in_progress = (!done && simulator.Trajectory_In_Progress()) ? 1 : 0;
 		state.local_captured = static_cast<uint64_t>(local_captured);
 		state.local_total = static_cast<uint64_t>(local_total);
+		state.bincount_captured_samples = static_cast<uint64_t>(number_of_captured_particles);
+		state.bincount_not_captured_samples = static_cast<uint64_t>(number_of_free_particles + number_of_reflected_particles);
 		state.current_trajectory_id = state.trajectory_in_progress ? static_cast<uint64_t>(simulator.Current_Trajectory_ID()) : 0;
 		state.rank_elapsed_wall_sec = done ? computing_time : elapsed_since_start();
 		if(state.trajectory_in_progress)
@@ -1322,7 +1359,6 @@ void Simulation_Data::Generate_Data(obscura::DM_Particle& DM, Solar_Model& solar
 		}
 	};
 	early_stopped = false;
-	int last_progress_milestone = -1;
 	if(snapshot_cfg.enabled)
 		simulator.Set_Snapshot_Progress_Callback([&](const Trajectory_Simulator&)
 		{
@@ -1330,6 +1366,41 @@ void Simulation_Data::Generate_Data(obscura::DM_Particle& DM, Solar_Model& solar
 		});
 
 	unsigned long int global_captured = 0;
+	const std::vector<double> progress_milestones = {0.0, 0.01, 0.05, 0.10, 0.20, 0.40, 0.60, 0.80, 1.0};
+	size_t next_progress_milestone = 0;
+	bool progress_line_printed = false;
+	unsigned long int last_progress_line_captured = 0;
+	auto print_progress_update = [&](unsigned long int captured_particles, bool force)
+	{
+		if(mpi_rank != 0)
+			return;
+
+		const double denominator = static_cast<double>(std::max(1u, requested_captured_particles));
+		const double progress = std::min(1.0, static_cast<double>(captured_particles) / denominator);
+
+		bool should_print = force;
+		while(next_progress_milestone < progress_milestones.size()
+		      && progress + 1.0e-12 >= progress_milestones[next_progress_milestone])
+		{
+			should_print = true;
+			next_progress_milestone++;
+		}
+		if(!should_print)
+			return;
+		if(force && progress_line_printed && captured_particles == last_progress_line_captured)
+			return;
+
+		const double time_elapsed = elapsed_since_start();
+		const double captured_particle_rate = (time_elapsed > 0.0) ? static_cast<double>(captured_particles) / time_elapsed : 0.0;
+		libphysica::Print_Progress_Bar(progress, 0, 44, time_elapsed);
+		std::cout << " captured_particles=" << captured_particles << "/" << requested_captured_particles
+		          << " captured_particle_rate[1/s]=" << libphysica::Round(captured_particle_rate)
+		          << std::endl;
+		progress_line_printed = true;
+		last_progress_line_captured = captured_particles;
+	};
+	print_progress_update(global_captured, true);
+
 	const unsigned long int mpi_sync_interval = capture_mode ? CAPTURE_MODE_MPI_SYNC_INTERVAL : normal_mode_mpi_sync_interval;
 	auto select_trajectory_batch = [&](unsigned long int remaining_captures, unsigned long int& total_assigned)
 	{
@@ -1509,19 +1580,7 @@ void Simulation_Data::Generate_Data(obscura::DM_Particle& DM, Solar_Model& solar
 			}
 		}
 
-		// Progress bar (every 20%)
-		if(mpi_rank == 0)
-		{
-			const double denominator = std::max(1u, requested_captured_particles);
-			double progress = std::min(1.0, static_cast<double>(global_captured) / denominator);
-			int milestone = static_cast<int>(progress * 5);  // 0=0%,1=20%,...,5=100%
-			if(milestone > last_progress_milestone)
-			{
-				last_progress_milestone = milestone;
-				double time_elapsed = 1e-6 * std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::system_clock::now() - time_start).count();
-				libphysica::Print_Progress_Bar(progress, 0, 44, time_elapsed);
-			}
-		}
+		print_progress_update(global_captured, false);
 
 		publish_checkpoint_snapshots();
 	}
@@ -1549,11 +1608,9 @@ void Simulation_Data::Generate_Data(obscura::DM_Particle& DM, Solar_Model& solar
 			Cleanup_Final_Snapshot_States(rank_snapshot_dir, mpi_processes);
 	}
 
+	print_progress_update(global_captured, global_captured > 0 || !early_stopped);
 	if(mpi_rank == 0)
-	{
-		libphysica::Print_Progress_Bar(1.0, 0, 44, computing_time);
 		std::cout << std::endl;
-	}
 	MPI_Barrier(MPI_COMM_WORLD);
 	Perform_MPI_Reductions(capture_mode);
 }
@@ -1965,7 +2022,9 @@ void Simulation_Data::Print_Capture_Mode_Summary(unsigned int mpi_rank)
 			std::cout << "*** WARNING: numerical failure rate exceeded "
 			          << NUMERICAL_FAILURE_WARNING_FRACTION << " ***" << std::endl;
 
-		std::cout << "Simulation time:\t\t" << libphysica::Time_Display(computing_time) << std::endl
+		const double captured_particle_rate = (computing_time > 0.0) ? number_of_captured_particles / computing_time : 0.0;
+		std::cout << "Captured particle rate [1/s]:\t" << libphysica::Round(captured_particle_rate) << std::endl
+		          << "Simulation time:\t\t" << libphysica::Time_Display(computing_time) << std::endl
 		          << SEPARATOR << std::endl;
 	}
 }
@@ -2059,6 +2118,7 @@ void Simulation_Data::Print_Summary(unsigned int mpi_rank)
 
 		std::cout << std::endl
 				  << "Trajectory rate [1/s]:\t\t" << libphysica::Round(1.0 * number_of_trajectories / computing_time) << std::endl
+				  << "Captured particle rate [1/s]:\t" << libphysica::Round(1.0 * number_of_captured_particles / computing_time) << std::endl
 				  << "Capture rate [1/s]:\t\t" << libphysica::Round(1.0 * number_of_captured_particles / computing_time) << std::endl
 				  << "Simulation time:\t\t" << libphysica::Time_Display(computing_time) << std::endl;
 
