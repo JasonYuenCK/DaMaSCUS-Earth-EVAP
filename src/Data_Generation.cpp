@@ -94,6 +94,22 @@ bool Completed_Outward_Escape(TrajectoryTerminationReason reason)
 	return reason == TrajectoryTerminationReason::OutwardEscape;
 }
 
+bool Is_Computational_Truncation(TrajectoryTerminationReason reason)
+{
+	return reason == TrajectoryTerminationReason::WallTimeLimit
+	    || reason == TrajectoryTerminationReason::MaxFreeSteps
+	    || reason == TrajectoryTerminationReason::MaxScatterings;
+}
+
+bool Is_Numerical_Termination(TrajectoryTerminationReason reason)
+{
+	return reason == TrajectoryTerminationReason::NumericalFailure
+	    || reason == TrajectoryTerminationReason::NonFiniteState
+	    || reason == TrajectoryTerminationReason::SpeedLimit
+	    || reason == TrajectoryTerminationReason::EnergyDriftEscape
+	    || reason == TrajectoryTerminationReason::Unknown;
+}
+
 bool Build_Evaporation_Record(const TrajectoryBincount& bincount, int mpi_rank, unsigned long int trajectory_id, double completion_wall_time_sec, EvaporationRecord& rec)
 {
 	if(!bincount.is_captured || !std::isfinite(bincount.t_capture))
@@ -1153,9 +1169,11 @@ Simulation_Data::Simulation_Data(unsigned int sample_size, unsigned int max_traj
 : requested_captured_particles(sample_size),
   normal_mode_mpi_sync_interval(NORMAL_MODE_MPI_SYNC_INTERVAL_FALLBACK),
   number_of_trajectories(0), number_of_free_particles(0), number_of_reflected_particles(0), number_of_captured_particles(0),
+  number_of_completed_outward_escapes(0),
   number_of_complete_evaporation_particles(0), number_of_censored_captured_particles(0),
   number_of_invalid_survival_captured_particles(0),
   number_of_initial_shift_failures(0), number_of_final_reflection_shift_failures(0), number_of_numerical_failures(0),
+  number_of_computational_truncations(0),
   average_number_of_scatterings(0.0), computing_time(0.0), early_stopped(false),
   mpi_rank(0), mpi_processes(1), isoreflection_rings(iso_rings), minimum_speed_threshold(u_min),
   number_of_data_points(std::vector<unsigned long int>(iso_rings, 0)),
@@ -1468,6 +1486,10 @@ void Simulation_Data::Generate_Data(obscura::DM_Particle& DM, Solar_Model& solar
 			number_of_trajectories++;
 			average_number_of_scatterings = 1.0 / number_of_trajectories * ((number_of_trajectories - 1) * average_number_of_scatterings + trajectory.number_of_scatterings);
 			const bool completed_outward_escape = Completed_Outward_Escape(trajectory.bincount.termination_reason);
+			if(initial_shift_ok && Is_Numerical_Termination(trajectory.bincount.termination_reason))
+				number_of_numerical_failures++;
+			if(Is_Computational_Truncation(trajectory.bincount.termination_reason))
+				number_of_computational_truncations++;
 
 			if(trajectory.bincount.is_captured)
 			{
@@ -1504,9 +1526,10 @@ void Simulation_Data::Generate_Data(obscura::DM_Particle& DM, Solar_Model& solar
 				}
 
 			}
-			else
+			else if(completed_outward_escape)
 			{
-				if(!capture_mode && completed_outward_escape)
+				number_of_completed_outward_escapes++;
+				if(!capture_mode)
 				{
 					// Accumulate non-captured bincount
 					for(int b = 0; b < NUM_BINS; b++)
@@ -1623,12 +1646,16 @@ void Simulation_Data::Perform_MPI_Reductions(bool capture_mode)
 	MPI_Allreduce(MPI_IN_PLACE, &number_of_trajectories, 1, MPI_UNSIGNED_LONG, MPI_SUM, MPI_COMM_WORLD);
 	MPI_Trace_Point(mpi_rank, "before allreduce number_of_captured_particles");
 	MPI_Allreduce(MPI_IN_PLACE, &number_of_captured_particles, 1, MPI_UNSIGNED_LONG, MPI_SUM, MPI_COMM_WORLD);
+	MPI_Trace_Point(mpi_rank, "before allreduce number_of_completed_outward_escapes");
+	MPI_Allreduce(MPI_IN_PLACE, &number_of_completed_outward_escapes, 1, MPI_UNSIGNED_LONG, MPI_SUM, MPI_COMM_WORLD);
 	MPI_Trace_Point(mpi_rank, "before allreduce number_of_initial_shift_failures");
 	MPI_Allreduce(MPI_IN_PLACE, &number_of_initial_shift_failures, 1, MPI_UNSIGNED_LONG, MPI_SUM, MPI_COMM_WORLD);
 	MPI_Trace_Point(mpi_rank, "before allreduce number_of_final_reflection_shift_failures");
 	MPI_Allreduce(MPI_IN_PLACE, &number_of_final_reflection_shift_failures, 1, MPI_UNSIGNED_LONG, MPI_SUM, MPI_COMM_WORLD);
 	MPI_Trace_Point(mpi_rank, "before allreduce number_of_numerical_failures");
 	MPI_Allreduce(MPI_IN_PLACE, &number_of_numerical_failures, 1, MPI_UNSIGNED_LONG, MPI_SUM, MPI_COMM_WORLD);
+	MPI_Trace_Point(mpi_rank, "before allreduce number_of_computational_truncations");
+	MPI_Allreduce(MPI_IN_PLACE, &number_of_computational_truncations, 1, MPI_UNSIGNED_LONG, MPI_SUM, MPI_COMM_WORLD);
 	MPI_Trace_Point(mpi_rank, "before allreduce average_number_of_scatterings");
 	MPI_Allreduce(MPI_IN_PLACE, &average_number_of_scatterings, 1, MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
 	average_number_of_scatterings = (number_of_trajectories > 0) ? average_number_of_scatterings / number_of_trajectories : 0.0;
@@ -1854,11 +1881,20 @@ void Simulation_Data::Write_Output_Files(const std::string& output_dir, obscura:
 
 	double mass_gev = In_Units(DM.mass, GeV);
 	double sigma_cm2 = In_Units(DM.Sigma_Proton(), cm * cm);
+	auto unresolved_not_captured_trajectories = [&]() {
+		const unsigned long int classified_trajectories = Valid_Trajectories();
+		return (number_of_trajectories > classified_trajectories)
+		       ? (number_of_trajectories - classified_trajectories)
+		       : 0UL;
+	};
 
 	auto write_header = [&](std::ofstream& f) {
 		Write_Report_Header(f, mass_gev, sigma_cm2, number_of_trajectories, number_of_captured_particles, early_stopped);
 		f << "# valid_trajectories = " << Valid_Trajectories() << "\n";
+		f << "# completed_outward_escapes = " << number_of_completed_outward_escapes << "\n";
+		f << "# unresolved_not_captured_trajectories = " << unresolved_not_captured_trajectories() << "\n";
 		f << "# numerical_failures = " << number_of_numerical_failures << "\n";
+		f << "# computational_truncations = " << number_of_computational_truncations << "\n";
 		f << "# initial_shift_failures = " << number_of_initial_shift_failures << "\n";
 		f << "# final_reflection_shift_failures = " << number_of_final_reflection_shift_failures << "\n";
 		f << "# normal_mode_mpi_sync_interval = " << normal_mode_mpi_sync_interval << "\n";
@@ -1878,10 +1914,8 @@ void Simulation_Data::Write_Output_Files(const std::string& output_dir, obscura:
 	{
 		std::ofstream f(output_dir + "/bincount.txt");
 		write_header(f);
-		const unsigned long int physical_not_captured_particles = number_of_free_particles + number_of_reflected_particles;
-		const unsigned long int raw_not_captured_particles = number_of_trajectories - number_of_captured_particles;
-		const unsigned long int excluded_not_captured_particles =
-		    (raw_not_captured_particles > physical_not_captured_particles) ? (raw_not_captured_particles - physical_not_captured_particles) : 0;
+		const unsigned long int physical_not_captured_particles = number_of_completed_outward_escapes;
+		const unsigned long int excluded_not_captured_particles = unresolved_not_captured_trajectories();
 		f << "# not_captured_bincount_samples = " << physical_not_captured_particles << "\n";
 		if(excluded_not_captured_particles > 0)
 			f << "# excluded_incomplete_not_captured = " << excluded_not_captured_particles << "\n";
@@ -1931,7 +1965,7 @@ double Simulation_Data::Reflection_Ratio(int isoreflection_ring) const
 
 unsigned long int Simulation_Data::Valid_Trajectories() const
 {
-	return (number_of_trajectories > number_of_initial_shift_failures) ? (number_of_trajectories - number_of_initial_shift_failures) : 0UL;
+	return number_of_captured_particles + number_of_completed_outward_escapes;
 }
 
 double Simulation_Data::Free_Ratio_Valid() const
@@ -2004,7 +2038,8 @@ void Simulation_Data::Print_Capture_Mode_Summary(unsigned int mpi_rank)
 		          << "Termination condition:\t\tpost-scatter E < 0" << std::endl
 		          << "File output:\t\t\tdisabled" << std::endl
 		          << "Simulated trajectories:\t\t" << number_of_trajectories << std::endl
-		          << "Valid trajectories:\t\t" << Valid_Trajectories() << std::endl
+		          << "Capture-classified trajectories:\t" << Valid_Trajectories() << std::endl
+		          << "Unresolved non-captures:\t\t" << (number_of_trajectories - Valid_Trajectories()) << std::endl
 		          << "Captured count:\t\t\t" << number_of_captured_particles << std::endl
 		          << "Capture rate raw:\t\t" << std::fixed << std::setprecision(8) << p << std::endl
 		          << "Capture rate valid:\t\t" << std::fixed << std::setprecision(8) << p_valid << std::endl
@@ -2012,6 +2047,7 @@ void Simulation_Data::Print_Capture_Mode_Summary(unsigned int mpi_rank)
 		          << "Capture rate +error (95%):\t" << std::fixed << std::setprecision(8) << (ci_upper - p) << std::endl
 		          << "Capture rate 95% CI raw:\t[" << std::fixed << std::setprecision(8) << ci_lower << ", " << ci_upper << "]" << std::endl
 		          << "Numerical failure count:\t" << number_of_numerical_failures << std::endl
+		          << "Computational truncations:\t" << number_of_computational_truncations << std::endl
 		          << "Initial shift failures:\t\t" << number_of_initial_shift_failures << std::endl
 		          << "Final reflection shift failures:\t" << number_of_final_reflection_shift_failures << std::endl
 		          << "Numerical failure rate:\t\t" << std::fixed << std::setprecision(8) << Numerical_Failure_Ratio() << std::endl;
@@ -2038,7 +2074,8 @@ void Simulation_Data::Print_Summary(unsigned int mpi_rank)
 				  << std::endl
 				  << "Results:" << std::endl
 				  << "Simulated trajectories:\t\t" << number_of_trajectories << std::endl
-				  << "Valid trajectories:\t\t" << Valid_Trajectories() << std::endl
+				  << "Capture-classified trajectories:\t" << Valid_Trajectories() << std::endl
+				  << "Unresolved non-captures:\t\t" << (number_of_trajectories - Valid_Trajectories()) << std::endl
 				  << "Average # of scatterings:\t" << libphysica::Round(average_number_of_scatterings) << std::endl
 				  << "Free particles raw [%]:\t\t" << libphysica::Round(100.0 * Free_Ratio()) << std::endl
 				  << "Reflected particles raw [%]:\t" << libphysica::Round(100.0 * Reflection_Ratio()) << std::endl
@@ -2049,6 +2086,7 @@ void Simulation_Data::Print_Summary(unsigned int mpi_rank)
 				  << "Captured count:\t\t\t" << number_of_captured_particles << std::endl
 				  << "Normal-mode MPI sync interval:\t" << normal_mode_mpi_sync_interval << std::endl
 				  << "Numerical failure count:\t" << number_of_numerical_failures << std::endl
+				  << "Computational truncations:\t" << number_of_computational_truncations << std::endl
 				  << "Initial shift failures:\t\t" << number_of_initial_shift_failures << std::endl
 				  << "Final reflection shift failures:\t" << number_of_final_reflection_shift_failures << std::endl
 				  << "Numerical failure rate:\t\t" << std::fixed << std::setprecision(6) << Numerical_Failure_Ratio() << std::endl
@@ -2119,7 +2157,6 @@ void Simulation_Data::Print_Summary(unsigned int mpi_rank)
 		std::cout << std::endl
 				  << "Trajectory rate [1/s]:\t\t" << libphysica::Round(1.0 * number_of_trajectories / computing_time) << std::endl
 				  << "Captured particle rate [1/s]:\t" << libphysica::Round(1.0 * number_of_captured_particles / computing_time) << std::endl
-				  << "Capture rate [1/s]:\t\t" << libphysica::Round(1.0 * number_of_captured_particles / computing_time) << std::endl
 				  << "Simulation time:\t\t" << libphysica::Time_Display(computing_time) << std::endl;
 
 

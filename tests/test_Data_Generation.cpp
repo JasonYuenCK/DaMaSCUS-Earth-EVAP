@@ -285,6 +285,47 @@ TEST(TestDataGeneration, TestInitialShiftFailureIsReported)
 	EXPECT_DOUBLE_EQ(data_set.Capture_Ratio_Valid(), 0.0);
 }
 
+TEST(TestDataGeneration, TestComputationallyTruncatedNonCaptureIsExcludedFromCaptureRate)
+{
+	Solar_Model SSM;
+	obscura::Standard_Halo_Model SHM;
+
+	obscura::DM_Particle_SI DM(0.01 * GeV);
+	DM.Set_Low_Mass_Mode(true);
+	DM.Set_Sigma_Proton(1.0e-100 * pb);
+	DM.Set_Sigma_Electron(1.0e-100 * pb);
+
+	Simulation_Data data_set(1, 1);
+	// Zero permitted scatterings deterministically terminates the trajectory
+	// before it can be classified as an outward escape or a sticky capture.
+	data_set.Configure(2.0 * rSun, 0, 0, 10);
+	data_set.Generate_Data(DM, SSM, SHM, SnapshotConfig(), 20260710);
+
+	EXPECT_EQ(data_set.Valid_Trajectories(), 0UL);
+	EXPECT_DOUBLE_EQ(data_set.Capture_Ratio_Valid(), 0.0);
+	EXPECT_DOUBLE_EQ(data_set.Numerical_Failure_Ratio(), 0.0);
+}
+
+TEST(TestDataGeneration, TestCaptureModeCompletedEscapeIsIncludedInCaptureRate)
+{
+	Solar_Model SSM;
+	obscura::Standard_Halo_Model SHM;
+
+	obscura::DM_Particle_SI DM(0.01 * GeV);
+	DM.Set_Low_Mass_Mode(true);
+	DM.Set_Sigma_Proton(1.0e-100 * pb);
+	DM.Set_Sigma_Electron(1.0e-100 * pb);
+	SSM.Interpolate_Total_DM_Scattering_Rate(DM, 10, 10);
+
+	Simulation_Data data_set(1, 1);
+	data_set.Configure(1.1 * rSun, 0, 500);
+	data_set.Generate_Data(DM, SSM, SHM, SnapshotConfig(), 20260710, true);
+
+	EXPECT_EQ(data_set.Valid_Trajectories(), 1UL);
+	EXPECT_DOUBLE_EQ(data_set.Capture_Ratio_Valid(), 0.0);
+	EXPECT_DOUBLE_EQ(data_set.Numerical_Failure_Ratio(), 0.0);
+}
+
 TEST(TestDataGeneration, TestDataFreeRatio)
 {
 	// ARRANGE
@@ -407,6 +448,8 @@ TEST(TestDataGeneration, TestDefaultOutputContract)
 		EXPECT_TRUE(FileExists(output_dir + "bincount.txt"));
 		EXPECT_TRUE(FileExists(output_dir + "evaporation_times.txt"));
 		EXPECT_TRUE(FileContains(output_dir + "bincount.txt", "# normal_mode_mpi_sync_interval = 1048576"));
+		EXPECT_TRUE(FileContains(output_dir + "bincount.txt", "# completed_outward_escapes = 1"));
+		EXPECT_TRUE(FileContains(output_dir + "bincount.txt", "# unresolved_not_captured_trajectories = 0"));
 		EXPECT_FALSE(FileExists(output_dir + "evaporation_diagnostics.txt"));
 		EXPECT_FALSE(FileExists(output_dir + std::string("evaporation_") + "summary.txt"));
 		EXPECT_FALSE(FileExists(output_dir + std::string("evaporation_") + "mode_summary.txt"));

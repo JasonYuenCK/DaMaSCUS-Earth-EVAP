@@ -70,12 +70,14 @@ class Simulation_Data
 	unsigned long int number_of_free_particles;
 	unsigned long int number_of_reflected_particles;
 	unsigned long int number_of_captured_particles;
+	unsigned long int number_of_completed_outward_escapes;
 		unsigned long int number_of_complete_evaporation_particles;
 		unsigned long int number_of_censored_captured_particles;
 		unsigned long int number_of_invalid_survival_captured_particles;
 		unsigned long int number_of_initial_shift_failures;
 		unsigned long int number_of_final_reflection_shift_failures;
 		unsigned long int number_of_numerical_failures;
+		unsigned long int number_of_computational_truncations;
 		double average_number_of_scatterings;
 		double computing_time;
 		bool early_stopped;
@@ -122,6 +124,8 @@ class Simulation_Data
 		double Free_Ratio() const;
 		double Capture_Ratio() const;
 		double Reflection_Ratio(int isoreflection_ring = -1) const;
+		// Outcomes usable for capture-rate normalization: sticky captures and
+		// completed outward escapes. Interrupted non-captures are excluded.
 		unsigned long int Valid_Trajectories() const;
 		double Free_Ratio_Valid() const;
 		double Capture_Ratio_Valid() const;

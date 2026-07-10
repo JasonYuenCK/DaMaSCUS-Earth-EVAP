@@ -63,20 +63,25 @@ FetchContent_Declare(googletest
   INSTALL_COMMAND   ""
   TEST_COMMAND      "" )
 
-# Version header
-execute_process( # Git commit hash
-  COMMAND git rev-parse --abbrev-ref HEAD
-  WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
-  OUTPUT_VARIABLE GIT_BRANCH
-  OUTPUT_STRIP_TRAILING_WHITESPACE )
-execute_process( # Git commit hash
-  COMMAND git log -1 --format=%h
-  WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
-  OUTPUT_VARIABLE GIT_COMMIT_HASH
-  OUTPUT_STRIP_TRAILING_WHITESPACE )
-configure_file(
-  ${INCLUDE_DIR}/version.hpp.in
-  ${GENERATED_DIR}/version.hpp )
+# Version header. A custom target runs on every build; configure_file only
+# updates the header when its content changes, so source files are not rebuilt
+# unnecessarily.
+set(VERSION_HEADER_TEMPLATE ${INCLUDE_DIR}/version.hpp.in)
+set(VERSION_HEADER ${GENERATED_DIR}/version.hpp)
+add_custom_target(generate_version_header ALL
+  COMMAND ${CMAKE_COMMAND}
+    -DSOURCE_DIR=${PROJECT_SOURCE_DIR}
+    -DTEMPLATE=${VERSION_HEADER_TEMPLATE}
+    -DOUTPUT=${VERSION_HEADER}
+    -DPROJECT_NAME=${PROJECT_NAME}
+    -DPROJECT_VERSION=${PROJECT_VERSION}
+    -DPROJECT_VERSION_MAJOR=${PROJECT_VERSION_MAJOR}
+    -DPROJECT_VERSION_MINOR=${PROJECT_VERSION_MINOR}
+    -DPROJECT_VERSION_PATCH=${PROJECT_VERSION_PATCH}
+    -P ${PROJECT_SOURCE_DIR}/cmake/GenerateVersionHeader.cmake
+  BYPRODUCTS ${VERSION_HEADER}
+  COMMENT "Refreshing generated version header"
+  VERBATIM)
 
 # Source and include directories
 include_directories( ${INCLUDE_DIR} ${MPI_INCLUDE_PATH})
