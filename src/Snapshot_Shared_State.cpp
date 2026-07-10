@@ -17,6 +17,7 @@ void SnapshotSharedState::Initialize(uint64_t run_id, int rank)
 	current_v2dt_hist_.fill(0.0);
 	completed_trajectories_ = 0;
 	captured_particles_ = 0;
+	classified_trajectories_ = 0;
 	bincount_captured_samples_ = 0;
 	bincount_not_captured_samples_ = 0;
 	captured_dt_hist_.fill(0.0);
@@ -69,6 +70,8 @@ void SnapshotSharedState::RecordCompletedTrajectory(
 	completed_trajectories_++;
 	if(bincount.is_captured)
 		captured_particles_++;
+	if(bincount.is_captured || count_as_not_captured_bincount_sample)
+		classified_trajectories_++;
 
 	if(count_as_captured_bincount_sample)
 	{
@@ -143,6 +146,7 @@ SnapshotRankState SnapshotSharedState::CopyLocked(
 	state.trajectory_in_progress = (!done && trajectory_in_progress_) ? 1 : 0;
 	state.local_captured = captured_particles_;
 	state.local_total = completed_trajectories_;
+	state.local_classified = classified_trajectories_;
 	state.bincount_captured_samples = bincount_captured_samples_;
 	state.bincount_not_captured_samples = bincount_not_captured_samples_;
 	state.current_trajectory_id = state.trajectory_in_progress ? current_trajectory_id_ : 0;

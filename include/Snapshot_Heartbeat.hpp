@@ -4,7 +4,9 @@
 #include <chrono>
 #include <condition_variable>
 #include <cstddef>
+#include <cstdint>
 #include <mutex>
+#include <set>
 #include <string>
 #include <thread>
 
@@ -28,15 +30,21 @@ class SnapshotHeartbeat
 		double sigma_cm2);
 	~SnapshotHeartbeat();
 
-	void Start();
+	bool Start(const std::chrono::steady_clock::time_point& epoch);
 	void MarkDoneAndWriteFinal(double computing_time_sec);
-	void FinalizeAfterAllRanksDone(double final_elapsed_sec);
+	bool FinalizeAfterAllRanksDone(double final_elapsed_sec);
 	void Stop();
 
   private:
-	void ThreadMain();
-	void WriteRankCheckpoint(int snapshot_index, double target_wall_sec, double actual_elapsed_sec);
-	void TryMergeUpTo(int snapshot_index, bool allow_partial);
+	void ThreadMain() noexcept;
+	void RunThread();
+	bool WriteRankCheckpoint(
+		int snapshot_index,
+		double target_wall_sec,
+		double actual_elapsed_sec,
+		bool& deadline_missed);
+	SnapshotMergeResult TryMergeIndex(int snapshot_index, bool allow_partial);
+	void ProcessMergeTick(int snapshot_index, bool local_checkpoint_missed);
 	double ElapsedSinceStart() const;
 
 	SnapshotSharedState& shared_state_;
@@ -54,12 +62,16 @@ class SnapshotHeartbeat
 	std::mutex control_mutex_;
 	std::condition_variable cv_;
 	bool started_ = false;
+	bool stopping_ = false;
 	bool stop_requested_ = false;
+	bool worker_failed_ = false;
 	std::chrono::steady_clock::time_point start_time_;
 
 	size_t first_uncommitted_evaporation_entry_ = 0;
 	int last_rank_snapshot_written_ = 0;
-	int last_merge_attempted_ = 0;
+	int highest_snapshot_index_seen_ = 0;
+	std::set<int> retry_merge_indices_;
+	std::set<int> unresolved_merge_indices_;
 };
 
 }	// namespace DaMaSCUS_SUN

@@ -17,6 +17,7 @@
 #include <numeric>
 #include <unordered_set>
 #include <sstream>
+#include <stdexcept>
 #include <sys/stat.h>
 #include <unistd.h>
 #include <utility>
@@ -97,6 +98,22 @@ bool Completed_Outward_Escape(TrajectoryTerminationReason reason)
 	return reason == TrajectoryTerminationReason::OutwardEscape;
 }
 
+bool Is_Computational_Truncation(TrajectoryTerminationReason reason)
+{
+	return reason == TrajectoryTerminationReason::WallTimeLimit
+	    || reason == TrajectoryTerminationReason::MaxFreeSteps
+	    || reason == TrajectoryTerminationReason::MaxScatterings;
+}
+
+bool Is_Numerical_Termination(TrajectoryTerminationReason reason)
+{
+	return reason == TrajectoryTerminationReason::NumericalFailure
+	    || reason == TrajectoryTerminationReason::NonFiniteState
+	    || reason == TrajectoryTerminationReason::SpeedLimit
+	    || reason == TrajectoryTerminationReason::EnergyDriftEscape
+	    || reason == TrajectoryTerminationReason::Unknown;
+}
+
 bool Build_Evaporation_Record(const TrajectoryBincount& bincount, int mpi_rank, unsigned long int trajectory_id, double completion_wall_time_sec, EvaporationRecord& rec)
 {
 	if(!bincount.is_captured || !std::isfinite(bincount.t_capture))
@@ -157,9 +174,62 @@ bool Make_Compact_Evaporation_Event(const EvaporationRecord& rec, CompactEvapora
 	return true;
 }
 
-double Capture_Ratio_From_Counts(uint64_t total_trajectories, uint64_t captured_particles)
+struct BinomialRateEstimate
 {
-	return (total_trajectories > 0) ? static_cast<double>(captured_particles) / static_cast<double>(total_trajectories) : 0.0;
+	double rate = 0.0;
+	double standard_error = 0.0;
+	double ci_lower = 0.0;
+	double ci_upper = 0.0;
+};
+
+BinomialRateEstimate Estimate_Binomial_Rate(uint64_t trials, uint64_t successes)
+{
+	BinomialRateEstimate estimate;
+	if(trials == 0)
+		return estimate;
+
+	const double N = static_cast<double>(trials);
+	estimate.rate = static_cast<double>(std::min(successes, trials)) / N;
+	estimate.standard_error = sqrt(estimate.rate * (1.0 - estimate.rate) / N);
+	const double z = 1.96;
+	const double denominator = 1.0 + z * z / N;
+	const double center = estimate.rate + z * z / (2.0 * N);
+	const double spread = z * sqrt(estimate.rate * (1.0 - estimate.rate) / N + z * z / (4.0 * N * N));
+	estimate.ci_lower = std::max(0.0, (center - spread) / denominator);
+	estimate.ci_upper = std::min(1.0, (center + spread) / denominator);
+	return estimate;
+}
+
+const char* Stop_Reason_Key(SimulationStopReason reason)
+{
+	switch(reason)
+	{
+		case SimulationStopReason::MaxTrajectoriesReached:
+			return "max_trajectories_reached";
+		case SimulationStopReason::CaptureTargetNotReached:
+			return "capture_target_not_reached";
+		case SimulationStopReason::InitialShiftFailureFractionExceeded:
+			return "initial_shift_failure_fraction_exceeded";
+		case SimulationStopReason::None:
+		default:
+			return "none";
+	}
+}
+
+const char* Stop_Reason_Display(SimulationStopReason reason)
+{
+	switch(reason)
+	{
+		case SimulationStopReason::MaxTrajectoriesReached:
+			return "max_trajectories reached";
+		case SimulationStopReason::CaptureTargetNotReached:
+			return "capture target not reached";
+		case SimulationStopReason::InitialShiftFailureFractionExceeded:
+			return "initial shift failure fraction exceeded";
+		case SimulationStopReason::None:
+		default:
+			return "none";
+	}
 }
 
 double Snapshot_Bin_Error(double sum, double sum_sq, double count)
@@ -175,44 +245,31 @@ double Snapshot_Bin_Error(double sum, double sum_sq, double count)
 	return sqrt(count * variance);
 }
 
-void Write_Report_Header(std::ofstream& file, double mass_gev, double sigma_cm2, uint64_t total_trajectories, uint64_t captured_particles, bool early_stopped, long long snapshot_time_label = -1, double snapshot_interval_seconds = 0.0)
+void Write_Report_Header(
+	std::ofstream& file,
+	double mass_gev,
+	double sigma_cm2,
+	uint64_t total_trajectories,
+	uint64_t captured_particles,
+	SimulationStopReason stop_reason)
 {
-	if(snapshot_time_label >= 0)
-	{
-		file << "# snapshot_target_wall_time_s = " << snapshot_time_label << "\n";
-		file << "# snapshot_interval_s = " << std::fixed << std::setprecision(3) << snapshot_interval_seconds << "\n";
-	}
-
 	file << "# DM_mass_GeV = " << std::scientific << std::setprecision(6) << mass_gev << "\n";
 	file << "# DM_sigma_cm2 = " << std::scientific << std::setprecision(6) << sigma_cm2 << "\n";
 	file << "# total_trajectories = " << total_trajectories << "\n";
 	file << "# captured_particles = " << captured_particles << "\n";
 
-	double p_cap = Capture_Ratio_From_Counts(total_trajectories, captured_particles);
-	file << "# capture_rate = " << std::fixed << std::setprecision(8) << p_cap << "\n";
+	const BinomialRateEstimate raw = Estimate_Binomial_Rate(total_trajectories, captured_particles);
+	file << "# capture_rate = " << std::fixed << std::setprecision(8) << raw.rate << "\n";
+	file << "# capture_rate_raw = " << std::fixed << std::setprecision(8) << raw.rate << "\n";
+	file << "# capture_rate_err = " << std::fixed << std::setprecision(8) << raw.standard_error << "\n";
+	file << "# capture_rate_raw_err = " << std::fixed << std::setprecision(8) << raw.standard_error << "\n";
+	file << "# capture_rate_CI_95_lower = " << std::fixed << std::setprecision(8) << raw.ci_lower << "\n";
+	file << "# capture_rate_CI_95_upper = " << std::fixed << std::setprecision(8) << raw.ci_upper << "\n";
+	file << "# capture_rate_raw_CI_95_lower = " << std::fixed << std::setprecision(8) << raw.ci_lower << "\n";
+	file << "# capture_rate_raw_CI_95_upper = " << std::fixed << std::setprecision(8) << raw.ci_upper << "\n";
 
-	{
-		double N = static_cast<double>(total_trajectories);
-		double p = p_cap;
-		double z = 1.96;
-		double sigma_p = (N > 0.0) ? sqrt(p * (1.0 - p) / N) : 0.0;
-		file << "# capture_rate_err = " << std::fixed << std::setprecision(8) << sigma_p << "\n";
-		if(N > 0.0)
-		{
-			double denom = 1.0 + z * z / N;
-			double center = p + z * z / (2.0 * N);
-			double spread = z * sqrt(p * (1.0 - p) / N + z * z / (4.0 * N * N));
-			double ci_lower = (center - spread) / denom;
-			double ci_upper = (center + spread) / denom;
-			if(ci_lower < 0.0) ci_lower = 0.0;
-			if(ci_upper > 1.0) ci_upper = 1.0;
-			file << "# capture_rate_CI_95_lower = " << std::fixed << std::setprecision(8) << ci_lower << "\n";
-			file << "# capture_rate_CI_95_upper = " << std::fixed << std::setprecision(8) << ci_upper << "\n";
-		}
-	}
-
-	if(early_stopped)
-		file << "# EARLY_STOP: max_trajectories reached\n";
+	if(stop_reason != SimulationStopReason::None)
+		file << "# EARLY_STOP: " << Stop_Reason_Key(stop_reason) << "\n";
 }
 
 std::string Join_Path(const std::string& directory, const std::string& name)
@@ -385,10 +442,12 @@ Simulation_Data::Simulation_Data(unsigned int sample_size, unsigned int max_traj
 : requested_captured_particles(sample_size),
   normal_mode_mpi_sync_interval(NORMAL_MODE_MPI_SYNC_INTERVAL_FALLBACK),
   number_of_trajectories(0), number_of_free_particles(0), number_of_reflected_particles(0), number_of_captured_particles(0),
+  number_of_completed_outward_escapes(0),
   number_of_complete_evaporation_particles(0), number_of_censored_captured_particles(0),
   number_of_invalid_survival_captured_particles(0),
   number_of_initial_shift_failures(0), number_of_final_reflection_shift_failures(0), number_of_numerical_failures(0),
-  average_number_of_scatterings(0.0), computing_time(0.0), early_stopped(false),
+  number_of_computational_truncations(0),
+  average_number_of_scatterings(0.0), computing_time(0.0), early_stopped(false), early_stop_reason(SimulationStopReason::None),
   mpi_rank(0), mpi_processes(1), isoreflection_rings(iso_rings), minimum_speed_threshold(u_min),
   number_of_data_points(std::vector<unsigned long int>(iso_rings, 0)),
   data(iso_rings, std::vector<libphysica::DataPoint>())
@@ -423,9 +482,18 @@ void Simulation_Data::Generate_Data(obscura::DM_Particle& DM, Solar_Model& solar
 {
 	if(capture_mode)
 		snapshot_cfg.enabled = false;
+	if(snapshot_cfg.enabled && !IsValidSnapshotIntervalSeconds(snapshot_cfg.interval_seconds))
+		throw std::invalid_argument("snapshot interval must be a positive integer number of seconds");
+	if(snapshot_cfg.enabled)
+	{
+		int mpi_thread_level = MPI_THREAD_SINGLE;
+		MPI_Query_thread(&mpi_thread_level);
+		if(mpi_thread_level < MPI_THREAD_FUNNELED)
+			throw std::runtime_error("snapshot heartbeat requires MPI_THREAD_FUNNELED or stronger thread support");
+	}
 	normal_mode_mpi_sync_interval = capture_mode ? 0UL : Normal_Mode_MPI_Sync_Interval(In_Units(DM.Sigma_Proton(), cm * cm));
 
-	auto time_start = std::chrono::system_clock::now();
+	auto time_start = std::chrono::steady_clock::now();
 	unsigned long int local_captured = 0;
 	unsigned long int local_total = 0;
 	bool initial_shift_failure_warning_emitted = false;
@@ -500,37 +568,122 @@ void Simulation_Data::Generate_Data(obscura::DM_Particle& DM, Solar_Model& solar
 				MPI_Bcast(&snapshot_run_id, 1, MPI_UNSIGNED_LONG_LONG, 0, MPI_COMM_WORLD);
 		}
 	}
-
-	auto elapsed_since_start = [&]()
-	{
-		return 1e-6 * std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::system_clock::now() - time_start).count();
-	};
-
 	std::unique_ptr<SnapshotSharedState> snapshot_state;
 	std::unique_ptr<SnapshotRecorder> snapshot_recorder;
 	std::unique_ptr<SnapshotHeartbeat> snapshot_heartbeat;
 	if(snapshot_cfg.enabled)
 	{
-		snapshot_state.reset(new SnapshotSharedState());
-		snapshot_state->Initialize(snapshot_run_id, mpi_rank);
-		snapshot_recorder.reset(new SnapshotRecorder(*snapshot_state));
-		simulator.Set_Snapshot_Recorder(snapshot_recorder.get());
-		snapshot_heartbeat.reset(new SnapshotHeartbeat(
-			*snapshot_state,
-			mpi_rank,
-			mpi_processes,
-			snapshot_run_id,
-			snapshot_root,
-			rank_snapshot_dir,
-			snapshot_interval,
-			snapshot_mass_gev,
-			snapshot_sigma_cm2));
-		snapshot_heartbeat->Start();
+		int local_objects_ready = 1;
+		try
+		{
+			snapshot_state.reset(new SnapshotSharedState());
+			snapshot_state->Initialize(snapshot_run_id, mpi_rank);
+			snapshot_recorder.reset(new SnapshotRecorder(*snapshot_state));
+			snapshot_heartbeat.reset(new SnapshotHeartbeat(
+				*snapshot_state,
+				mpi_rank,
+				mpi_processes,
+				snapshot_run_id,
+				snapshot_root,
+				rank_snapshot_dir,
+				snapshot_interval,
+				snapshot_mass_gev,
+				snapshot_sigma_cm2));
+		}
+		catch(const std::exception& error)
+		{
+			local_objects_ready = 0;
+			std::cerr << "Warning in Generate_Data(): rank " << mpi_rank
+			          << " failed to initialize snapshot heartbeat: " << error.what() << std::endl;
+		}
+		catch(...)
+		{
+			local_objects_ready = 0;
+			std::cerr << "Warning in Generate_Data(): rank " << mpi_rank
+			          << " failed to initialize snapshot heartbeat with an unknown exception." << std::endl;
+		}
+
+		int all_objects_ready = local_objects_ready;
+		MPI_Allreduce(MPI_IN_PLACE, &all_objects_ready, 1, MPI_INT, MPI_MIN, MPI_COMM_WORLD);
+		if(all_objects_ready)
+		{
+			simulator.Set_Snapshot_Recorder(snapshot_recorder.get());
+			MPI_Barrier(MPI_COMM_WORLD);
+			time_start = std::chrono::steady_clock::now();
+			int all_threads_started = snapshot_heartbeat->Start(time_start) ? 1 : 0;
+			MPI_Allreduce(MPI_IN_PLACE, &all_threads_started, 1, MPI_INT, MPI_MIN, MPI_COMM_WORLD);
+			if(!all_threads_started)
+			{
+				snapshot_heartbeat->Stop();
+				simulator.Set_Snapshot_Recorder(nullptr);
+				MPI_Barrier(MPI_COMM_WORLD);
+				if(mpi_rank == 0 && !Clear_Directory_Contents(snapshot_root))
+					std::cerr << "Warning in Generate_Data(): failed to clear snapshot files after heartbeat startup rollback." << std::endl;
+				MPI_Barrier(MPI_COMM_WORLD);
+				snapshot_cfg.enabled = false;
+			}
+		}
+
+		if(!all_objects_ready || !snapshot_cfg.enabled)
+		{
+			if(snapshot_heartbeat)
+				snapshot_heartbeat->Stop();
+			simulator.Set_Snapshot_Recorder(nullptr);
+			snapshot_heartbeat.reset();
+			snapshot_recorder.reset();
+			snapshot_state.reset();
+			snapshot_cfg.enabled = false;
+			if(mpi_rank == 0)
+				std::cerr << "Warning in Generate_Data(): snapshot heartbeat setup failed on at least one rank; "
+				             "snapshots are disabled for this run." << std::endl;
+		}
 	}
+	if(!snapshot_cfg.enabled)
+		time_start = std::chrono::steady_clock::now();
+
+	auto elapsed_since_start = [&]()
+	{
+		return 1e-6 * std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - time_start).count();
+	};
 	early_stopped = false;
-	int last_progress_milestone = -1;
+	early_stop_reason = SimulationStopReason::None;
 
 	unsigned long int global_captured = 0;
+	const std::vector<double> progress_milestones = {0.0, 0.01, 0.05, 0.10, 0.20, 0.40, 0.60, 0.80, 1.0};
+	size_t next_progress_milestone = 0;
+	bool progress_line_printed = false;
+	unsigned long int last_progress_line_captured = 0;
+	auto print_progress_update = [&](unsigned long int captured_particles, bool force)
+	{
+		if(mpi_rank != 0)
+			return;
+
+		const double denominator = static_cast<double>(std::max(1u, requested_captured_particles));
+		const double progress = std::min(1.0, static_cast<double>(captured_particles) / denominator);
+
+		bool should_print = force;
+		while(next_progress_milestone < progress_milestones.size()
+		      && progress + 1.0e-12 >= progress_milestones[next_progress_milestone])
+		{
+			should_print = true;
+			next_progress_milestone++;
+		}
+		if(!should_print)
+			return;
+		if(force && progress_line_printed && captured_particles == last_progress_line_captured)
+			return;
+
+		const double time_elapsed = elapsed_since_start();
+		const double captured_particle_rate = (time_elapsed > 0.0) ? static_cast<double>(captured_particles) / time_elapsed : 0.0;
+		libphysica::Print_Progress_Bar(progress, 0, 44, time_elapsed);
+		std::cout << " captured_particles=" << captured_particles << "/" << requested_captured_particles
+		          << " captured_particle_rate[1/s]=" << libphysica::Round(captured_particle_rate)
+		          << std::endl;
+		progress_line_printed = true;
+		last_progress_line_captured = captured_particles;
+	};
+	print_progress_update(global_captured, true);
+
 	const unsigned long int mpi_sync_interval = capture_mode ? CAPTURE_MODE_MPI_SYNC_INTERVAL : normal_mode_mpi_sync_interval;
 	auto select_trajectory_batch = [&](unsigned long int remaining_captures, unsigned long int& total_assigned)
 	{
@@ -574,6 +727,7 @@ void Simulation_Data::Generate_Data(obscura::DM_Particle& DM, Solar_Model& solar
 		if(assigned_trajectories == 0)
 		{
 			early_stopped = true;
+			early_stop_reason = SimulationStopReason::MaxTrajectoriesReached;
 			break;
 		}
 
@@ -594,49 +748,56 @@ void Simulation_Data::Generate_Data(obscura::DM_Particle& DM, Solar_Model& solar
 			                                   : Trajectory_Result(IC, IC, 0, failed_bincount);
 			const double trajectory_completion_wall_time_sec = elapsed_since_start();
 
-				local_total++;
-				number_of_trajectories++;
-				average_number_of_scatterings = 1.0 / number_of_trajectories * ((number_of_trajectories - 1) * average_number_of_scatterings + trajectory.number_of_scatterings);
-				const bool completed_outward_escape = Completed_Outward_Escape(trajectory.bincount.termination_reason);
-				std::vector<SnapshotEvaporationProgressEntry> trajectory_snapshot_evaporation_events;
+			local_total++;
+			number_of_trajectories++;
+			average_number_of_scatterings = 1.0 / number_of_trajectories * ((number_of_trajectories - 1) * average_number_of_scatterings + trajectory.number_of_scatterings);
+			const bool completed_outward_escape = Completed_Outward_Escape(trajectory.bincount.termination_reason);
+			if(initial_shift_ok && Is_Numerical_Termination(trajectory.bincount.termination_reason))
+				number_of_numerical_failures++;
+			if(Is_Computational_Truncation(trajectory.bincount.termination_reason))
+				number_of_computational_truncations++;
+			std::vector<SnapshotEvaporationProgressEntry> trajectory_snapshot_evaporation_events;
 
-				if(trajectory.bincount.is_captured)
+			if(trajectory.bincount.is_captured)
+			{
+				number_of_captured_particles++;
+				local_captured++;
+				if(!capture_mode)
 				{
-					number_of_captured_particles++;
-					local_captured++;
-					if(!capture_mode)
+					if(trajectory.bincount.event_observed)
+						number_of_complete_evaporation_particles++;
+					else
+						number_of_invalid_survival_captured_particles++;
+				}
+
+				if(!capture_mode)
+				{
+					for(int b = 0; b < NUM_BINS; b++)
 					{
-						if(trajectory.bincount.event_observed)
-							number_of_complete_evaporation_particles++;
-						else
-							number_of_invalid_survival_captured_particles++;
+						captured_dt_hist[b]   += trajectory.bincount.dt_hist[b];
+						captured_v2dt_hist[b] += trajectory.bincount.v2dt_hist[b];
+						captured_dt_sq_hist[b]   += trajectory.bincount.dt_hist[b] * trajectory.bincount.dt_hist[b];
+						captured_v2dt_sq_hist[b] += trajectory.bincount.v2dt_hist[b] * trajectory.bincount.v2dt_hist[b];
 					}
 
-					if(!capture_mode)
+					EvaporationRecord rec;
+					if(Build_Evaporation_Record(trajectory.bincount, mpi_rank, number_of_trajectories, trajectory_completion_wall_time_sec, rec))
 					{
-						for(int b = 0; b < NUM_BINS; b++)
+						if(evaporation_diagnostics_enabled)
+							evaporation_records.push_back(rec);
+						CompactEvaporationEvent event;
+						if(Make_Compact_Evaporation_Event(rec, event))
 						{
-							captured_dt_hist[b]   += trajectory.bincount.dt_hist[b];
-							captured_v2dt_hist[b] += trajectory.bincount.v2dt_hist[b];
-							captured_dt_sq_hist[b]   += trajectory.bincount.dt_hist[b] * trajectory.bincount.dt_hist[b];
-							captured_v2dt_sq_hist[b] += trajectory.bincount.v2dt_hist[b] * trajectory.bincount.v2dt_hist[b];
-						}
-
-						EvaporationRecord rec;
-						if(Build_Evaporation_Record(trajectory.bincount, mpi_rank, number_of_trajectories, trajectory_completion_wall_time_sec, rec))
-						{
-							if(evaporation_diagnostics_enabled)
-								evaporation_records.push_back(rec);
-							CompactEvaporationEvent event;
-							if(Make_Compact_Evaporation_Event(rec, event))
-							{
-								compact_evaporation_events.push_back(event);
-								trajectory_snapshot_evaporation_events.push_back(MakeSnapshotEvaporationProgressEntry(event));
-							}
+							compact_evaporation_events.push_back(event);
+							trajectory_snapshot_evaporation_events.push_back(MakeSnapshotEvaporationProgressEntry(event));
 						}
 					}
 				}
-				else if(!capture_mode && completed_outward_escape)
+			}
+			else if(completed_outward_escape)
+			{
+				number_of_completed_outward_escapes++;
+				if(!capture_mode)
 				{
 					for(int b = 0; b < NUM_BINS; b++)
 					{
@@ -671,18 +832,19 @@ void Simulation_Data::Generate_Data(obscura::DM_Particle& DM, Solar_Model& solar
 						}
 					}
 				}
-
-				if(snapshot_state)
-				{
-					const bool count_as_captured_bincount_sample = (!capture_mode && trajectory.bincount.is_captured);
-					const bool count_as_not_captured_bincount_sample = (!capture_mode && completed_outward_escape && !trajectory.bincount.is_captured);
-					snapshot_state->RecordCompletedTrajectory(
-						trajectory.bincount,
-						count_as_captured_bincount_sample,
-						count_as_not_captured_bincount_sample,
-						trajectory_snapshot_evaporation_events);
-				}
 			}
+
+			if(snapshot_state)
+			{
+				const bool count_as_captured_bincount_sample = (!capture_mode && trajectory.bincount.is_captured);
+				const bool count_as_not_captured_bincount_sample = (!capture_mode && completed_outward_escape && !trajectory.bincount.is_captured);
+				snapshot_state->RecordCompletedTrajectory(
+					trajectory.bincount,
+					count_as_captured_bincount_sample,
+					count_as_not_captured_bincount_sample,
+					trajectory_snapshot_evaporation_events);
+			}
+		}
 
 		MPI_Allreduce(&local_captured, &global_captured, 1, MPI_UNSIGNED_LONG, MPI_SUM, MPI_COMM_WORLD);
 		unsigned long int global_attempted_trajectories = 0;
@@ -703,6 +865,7 @@ void Simulation_Data::Generate_Data(obscura::DM_Particle& DM, Solar_Model& solar
 					          << NUMERICAL_FAILURE_ABORT_FRACTION
 					          << ". Stopping this run to avoid biased capture statistics." << std::endl;
 				early_stopped = true;
+				early_stop_reason = SimulationStopReason::InitialShiftFailureFractionExceeded;
 				break;
 			}
 			if(!initial_shift_failure_warning_emitted
@@ -718,43 +881,33 @@ void Simulation_Data::Generate_Data(obscura::DM_Particle& DM, Solar_Model& solar
 			}
 		}
 
-		// Progress bar (every 20%)
-		if(mpi_rank == 0)
-		{
-			const double denominator = std::max(1u, requested_captured_particles);
-			double progress = std::min(1.0, static_cast<double>(global_captured) / denominator);
-			int milestone = static_cast<int>(progress * 5);  // 0=0%,1=20%,...,5=100%
-			if(milestone > last_progress_milestone)
-			{
-				last_progress_milestone = milestone;
-				double time_elapsed = 1e-6 * std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::system_clock::now() - time_start).count();
-				libphysica::Print_Progress_Bar(progress, 0, 44, time_elapsed);
-			}
-		}
-		}
+		print_progress_update(global_captured, false);
+	}
 
 	if(global_captured < requested_captured_particles)
+	{
 		early_stopped = true;
+		if(early_stop_reason == SimulationStopReason::None)
+			early_stop_reason = SimulationStopReason::CaptureTargetNotReached;
+	}
 
-	auto time_end  = std::chrono::system_clock::now();
+	auto time_end  = std::chrono::steady_clock::now();
 	computing_time = 1e-6 * std::chrono::duration_cast<std::chrono::microseconds>(time_end - time_start).count();
 
-		if(snapshot_heartbeat)
-		{
-			snapshot_heartbeat->MarkDoneAndWriteFinal(computing_time);
-
-			MPI_Barrier(MPI_COMM_WORLD);
-			double final_snapshot_elapsed = computing_time;
-			MPI_Allreduce(MPI_IN_PLACE, &final_snapshot_elapsed, 1, MPI_DOUBLE, MPI_MAX, MPI_COMM_WORLD);
-			if(mpi_rank == 0)
-				snapshot_heartbeat->FinalizeAfterAllRanksDone(final_snapshot_elapsed);
-		}
-
-	if(mpi_rank == 0)
+	if(snapshot_heartbeat)
 	{
-		libphysica::Print_Progress_Bar(1.0, 0, 44, computing_time);
-		std::cout << std::endl;
+		snapshot_heartbeat->MarkDoneAndWriteFinal(computing_time);
+
+		MPI_Barrier(MPI_COMM_WORLD);
+		double final_snapshot_elapsed = computing_time;
+		MPI_Allreduce(MPI_IN_PLACE, &final_snapshot_elapsed, 1, MPI_DOUBLE, MPI_MAX, MPI_COMM_WORLD);
+		if(mpi_rank == 0)
+			snapshot_heartbeat->FinalizeAfterAllRanksDone(final_snapshot_elapsed);
 	}
+
+	print_progress_update(global_captured, global_captured > 0 || !early_stopped);
+	if(mpi_rank == 0)
+		std::cout << std::endl;
 	MPI_Barrier(MPI_COMM_WORLD);
 	Perform_MPI_Reductions(capture_mode);
 }
@@ -767,22 +920,25 @@ void Simulation_Data::Perform_MPI_Reductions(bool capture_mode)
 	MPI_Allreduce(MPI_IN_PLACE, &number_of_trajectories, 1, MPI_UNSIGNED_LONG, MPI_SUM, MPI_COMM_WORLD);
 	MPI_Trace_Point(mpi_rank, "before allreduce number_of_captured_particles");
 	MPI_Allreduce(MPI_IN_PLACE, &number_of_captured_particles, 1, MPI_UNSIGNED_LONG, MPI_SUM, MPI_COMM_WORLD);
+	MPI_Trace_Point(mpi_rank, "before allreduce number_of_completed_outward_escapes");
+	MPI_Allreduce(MPI_IN_PLACE, &number_of_completed_outward_escapes, 1, MPI_UNSIGNED_LONG, MPI_SUM, MPI_COMM_WORLD);
 	MPI_Trace_Point(mpi_rank, "before allreduce number_of_initial_shift_failures");
 	MPI_Allreduce(MPI_IN_PLACE, &number_of_initial_shift_failures, 1, MPI_UNSIGNED_LONG, MPI_SUM, MPI_COMM_WORLD);
 	MPI_Trace_Point(mpi_rank, "before allreduce number_of_final_reflection_shift_failures");
 	MPI_Allreduce(MPI_IN_PLACE, &number_of_final_reflection_shift_failures, 1, MPI_UNSIGNED_LONG, MPI_SUM, MPI_COMM_WORLD);
 	MPI_Trace_Point(mpi_rank, "before allreduce number_of_numerical_failures");
 	MPI_Allreduce(MPI_IN_PLACE, &number_of_numerical_failures, 1, MPI_UNSIGNED_LONG, MPI_SUM, MPI_COMM_WORLD);
+	MPI_Trace_Point(mpi_rank, "before allreduce number_of_computational_truncations");
+	MPI_Allreduce(MPI_IN_PLACE, &number_of_computational_truncations, 1, MPI_UNSIGNED_LONG, MPI_SUM, MPI_COMM_WORLD);
 	MPI_Trace_Point(mpi_rank, "before allreduce average_number_of_scatterings");
 	MPI_Allreduce(MPI_IN_PLACE, &average_number_of_scatterings, 1, MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
 	average_number_of_scatterings = (number_of_trajectories > 0) ? average_number_of_scatterings / number_of_trajectories : 0.0;
 
-	// Reduce early_stopped flag (any rank early stopped => global flag)
-	int local_es = early_stopped ? 1 : 0;
-	int global_es = 0;
-	MPI_Trace_Point(mpi_rank, "before allreduce early_stopped");
-	MPI_Allreduce(&local_es, &global_es, 1, MPI_INT, MPI_MAX, MPI_COMM_WORLD);
-	early_stopped = (global_es > 0);
+	int global_stop_reason = static_cast<int>(early_stop_reason);
+	MPI_Trace_Point(mpi_rank, "before allreduce early_stop_reason");
+	MPI_Allreduce(MPI_IN_PLACE, &global_stop_reason, 1, MPI_INT, MPI_MAX, MPI_COMM_WORLD);
+	early_stop_reason = static_cast<SimulationStopReason>(global_stop_reason);
+	early_stopped = early_stop_reason != SimulationStopReason::None;
 
 	if(capture_mode)
 	{
@@ -998,15 +1154,28 @@ void Simulation_Data::Write_Output_Files(const std::string& output_dir, obscura:
 
 	double mass_gev = In_Units(DM.mass, GeV);
 	double sigma_cm2 = In_Units(DM.Sigma_Proton(), cm * cm);
+	auto unresolved_not_captured_trajectories = [&]() {
+		const unsigned long int classified_trajectories = Valid_Trajectories();
+		return (number_of_trajectories > classified_trajectories)
+		       ? (number_of_trajectories - classified_trajectories)
+		       : 0UL;
+	};
 
 	auto write_header = [&](std::ofstream& f) {
-		Write_Report_Header(f, mass_gev, sigma_cm2, number_of_trajectories, number_of_captured_particles, early_stopped);
+		Write_Report_Header(f, mass_gev, sigma_cm2, number_of_trajectories, number_of_captured_particles, early_stop_reason);
 		f << "# valid_trajectories = " << Valid_Trajectories() << "\n";
+		f << "# completed_outward_escapes = " << number_of_completed_outward_escapes << "\n";
+		f << "# unresolved_not_captured_trajectories = " << unresolved_not_captured_trajectories() << "\n";
 		f << "# numerical_failures = " << number_of_numerical_failures << "\n";
+		f << "# computational_truncations = " << number_of_computational_truncations << "\n";
 		f << "# initial_shift_failures = " << number_of_initial_shift_failures << "\n";
 		f << "# final_reflection_shift_failures = " << number_of_final_reflection_shift_failures << "\n";
 		f << "# normal_mode_mpi_sync_interval = " << normal_mode_mpi_sync_interval << "\n";
-		f << "# capture_rate_valid = " << std::fixed << std::setprecision(8) << Capture_Ratio_Valid() << "\n";
+		const BinomialRateEstimate valid = Estimate_Binomial_Rate(Valid_Trajectories(), number_of_captured_particles);
+		f << "# capture_rate_valid = " << std::fixed << std::setprecision(8) << valid.rate << "\n";
+		f << "# capture_rate_valid_err = " << std::fixed << std::setprecision(8) << valid.standard_error << "\n";
+		f << "# capture_rate_valid_CI_95_lower = " << std::fixed << std::setprecision(8) << valid.ci_lower << "\n";
+		f << "# capture_rate_valid_CI_95_upper = " << std::fixed << std::setprecision(8) << valid.ci_upper << "\n";
 		f << "# numerical_failure_rate = " << std::fixed << std::setprecision(8) << Numerical_Failure_Ratio() << "\n";
 	};
 
@@ -1022,10 +1191,8 @@ void Simulation_Data::Write_Output_Files(const std::string& output_dir, obscura:
 	{
 		std::ofstream f(output_dir + "/bincount.txt");
 		write_header(f);
-		const unsigned long int physical_not_captured_particles = number_of_free_particles + number_of_reflected_particles;
-		const unsigned long int raw_not_captured_particles = number_of_trajectories - number_of_captured_particles;
-		const unsigned long int excluded_not_captured_particles =
-		    (raw_not_captured_particles > physical_not_captured_particles) ? (raw_not_captured_particles - physical_not_captured_particles) : 0;
+		const unsigned long int physical_not_captured_particles = number_of_completed_outward_escapes;
+		const unsigned long int excluded_not_captured_particles = unresolved_not_captured_trajectories();
 		f << "# not_captured_bincount_samples = " << physical_not_captured_particles << "\n";
 		if(excluded_not_captured_particles > 0)
 			f << "# excluded_incomplete_not_captured = " << excluded_not_captured_particles << "\n";
@@ -1075,7 +1242,7 @@ double Simulation_Data::Reflection_Ratio(int isoreflection_ring) const
 
 unsigned long int Simulation_Data::Valid_Trajectories() const
 {
-	return (number_of_trajectories > number_of_initial_shift_failures) ? (number_of_trajectories - number_of_initial_shift_failures) : 0UL;
+	return number_of_captured_particles + number_of_completed_outward_escapes;
 }
 
 double Simulation_Data::Free_Ratio_Valid() const
@@ -1125,22 +1292,8 @@ void Simulation_Data::Print_Capture_Mode_Summary(unsigned int mpi_rank)
 {
 	if(mpi_rank == 0)
 	{
-		double N = static_cast<double>(number_of_trajectories);
-		double p = Capture_Ratio();
-		double p_valid = Capture_Ratio_Valid();
-		double z = 1.96;
-		double ci_lower = p;
-		double ci_upper = p;
-		if(N > 0.0)
-		{
-			double denom = 1.0 + z * z / N;
-			double center = p + z * z / (2.0 * N);
-			double spread = z * sqrt(p * (1.0 - p) / N + z * z / (4.0 * N * N));
-			ci_lower = (center - spread) / denom;
-			ci_upper = (center + spread) / denom;
-			if(ci_lower < 0.0) ci_lower = 0.0;
-			if(ci_upper > 1.0) ci_upper = 1.0;
-		}
+		const BinomialRateEstimate raw = Estimate_Binomial_Rate(number_of_trajectories, number_of_captured_particles);
+		const BinomialRateEstimate valid = Estimate_Binomial_Rate(Valid_Trajectories(), number_of_captured_particles);
 
 		std::cout << SEPARATOR
 		          << "CAPTURE MODE summary" << std::endl
@@ -1148,25 +1301,28 @@ void Simulation_Data::Print_Capture_Mode_Summary(unsigned int mpi_rank)
 		          << "Termination condition:\t\tpost-scatter E < 0" << std::endl
 		          << "File output:\t\t\tdisabled" << std::endl
 		          << "Simulated trajectories:\t\t" << number_of_trajectories << std::endl
-		          << "Valid trajectories:\t\t" << Valid_Trajectories() << std::endl
+		          << "Capture-classified trajectories:\t" << Valid_Trajectories() << std::endl
+		          << "Unresolved non-captures:\t\t" << (number_of_trajectories - Valid_Trajectories()) << std::endl
 		          << "Captured count:\t\t\t" << number_of_captured_particles << std::endl
-		          << "Capture rate raw:\t\t" << std::fixed << std::setprecision(8) << p << std::endl
-		          << "Capture rate valid:\t\t" << std::fixed << std::setprecision(8) << p_valid << std::endl
-		          << "Capture rate -error (95%):\t" << std::fixed << std::setprecision(8) << (p - ci_lower) << std::endl
-		          << "Capture rate +error (95%):\t" << std::fixed << std::setprecision(8) << (ci_upper - p) << std::endl
-		          << "Capture rate 95% CI raw:\t[" << std::fixed << std::setprecision(8) << ci_lower << ", " << ci_upper << "]" << std::endl
+		          << "Capture rate raw:\t\t" << std::fixed << std::setprecision(8) << raw.rate << std::endl
+		          << "Capture rate valid:\t\t" << std::fixed << std::setprecision(8) << valid.rate << std::endl
+		          << "Capture rate raw 95% CI:\t[" << std::fixed << std::setprecision(8) << raw.ci_lower << ", " << raw.ci_upper << "]" << std::endl
+		          << "Capture rate valid 95% CI:\t[" << std::fixed << std::setprecision(8) << valid.ci_lower << ", " << valid.ci_upper << "]" << std::endl
 		          << "Numerical failure count:\t" << number_of_numerical_failures << std::endl
+		          << "Computational truncations:\t" << number_of_computational_truncations << std::endl
 		          << "Initial shift failures:\t\t" << number_of_initial_shift_failures << std::endl
 		          << "Final reflection shift failures:\t" << number_of_final_reflection_shift_failures << std::endl
 		          << "Numerical failure rate:\t\t" << std::fixed << std::setprecision(8) << Numerical_Failure_Ratio() << std::endl;
 
 		if(early_stopped)
-			std::cout << "*** EARLY STOP: max_trajectories reached ***" << std::endl;
+			std::cout << "*** EARLY STOP: " << Stop_Reason_Display(early_stop_reason) << " ***" << std::endl;
 		if(Numerical_Failure_Ratio() > NUMERICAL_FAILURE_WARNING_FRACTION)
 			std::cout << "*** WARNING: numerical failure rate exceeded "
 			          << NUMERICAL_FAILURE_WARNING_FRACTION << " ***" << std::endl;
 
-		std::cout << "Simulation time:\t\t" << libphysica::Time_Display(computing_time) << std::endl
+		const double captured_particle_rate = (computing_time > 0.0) ? number_of_captured_particles / computing_time : 0.0;
+		std::cout << "Captured particle rate [1/s]:\t" << libphysica::Round(captured_particle_rate) << std::endl
+		          << "Simulation time:\t\t" << libphysica::Time_Display(computing_time) << std::endl
 		          << SEPARATOR << std::endl;
 	}
 }
@@ -1180,7 +1336,8 @@ void Simulation_Data::Print_Summary(unsigned int mpi_rank)
 				  << std::endl
 				  << "Results:" << std::endl
 				  << "Simulated trajectories:\t\t" << number_of_trajectories << std::endl
-				  << "Valid trajectories:\t\t" << Valid_Trajectories() << std::endl
+				  << "Capture-classified trajectories:\t" << Valid_Trajectories() << std::endl
+				  << "Unresolved non-captures:\t\t" << (number_of_trajectories - Valid_Trajectories()) << std::endl
 				  << "Average # of scatterings:\t" << libphysica::Round(average_number_of_scatterings) << std::endl
 				  << "Free particles raw [%]:\t\t" << libphysica::Round(100.0 * Free_Ratio()) << std::endl
 				  << "Reflected particles raw [%]:\t" << libphysica::Round(100.0 * Reflection_Ratio()) << std::endl
@@ -1191,6 +1348,7 @@ void Simulation_Data::Print_Summary(unsigned int mpi_rank)
 				  << "Captured count:\t\t\t" << number_of_captured_particles << std::endl
 				  << "Normal-mode MPI sync interval:\t" << normal_mode_mpi_sync_interval << std::endl
 				  << "Numerical failure count:\t" << number_of_numerical_failures << std::endl
+				  << "Computational truncations:\t" << number_of_computational_truncations << std::endl
 				  << "Initial shift failures:\t\t" << number_of_initial_shift_failures << std::endl
 				  << "Final reflection shift failures:\t" << number_of_final_reflection_shift_failures << std::endl
 				  << "Numerical failure rate:\t\t" << std::fixed << std::setprecision(6) << Numerical_Failure_Ratio() << std::endl
@@ -1198,28 +1356,18 @@ void Simulation_Data::Print_Summary(unsigned int mpi_rank)
 				  << "Censored captured count:\t" << number_of_censored_captured_particles << std::endl
 				  << "Invalid survival count:\t\t" << number_of_invalid_survival_captured_particles << std::endl;
 
-		// Capture rate error (Wilson interval)
+		// Raw and classified-sample capture-rate intervals.
 		{
-			double N = static_cast<double>(number_of_trajectories);
-			double p = Capture_Ratio();
-			double z = 1.96;
-			double sigma_p = (N > 0) ? sqrt(p * (1.0 - p) / N) : 0.0;
-			std::cout << "Capture rate error (1σ):\t" << std::fixed << std::setprecision(6) << sigma_p << std::endl;
-			if(N > 0)
-			{
-				double denom = 1.0 + z * z / N;
-				double center = p + z * z / (2.0 * N);
-				double spread = z * sqrt(p * (1.0 - p) / N + z * z / (4.0 * N * N));
-				double ci_lower = (center - spread) / denom;
-				double ci_upper = (center + spread) / denom;
-				if(ci_lower < 0.0) ci_lower = 0.0;
-				if(ci_upper > 1.0) ci_upper = 1.0;
-				std::cout << "Capture rate 95% CI:\t\t[" << std::fixed << std::setprecision(6) << ci_lower << ", " << ci_upper << "]" << std::endl;
-			}
+			const BinomialRateEstimate raw = Estimate_Binomial_Rate(number_of_trajectories, number_of_captured_particles);
+			const BinomialRateEstimate valid = Estimate_Binomial_Rate(Valid_Trajectories(), number_of_captured_particles);
+			std::cout << "Capture rate raw error (1σ):\t" << std::fixed << std::setprecision(6) << raw.standard_error << std::endl
+			          << "Capture rate raw 95% CI:\t[" << raw.ci_lower << ", " << raw.ci_upper << "]" << std::endl
+			          << "Capture rate valid error (1σ):\t" << valid.standard_error << std::endl
+			          << "Capture rate valid 95% CI:\t[" << valid.ci_lower << ", " << valid.ci_upper << "]" << std::endl;
 		}
 
 		if(early_stopped)
-			std::cout << "*** EARLY STOP: max_trajectories reached ***" << std::endl;
+			std::cout << "*** EARLY STOP: " << Stop_Reason_Display(early_stop_reason) << " ***" << std::endl;
 		if(Numerical_Failure_Ratio() > NUMERICAL_FAILURE_WARNING_FRACTION)
 			std::cout << "*** WARNING: numerical failure rate exceeded "
 			          << NUMERICAL_FAILURE_WARNING_FRACTION << " ***" << std::endl;
@@ -1260,7 +1408,7 @@ void Simulation_Data::Print_Summary(unsigned int mpi_rank)
 
 		std::cout << std::endl
 				  << "Trajectory rate [1/s]:\t\t" << libphysica::Round(1.0 * number_of_trajectories / computing_time) << std::endl
-				  << "Capture rate [1/s]:\t\t" << libphysica::Round(1.0 * number_of_captured_particles / computing_time) << std::endl
+				  << "Captured particle rate [1/s]:\t" << libphysica::Round(1.0 * number_of_captured_particles / computing_time) << std::endl
 				  << "Simulation time:\t\t" << libphysica::Time_Display(computing_time) << std::endl;
 
 

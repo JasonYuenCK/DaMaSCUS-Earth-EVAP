@@ -1,13 +1,17 @@
 #include "Snapshot_IO.hpp"
 
 #include <algorithm>
+#include <cerrno>
 #include <cmath>
 #include <cstdio>
 #include <fstream>
 #include <functional>
 #include <iomanip>
+#include <iostream>
+#include <limits>
 #include <numeric>
 #include <sstream>
+#include <stdexcept>
 #include <sys/stat.h>
 #include <unistd.h>
 
@@ -15,6 +19,28 @@ namespace DaMaSCUS_SUN
 {
 namespace
 {
+constexpr uint64_t SNAPSHOT_RANK_STATE_MAGIC = 0x4453534e41503031ULL;
+constexpr uint32_t SNAPSHOT_RANK_STATE_VERSION = 2;
+constexpr uint32_t SNAPSHOT_RANK_STATE_HEADER_BYTES = sizeof(uint64_t) + 2 * sizeof(uint32_t);
+constexpr uint64_t MAX_SNAPSHOT_EVAPORATION_EVENTS = 10000000ULL;
+
+uint64_t SnapshotRankStateFixedBytes()
+{
+	return SNAPSHOT_RANK_STATE_HEADER_BYTES
+	     + sizeof(uint64_t)
+	     + 4 * sizeof(int32_t)
+	     + 6 * sizeof(uint64_t)
+	     + sizeof(double)
+	     + sizeof(int32_t)
+	     + 10ULL * NUM_BINS * sizeof(double)
+	     + sizeof(uint64_t);
+}
+
+uint64_t SnapshotEvaporationEntryBytes()
+{
+	return sizeof(uint64_t) + 2 * sizeof(double);
+}
+
 template<typename T>
 void WriteBinaryValue(std::ofstream& file, const T& value)
 {
@@ -53,6 +79,73 @@ void ReadSnapshotEvaporationEntryBinary(std::ifstream& file, SnapshotEvaporation
 	ReadBinaryValue(file, entry.lifetime_unbinding_sec);
 }
 
+template<size_t N>
+bool IsValidHistogram(const std::array<double, N>& values)
+{
+	return std::all_of(values.begin(), values.end(), [](double value)
+	{
+		return std::isfinite(value) && value >= 0.0;
+	});
+}
+
+bool IsValidRankState(const SnapshotRankState& state)
+{
+	if(state.snapshot_index < 0 || state.rank < 0)
+		return false;
+	if((state.done != 0 && state.done != 1)
+	   || (state.trajectory_in_progress != 0 && state.trajectory_in_progress != 1)
+	   || (state.current_trajectory_captured != 0 && state.current_trajectory_captured != 1))
+		return false;
+	if(state.local_captured > state.local_classified
+	   || state.local_classified > state.local_total
+	   || state.bincount_captured_samples > state.local_total
+	   || state.bincount_not_captured_samples > state.local_total
+	   || state.bincount_captured_samples > state.local_total - state.bincount_not_captured_samples)
+		return false;
+	if(!std::isfinite(state.rank_elapsed_wall_sec) || state.rank_elapsed_wall_sec < 0.0)
+		return false;
+	if(state.done && state.trajectory_in_progress)
+		return false;
+	for(const auto& entry : state.new_evaporation_events)
+	{
+		if(entry.completion_wall_time_sec > state.rank_elapsed_wall_sec)
+			return false;
+	}
+	if(state.trajectory_in_progress && state.current_trajectory_id == 0)
+		return false;
+	if(!state.trajectory_in_progress
+	   && (state.current_trajectory_id != 0 || state.current_trajectory_captured != 0))
+		return false;
+
+	return IsValidHistogram(state.current_trajectory_dt_hist)
+	    && IsValidHistogram(state.current_trajectory_v2dt_hist)
+	    && IsValidHistogram(state.captured_dt_hist)
+	    && IsValidHistogram(state.captured_v2dt_hist)
+	    && IsValidHistogram(state.captured_dt_sq_hist)
+	    && IsValidHistogram(state.captured_v2dt_sq_hist)
+	    && IsValidHistogram(state.not_captured_dt_hist)
+	    && IsValidHistogram(state.not_captured_v2dt_hist)
+	    && IsValidHistogram(state.not_captured_dt_sq_hist)
+	    && IsValidHistogram(state.not_captured_v2dt_sq_hist);
+}
+
+bool IsValidEvaporationEvents(const std::vector<SnapshotEvaporationProgressEntry>& entries)
+{
+	double previous_completion_time = -1.0;
+	for(const auto& entry : entries)
+	{
+		if(entry.trajectory_id == 0
+		   || !std::isfinite(entry.completion_wall_time_sec)
+		   || entry.completion_wall_time_sec < 0.0
+		   || !std::isfinite(entry.lifetime_unbinding_sec)
+		   || entry.lifetime_unbinding_sec < 0.0
+		   || entry.completion_wall_time_sec < previous_completion_time)
+			return false;
+		previous_completion_time = entry.completion_wall_time_sec;
+	}
+	return true;
+}
+
 CompactEvaporationEvent MakeLogEvent(int rank, const SnapshotEvaporationProgressEntry& entry)
 {
 	CompactEvaporationEvent event;
@@ -83,9 +176,30 @@ double SnapshotBinError(double sum, double sum_sq, double count)
 	return std::sqrt(count * variance);
 }
 
-double CaptureRatioFromCounts(uint64_t total_trajectories, uint64_t captured_particles)
+struct SnapshotRateEstimate
 {
-	return (total_trajectories > 0) ? static_cast<double>(captured_particles) / static_cast<double>(total_trajectories) : 0.0;
+	double rate = 0.0;
+	double standard_error = 0.0;
+	double ci_lower = 0.0;
+	double ci_upper = 0.0;
+};
+
+SnapshotRateEstimate EstimateSnapshotRate(uint64_t trials, uint64_t successes)
+{
+	SnapshotRateEstimate estimate;
+	if(trials == 0)
+		return estimate;
+
+	const double N = static_cast<double>(trials);
+	estimate.rate = static_cast<double>(std::min(trials, successes)) / N;
+	estimate.standard_error = std::sqrt(estimate.rate * (1.0 - estimate.rate) / N);
+	const double z = 1.96;
+	const double denominator = 1.0 + z * z / N;
+	const double center = estimate.rate + z * z / (2.0 * N);
+	const double spread = z * std::sqrt(estimate.rate * (1.0 - estimate.rate) / N + z * z / (4.0 * N * N));
+	estimate.ci_lower = std::max(0.0, (center - spread) / denominator);
+	estimate.ci_upper = std::min(1.0, (center + spread) / denominator);
+	return estimate;
 }
 
 bool IsCompletedEvaporationEvent(const CompactEvaporationEvent& event)
@@ -172,29 +286,41 @@ std::string JoinInts(const std::vector<int>& values)
 	return stream.str();
 }
 
-bool SnapshotTextFileIsMerged(const std::string& path)
+bool SnapshotTextFileIsMerged(const std::string& path, uint64_t expected_run_id)
 {
 	std::ifstream file(path);
 	if(!file.is_open())
 		return false;
 
+	bool merged = false;
+	bool run_id_matches = false;
 	std::string line;
 	while(std::getline(file, line))
 	{
 		if(line == "# snapshot_status = merged")
-			return true;
+			merged = true;
+		const std::string run_id_prefix = "# snapshot_run_id = ";
+		if(line.compare(0, run_id_prefix.size(), run_id_prefix) == 0)
+		{
+			std::istringstream value_stream(line.substr(run_id_prefix.size()));
+			uint64_t run_id = 0;
+			if((value_stream >> run_id) && value_stream.eof())
+				run_id_matches = run_id == expected_run_id;
+		}
 		if(!line.empty() && line[0] != '#')
 			break;
 	}
-	return false;
+	return merged && run_id_matches;
 }
 
 struct SnapshotReportState
 {
+	int snapshot_index = 0;
 	long long snapshot_time_label = 0;
 	double snapshot_interval_seconds = 0.0;
 	uint64_t total_trajectories = 0;
 	uint64_t captured_particles = 0;
+	uint64_t classified_trajectories = 0;
 	uint64_t snapshot_bincount_captured_samples = 0;
 	uint64_t snapshot_bincount_not_captured_samples = 0;
 	std::array<double, NUM_BINS> captured_dt_hist{};
@@ -212,14 +338,25 @@ void AccumulateSnapshotReportState(SnapshotReportState& report, const SnapshotRa
 {
 	report.total_trajectories += state.local_total;
 	report.captured_particles += state.local_captured;
+	report.classified_trajectories += state.local_classified;
 	report.snapshot_bincount_captured_samples += state.bincount_captured_samples;
 	report.snapshot_bincount_not_captured_samples += state.bincount_not_captured_samples;
 
 	const double lower_wall_time = (report.snapshot_time_label > report.snapshot_interval_seconds) ? (report.snapshot_time_label - report.snapshot_interval_seconds) : 0.0;
 	const double upper_wall_time = static_cast<double>(report.snapshot_time_label);
+	const bool first_final_snapshot = state.done
+	                               && state.snapshot_index < report.snapshot_index
+	                               && (state.snapshot_index + 1 == report.snapshot_index
+	                                   || state.rank_elapsed_wall_sec > lower_wall_time);
 	for(const auto& entry : state.new_evaporation_events)
 	{
-		if(entry.completion_wall_time_sec > lower_wall_time && entry.completion_wall_time_sec <= upper_wall_time)
+		// Checkpoint entries are already assigned by the recorder cursor. A late
+		// boundary event must remain in that publication instead of being dropped.
+		const bool belongs_to_snapshot = entry.completion_wall_time_sec <= upper_wall_time
+		                               && (!state.done
+		                                   || first_final_snapshot
+		                                   || entry.completion_wall_time_sec > lower_wall_time);
+		if(belongs_to_snapshot)
 		{
 			SnapshotRankedEvaporationEntry ranked_entry;
 			ranked_entry.rank = state.rank;
@@ -246,6 +383,7 @@ void AccumulateSnapshotReportState(SnapshotReportState& report, const SnapshotRa
 		if(state.current_trajectory_captured)
 		{
 			report.captured_particles++;
+			report.classified_trajectories++;
 			report.snapshot_bincount_captured_samples++;
 			for(int bin = 0; bin < NUM_BINS; bin++)
 			{
@@ -279,6 +417,7 @@ SnapshotMergeResult LoadSnapshotReportState(
 {
 	SnapshotMergeResult result;
 	report = SnapshotReportState();
+	report.snapshot_index = snapshot_index;
 	report.snapshot_time_label = SnapshotTimeLabelSeconds(snapshot_index, interval_seconds);
 	report.snapshot_interval_seconds = interval_seconds;
 
@@ -286,7 +425,10 @@ SnapshotMergeResult LoadSnapshotReportState(
 	{
 		SnapshotRankState state;
 		const std::string checkpoint_path = SnapshotRankCheckpointPath(rank_snapshot_dir, rank, snapshot_index, interval_seconds);
-		if(ReadSnapshotRankState(checkpoint_path, run_id, state))
+		if(ReadSnapshotRankState(checkpoint_path, run_id, state)
+		   && state.rank == rank
+		   && state.snapshot_index == snapshot_index
+		   && !state.done)
 		{
 			AccumulateSnapshotReportState(report, state);
 			result.ready_ranks.push_back(rank);
@@ -294,7 +436,11 @@ SnapshotMergeResult LoadSnapshotReportState(
 		}
 
 		const std::string final_path = SnapshotRankFinalPath(rank_snapshot_dir, rank);
-		if(ReadSnapshotRankState(final_path, run_id, state) && state.done && state.rank_elapsed_wall_sec <= report.snapshot_time_label)
+		if(ReadSnapshotRankState(final_path, run_id, state)
+		   && state.rank == rank
+		   && state.done
+		   && state.snapshot_index < snapshot_index
+		   && state.rank_elapsed_wall_sec <= report.snapshot_time_label)
 		{
 			AccumulateSnapshotReportState(report, state);
 			result.ready_ranks.push_back(rank);
@@ -320,6 +466,7 @@ void WriteReportHeader(
 	double sigma_cm2,
 	uint64_t total_trajectories,
 	uint64_t captured_particles,
+	uint64_t classified_trajectories,
 	long long snapshot_time_label,
 	double snapshot_interval_seconds)
 {
@@ -329,32 +476,31 @@ void WriteReportHeader(
 	file << "# DM_sigma_cm2 = " << std::scientific << std::setprecision(6) << sigma_cm2 << "\n";
 	file << "# total_trajectories = " << total_trajectories << "\n";
 	file << "# captured_particles = " << captured_particles << "\n";
+	file << "# valid_trajectories = " << classified_trajectories << "\n";
+	file << "# unresolved_not_captured_trajectories = "
+	     << (total_trajectories - classified_trajectories) << "\n";
 
-	const double p_cap = CaptureRatioFromCounts(total_trajectories, captured_particles);
-	file << "# capture_rate = " << std::fixed << std::setprecision(8) << p_cap << "\n";
-
-	const double N = static_cast<double>(total_trajectories);
-	const double z = 1.96;
-	const double sigma_p = (N > 0.0) ? std::sqrt(p_cap * (1.0 - p_cap) / N) : 0.0;
-	file << "# capture_rate_err = " << std::fixed << std::setprecision(8) << sigma_p << "\n";
-	if(N > 0.0)
-	{
-		const double denom = 1.0 + z * z / N;
-		const double center = p_cap + z * z / (2.0 * N);
-		const double spread = z * std::sqrt(p_cap * (1.0 - p_cap) / N + z * z / (4.0 * N * N));
-		double ci_lower = (center - spread) / denom;
-		double ci_upper = (center + spread) / denom;
-		if(ci_lower < 0.0) ci_lower = 0.0;
-		if(ci_upper > 1.0) ci_upper = 1.0;
-		file << "# capture_rate_CI_95_lower = " << std::fixed << std::setprecision(8) << ci_lower << "\n";
-		file << "# capture_rate_CI_95_upper = " << std::fixed << std::setprecision(8) << ci_upper << "\n";
-	}
+	const SnapshotRateEstimate raw = EstimateSnapshotRate(total_trajectories, captured_particles);
+	const SnapshotRateEstimate valid = EstimateSnapshotRate(classified_trajectories, captured_particles);
+	file << "# capture_rate = " << std::fixed << std::setprecision(8) << raw.rate << "\n";
+	file << "# capture_rate_raw = " << std::fixed << std::setprecision(8) << raw.rate << "\n";
+	file << "# capture_rate_err = " << std::fixed << std::setprecision(8) << raw.standard_error << "\n";
+	file << "# capture_rate_raw_err = " << std::fixed << std::setprecision(8) << raw.standard_error << "\n";
+	file << "# capture_rate_CI_95_lower = " << std::fixed << std::setprecision(8) << raw.ci_lower << "\n";
+	file << "# capture_rate_CI_95_upper = " << std::fixed << std::setprecision(8) << raw.ci_upper << "\n";
+	file << "# capture_rate_raw_CI_95_lower = " << std::fixed << std::setprecision(8) << raw.ci_lower << "\n";
+	file << "# capture_rate_raw_CI_95_upper = " << std::fixed << std::setprecision(8) << raw.ci_upper << "\n";
+	file << "# capture_rate_valid = " << std::fixed << std::setprecision(8) << valid.rate << "\n";
+	file << "# capture_rate_valid_err = " << std::fixed << std::setprecision(8) << valid.standard_error << "\n";
+	file << "# capture_rate_valid_CI_95_lower = " << std::fixed << std::setprecision(8) << valid.ci_lower << "\n";
+	file << "# capture_rate_valid_CI_95_upper = " << std::fixed << std::setprecision(8) << valid.ci_upper << "\n";
 }
 
 bool WriteSnapshotEvaporationTimeFile(
 	const std::string& snapshot_root,
 	int snapshot_index,
 	double interval_seconds,
+	uint64_t run_id,
 	double mass_gev,
 	double sigma_cm2,
 	const std::vector<SnapshotRankedEvaporationEntry>& entries,
@@ -370,11 +516,13 @@ bool WriteSnapshotEvaporationTimeFile(
 	return WriteTextFileAtomically(path, snapshot_index, [&](std::ofstream& file)
 	{
 		file << "# snapshot_status = " << status << "\n";
+		file << "# snapshot_run_id = " << run_id << "\n";
 		file << "# snapshot_target_wall_time_s = " << SnapshotTimeLabelSeconds(snapshot_index, interval_seconds) << "\n";
 		file << "# snapshot_interval_s = " << std::fixed << std::setprecision(3) << interval_seconds << "\n";
 		file << "# ready_ranks = " << JoinInts(merge_result.ready_ranks) << "\n";
 		file << "# missing_ranks = " << JoinInts(merge_result.missing_ranks) << "\n";
-		file << "# completed_evaporation_events_in_interval_only = 1\n";
+		file << "# completed_evaporation_events_assigned_to_snapshot = 1\n";
+		file << "# event_assignment = first published checkpoint after completion\n";
 		WriteEvaporationLogFileHeader(file, mass_gev, sigma_cm2);
 		WriteEvaporationLogEvents(file, events);
 	});
@@ -384,27 +532,38 @@ bool WriteSnapshotReportFile(
 	const std::string& snapshot_root,
 	int snapshot_index,
 	double interval_seconds,
+	uint64_t run_id,
 	double mass_gev,
 	double sigma_cm2,
 	const SnapshotReportState& report,
 	const SnapshotMergeResult& merge_result)
 {
-	if(merge_result.status != SnapshotMergeStatus::Merged && SnapshotTextFileIsMerged(SnapshotTextFilePath(snapshot_root, snapshot_index, interval_seconds)))
+	if(merge_result.status != SnapshotMergeStatus::Merged
+	   && SnapshotTextFileIsMerged(SnapshotTextFilePath(snapshot_root, snapshot_index, interval_seconds), run_id))
 		return true;
 
-	if(!WriteSnapshotEvaporationTimeFile(snapshot_root, snapshot_index, interval_seconds, mass_gev, sigma_cm2, report.new_evaporation_events, merge_result))
+	if(!WriteSnapshotEvaporationTimeFile(snapshot_root, snapshot_index, interval_seconds, run_id, mass_gev, sigma_cm2, report.new_evaporation_events, merge_result))
 		return false;
 
 	const std::string status = (merge_result.status == SnapshotMergeStatus::Merged) ? "merged" : "partial";
 	return WriteTextFileAtomically(SnapshotTextFilePath(snapshot_root, snapshot_index, interval_seconds), snapshot_index, [&](std::ofstream& file)
 	{
 		file << "# snapshot_status = " << status << "\n";
+		file << "# snapshot_run_id = " << run_id << "\n";
 		file << "# Cumulative snapshot report\n";
 		file << "# ready_ranks = " << JoinInts(merge_result.ready_ranks) << "\n";
 		file << "# missing_ranks = " << JoinInts(merge_result.missing_ranks) << "\n";
 		if(merge_result.status == SnapshotMergeStatus::Partial)
 			file << "# WARNING = partial snapshot; not all ranks reached this checkpoint\n";
-		WriteReportHeader(file, mass_gev, sigma_cm2, report.total_trajectories, report.captured_particles, report.snapshot_time_label, report.snapshot_interval_seconds);
+		WriteReportHeader(
+			file,
+			mass_gev,
+			sigma_cm2,
+			report.total_trajectories,
+			report.captured_particles,
+			report.classified_trajectories,
+			report.snapshot_time_label,
+			report.snapshot_interval_seconds);
 
 		const double snapshot_captured_samples = static_cast<double>(report.snapshot_bincount_captured_samples);
 		const double snapshot_not_captured_samples = static_cast<double>(report.snapshot_bincount_not_captured_samples);
@@ -428,9 +587,25 @@ bool WriteSnapshotReportFile(
 }
 }
 
+bool IsValidSnapshotIntervalSeconds(double interval_seconds)
+{
+	return std::isfinite(interval_seconds)
+	    && interval_seconds >= 1.0
+	    && interval_seconds <= static_cast<double>(std::numeric_limits<int>::max())
+	    && std::floor(interval_seconds) == interval_seconds;
+}
+
 long long SnapshotTimeLabelSeconds(int snapshot_index, double interval_seconds)
 {
-	return static_cast<long long>(std::llround(snapshot_index * interval_seconds));
+	if(snapshot_index <= 0)
+		throw std::invalid_argument("snapshot index must be positive");
+	if(!IsValidSnapshotIntervalSeconds(interval_seconds))
+		throw std::invalid_argument("snapshot interval must be a positive integer number of seconds");
+
+	const long long interval = static_cast<long long>(interval_seconds);
+	if(static_cast<long long>(snapshot_index) > std::numeric_limits<long long>::max() / interval)
+		throw std::overflow_error("snapshot time label exceeds long long range");
+	return static_cast<long long>(snapshot_index) * interval;
 }
 
 std::string SnapshotTextFilePath(const std::string& snapshot_root, int snapshot_index, double interval_seconds)
@@ -464,11 +639,19 @@ SnapshotEvaporationProgressEntry MakeSnapshotEvaporationProgressEntry(const Comp
 
 bool WriteSnapshotRankState(const std::string& path, const SnapshotRankState& state)
 {
+	if(!IsValidRankState(state)
+	   || state.new_evaporation_events.size() > MAX_SNAPSHOT_EVAPORATION_EVENTS
+	   || !IsValidEvaporationEvents(state.new_evaporation_events))
+		return false;
+
 	const std::string tmp_path = path + ".tmp." + std::to_string(getpid()) + "." + std::to_string(state.rank);
 	std::ofstream file(tmp_path, std::ios::binary | std::ios::trunc);
 	if(!file.is_open())
 		return false;
 
+	WriteBinaryValue(file, SNAPSHOT_RANK_STATE_MAGIC);
+	WriteBinaryValue(file, SNAPSHOT_RANK_STATE_VERSION);
+	WriteBinaryValue(file, SNAPSHOT_RANK_STATE_HEADER_BYTES);
 	WriteBinaryValue(file, state.run_id);
 	WriteBinaryValue(file, state.snapshot_index);
 	WriteBinaryValue(file, state.rank);
@@ -476,6 +659,7 @@ bool WriteSnapshotRankState(const std::string& path, const SnapshotRankState& st
 	WriteBinaryValue(file, state.trajectory_in_progress);
 	WriteBinaryValue(file, state.local_captured);
 	WriteBinaryValue(file, state.local_total);
+	WriteBinaryValue(file, state.local_classified);
 	WriteBinaryValue(file, state.bincount_captured_samples);
 	WriteBinaryValue(file, state.bincount_not_captured_samples);
 	WriteBinaryValue(file, state.current_trajectory_id);
@@ -516,13 +700,36 @@ bool ReadSnapshotRankState(const std::string& path, uint64_t expected_run_id, Sn
 	if(!file.is_open())
 		return false;
 
+	file.seekg(0, std::ios::end);
+	const std::streamoff file_size_value = file.tellg();
+	if(file_size_value < 0 || static_cast<uint64_t>(file_size_value) < SnapshotRankStateFixedBytes())
+		return false;
+	const uint64_t file_size = static_cast<uint64_t>(file_size_value);
+	file.seekg(0, std::ios::beg);
+
+	uint64_t magic = 0;
+	uint32_t version = 0;
+	uint32_t header_bytes = 0;
+	ReadBinaryValue(file, magic);
+	ReadBinaryValue(file, version);
+	ReadBinaryValue(file, header_bytes);
+	if(!file
+	   || magic != SNAPSHOT_RANK_STATE_MAGIC
+	   || version != SNAPSHOT_RANK_STATE_VERSION
+	   || header_bytes != SNAPSHOT_RANK_STATE_HEADER_BYTES)
+		return false;
+
+	state = SnapshotRankState();
 	ReadBinaryValue(file, state.run_id);
+	if(!file || state.run_id != expected_run_id)
+		return false;
 	ReadBinaryValue(file, state.snapshot_index);
 	ReadBinaryValue(file, state.rank);
 	ReadBinaryValue(file, state.done);
 	ReadBinaryValue(file, state.trajectory_in_progress);
 	ReadBinaryValue(file, state.local_captured);
 	ReadBinaryValue(file, state.local_total);
+	ReadBinaryValue(file, state.local_classified);
 	ReadBinaryValue(file, state.bincount_captured_samples);
 	ReadBinaryValue(file, state.bincount_not_captured_samples);
 	ReadBinaryValue(file, state.current_trajectory_id);
@@ -541,27 +748,71 @@ bool ReadSnapshotRankState(const std::string& path, uint64_t expected_run_id, Sn
 
 	uint64_t event_count = 0;
 	ReadBinaryValue(file, event_count);
+	if(!file || event_count > MAX_SNAPSHOT_EVAPORATION_EVENTS)
+		return false;
+	const uint64_t entry_bytes = SnapshotEvaporationEntryBytes();
+	if(event_count > (std::numeric_limits<uint64_t>::max() - SnapshotRankStateFixedBytes()) / entry_bytes)
+		return false;
+	const uint64_t expected_file_size = SnapshotRankStateFixedBytes() + event_count * entry_bytes;
+	if(file_size != expected_file_size)
+		return false;
+
 	state.new_evaporation_events.clear();
-	state.new_evaporation_events.resize(static_cast<size_t>(event_count));
+	try
+	{
+		state.new_evaporation_events.resize(static_cast<size_t>(event_count));
+	}
+	catch(const std::exception&)
+	{
+		state.new_evaporation_events.clear();
+		return false;
+	}
 	for(size_t i = 0; i < state.new_evaporation_events.size(); i++)
 		ReadSnapshotEvaporationEntryBinary(file, state.new_evaporation_events[i]);
 
 	if(!file)
 		return false;
-	return state.run_id == expected_run_id;
+	return IsValidRankState(state) && IsValidEvaporationEvents(state.new_evaporation_events);
 }
 
-void CleanupSnapshotCheckpoints(const std::string& rank_snapshot_dir, int snapshot_index, double interval_seconds, int mpi_processes)
+bool CleanupSnapshotCheckpoints(const std::string& rank_snapshot_dir, int snapshot_index, double interval_seconds, int mpi_processes)
 {
+	bool cleanup_succeeded = true;
 	for(int rank = 0; rank < mpi_processes; rank++)
-		std::remove(SnapshotRankCheckpointPath(rank_snapshot_dir, rank, snapshot_index, interval_seconds).c_str());
+	{
+		const std::string path = SnapshotRankCheckpointPath(rank_snapshot_dir, rank, snapshot_index, interval_seconds);
+		errno = 0;
+		if(std::remove(path.c_str()) != 0 && errno != ENOENT)
+		{
+			cleanup_succeeded = false;
+			std::cerr << "Warning in CleanupSnapshotCheckpoints(): failed to remove " << path << std::endl;
+		}
+	}
+	return cleanup_succeeded;
 }
 
-void CleanupFinalSnapshotStates(const std::string& rank_snapshot_dir, int mpi_processes)
+bool CleanupFinalSnapshotStates(const std::string& rank_snapshot_dir, int mpi_processes)
 {
+	bool cleanup_succeeded = true;
 	for(int rank = 0; rank < mpi_processes; rank++)
-		std::remove(SnapshotRankFinalPath(rank_snapshot_dir, rank).c_str());
-	rmdir(rank_snapshot_dir.c_str());
+	{
+		const std::string path = SnapshotRankFinalPath(rank_snapshot_dir, rank);
+		errno = 0;
+		if(std::remove(path.c_str()) != 0 && errno != ENOENT)
+		{
+			cleanup_succeeded = false;
+			std::cerr << "Warning in CleanupFinalSnapshotStates(): failed to remove " << path << std::endl;
+		}
+	}
+
+	errno = 0;
+	if(rmdir(rank_snapshot_dir.c_str()) != 0 && errno != ENOENT)
+	{
+		cleanup_succeeded = false;
+		std::cerr << "Warning in CleanupFinalSnapshotStates(): failed to remove directory "
+		          << rank_snapshot_dir << std::endl;
+	}
+	return cleanup_succeeded;
 }
 
 SnapshotMergeResult TryWriteSnapshot(
@@ -577,10 +828,11 @@ SnapshotMergeResult TryWriteSnapshot(
 {
 	SnapshotMergeResult merged_result;
 	merged_result.status = SnapshotMergeStatus::Merged;
-	if(SnapshotTextFileIsMerged(SnapshotTextFilePath(snapshot_root, snapshot_index, interval_seconds))
-	   && SnapshotTextFileIsMerged(SnapshotEvaporationTimeFilePath(snapshot_root, snapshot_index, interval_seconds)))
+	if(SnapshotTextFileIsMerged(SnapshotTextFilePath(snapshot_root, snapshot_index, interval_seconds), run_id)
+	   && SnapshotTextFileIsMerged(SnapshotEvaporationTimeFilePath(snapshot_root, snapshot_index, interval_seconds), run_id))
 	{
-		CleanupSnapshotCheckpoints(rank_snapshot_dir, snapshot_index, interval_seconds, mpi_processes);
+		merged_result.cleanup_succeeded = CleanupSnapshotCheckpoints(
+			rank_snapshot_dir, snapshot_index, interval_seconds, mpi_processes);
 		return merged_result;
 	}
 
@@ -591,14 +843,15 @@ SnapshotMergeResult TryWriteSnapshot(
 	if(result.status == SnapshotMergeStatus::Partial && !allow_partial)
 		return result;
 
-	if(!WriteSnapshotReportFile(snapshot_root, snapshot_index, interval_seconds, mass_gev, sigma_cm2, report, result))
+	if(!WriteSnapshotReportFile(snapshot_root, snapshot_index, interval_seconds, run_id, mass_gev, sigma_cm2, report, result))
 	{
 		result.status = SnapshotMergeStatus::NoRanksReady;
 		return result;
 	}
 
 	if(result.status == SnapshotMergeStatus::Merged)
-		CleanupSnapshotCheckpoints(rank_snapshot_dir, snapshot_index, interval_seconds, mpi_processes);
+		result.cleanup_succeeded = CleanupSnapshotCheckpoints(
+			rank_snapshot_dir, snapshot_index, interval_seconds, mpi_processes);
 	return result;
 }
 
@@ -606,15 +859,17 @@ bool WriteMissedSnapshotMarker(
 	const std::string& snapshot_root,
 	int snapshot_index,
 	double interval_seconds,
+	uint64_t run_id,
 	double actual_write_wall_time_sec)
 {
 	const std::string path = SnapshotTextFilePath(snapshot_root, snapshot_index, interval_seconds);
-	if(SnapshotTextFileIsMerged(path))
+	if(SnapshotTextFileIsMerged(path, run_id))
 		return true;
 
 	return WriteTextFileAtomically(path, snapshot_index, [&](std::ofstream& file)
 	{
 		file << "# snapshot_status = missed_writer_delay\n";
+		file << "# snapshot_run_id = " << run_id << "\n";
 		file << "# snapshot_target_wall_time_s = " << SnapshotTimeLabelSeconds(snapshot_index, interval_seconds) << "\n";
 		file << "# snapshot_interval_s = " << std::fixed << std::setprecision(3) << interval_seconds << "\n";
 		file << "# actual_write_wall_time_s = " << std::fixed << std::setprecision(3) << actual_write_wall_time_sec << "\n";

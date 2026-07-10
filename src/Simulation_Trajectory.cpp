@@ -544,7 +544,7 @@ void Trajectory_Result::Print_Summary(Solar_Model& solar_model, unsigned int mpi
 
 // 2. Simulator
 Trajectory_Simulator::Trajectory_Simulator(const Solar_Model& model, unsigned long int max_time_steps, unsigned long int max_scatterings, double max_distance)
-: solar_model(model), free_flight_reference_energy_eV(std::numeric_limits<double>::quiet_NaN()), current_physical_bound_state(false), terminate_on_capture(false), snapshot_recorder(nullptr), trajectory_in_progress(false), maximum_time_steps(max_time_steps), maximum_scatterings(max_scatterings), maximum_distance(max_distance), current_mpi_rank(0), current_trajectory_id(0)
+: solar_model(model), free_flight_reference_energy_eV(std::numeric_limits<double>::quiet_NaN()), current_physical_bound_state(false), terminate_on_capture(false), snapshot_recorder(nullptr), trajectory_in_progress(false), accumulated_snapshot_overhead_sec(0.0), maximum_time_steps(max_time_steps), maximum_scatterings(max_scatterings), maximum_distance(max_distance), current_mpi_rank(0), current_trajectory_id(0)
 {
 	std::random_device rd;
 	PRNG.seed(rd());
@@ -577,7 +577,15 @@ double Trajectory_Simulator::Current_Trajectory_Wall_Time_Seconds() const
 		return 0.0;
 
 	const double total_wall_time_sec = 1.0e-9 * std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - current_trajectory_wall_start).count();
-	return std::max(0.0, total_wall_time_sec);
+	return std::max(0.0, total_wall_time_sec - accumulated_snapshot_overhead_sec);
+}
+
+void Trajectory_Simulator::Accumulate_Snapshot_Overhead(const std::chrono::steady_clock::time_point& operation_start)
+{
+	if(!trajectory_in_progress)
+		return;
+	accumulated_snapshot_overhead_sec += 1.0e-9 * std::chrono::duration_cast<std::chrono::nanoseconds>(
+		std::chrono::steady_clock::now() - operation_start).count();
 }
 
 const TrajectoryBincount& Trajectory_Simulator::Current_Trajectory_Bincount() const
@@ -596,7 +604,11 @@ void Trajectory_Simulator::Accumulate_Bincount_Step(double r_km, double v2_km2s2
 	current_bincount.dt_hist[bin_idx] += dt_sec;
 	current_bincount.v2dt_hist[bin_idx] += v2_km2s2 * dt_sec;
 	if(snapshot_recorder != nullptr)
+	{
+		const auto snapshot_operation_start = std::chrono::steady_clock::now();
 		snapshot_recorder->AddCurrentBincountStep(bin_idx, dt_sec, v2_km2s2 * dt_sec);
+		Accumulate_Snapshot_Overhead(snapshot_operation_start);
+	}
 }
 
 void Trajectory_Simulator::Reset_Bincount_Anchor(const Event& event)
@@ -663,12 +675,16 @@ bool Trajectory_Simulator::Update_Capture_State(double radius, double speed, dou
 			current_bincount.t_capture = t_now_sec;
 			current_bincount.t_first_negative = t_now_sec;
 			current_bincount.t_last_bound = t_now_sec;
-				current_bincount.r_first_negative_km = In_Units(radius, km);
-				current_bincount.E_first_negative_eV = E_eV;
-				current_bincount.dE_first_negative_from_prev_eV = dE_from_prev_eV;
-				if(snapshot_recorder != nullptr)
-					snapshot_recorder->MarkCurrentCaptured(true);
+			current_bincount.r_first_negative_km = In_Units(radius, km);
+			current_bincount.E_first_negative_eV = E_eV;
+			current_bincount.dE_first_negative_from_prev_eV = dE_from_prev_eV;
+			if(snapshot_recorder != nullptr)
+			{
+				const auto snapshot_operation_start = std::chrono::steady_clock::now();
+				snapshot_recorder->MarkCurrentCaptured(true);
+				Accumulate_Snapshot_Overhead(snapshot_operation_start);
 			}
+		}
 		else if(!was_bound)
 		{
 			current_bincount.t_final_unbinding_scatter = std::numeric_limits<double>::quiet_NaN();
@@ -1146,8 +1162,13 @@ Trajectory_Result Trajectory_Simulator::Simulate(const Event& initial_condition,
 	current_trajectory_id++;
 	trajectory_in_progress = true;
 	current_trajectory_wall_start = std::chrono::steady_clock::now();
+	accumulated_snapshot_overhead_sec = 0.0;
 	if(snapshot_recorder != nullptr)
+	{
+		const auto snapshot_operation_start = std::chrono::steady_clock::now();
 		snapshot_recorder->BeginTrajectory(current_trajectory_id);
+		Accumulate_Snapshot_Overhead(snapshot_operation_start);
+	}
 
 	TrajectoryTerminationReason termination_reason = TrajectoryTerminationReason::Unknown;
 	while(number_of_scatterings < maximum_scatterings)

@@ -95,6 +95,8 @@ struct SnapshotConfig
 	double max_trajectory_wall_time_sec = 0.0;
 };
 
+bool IsValidSnapshotIntervalSeconds(double interval_seconds);
+
 // 1. Result of one trajectory
 struct Trajectory_Result
 {
@@ -137,6 +139,8 @@ class Trajectory_Simulator
 	SnapshotRecorder* snapshot_recorder;
 	bool trajectory_in_progress;
 	std::chrono::steady_clock::time_point current_trajectory_wall_start;
+	double accumulated_snapshot_overhead_sec;
+	void Accumulate_Snapshot_Overhead(const std::chrono::steady_clock::time_point& operation_start);
 
 	TrajectoryTerminationReason Propagate_Freely(Event& current_event, obscura::DM_Particle& DM);
 

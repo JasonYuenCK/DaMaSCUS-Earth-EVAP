@@ -53,6 +53,14 @@ struct CompactEvaporationEvent
 	double lifetime_unbinding = -1.0;
 };
 
+enum class SimulationStopReason
+{
+	None = 0,
+	MaxTrajectoriesReached = 1,
+	CaptureTargetNotReached = 2,
+	InitialShiftFailureFractionExceeded = 3
+};
+
 class Simulation_Data
 {
   private:
@@ -70,15 +78,18 @@ class Simulation_Data
 	unsigned long int number_of_free_particles;
 	unsigned long int number_of_reflected_particles;
 	unsigned long int number_of_captured_particles;
-		unsigned long int number_of_complete_evaporation_particles;
-		unsigned long int number_of_censored_captured_particles;
-		unsigned long int number_of_invalid_survival_captured_particles;
-		unsigned long int number_of_initial_shift_failures;
-		unsigned long int number_of_final_reflection_shift_failures;
-		unsigned long int number_of_numerical_failures;
-		double average_number_of_scatterings;
-		double computing_time;
-		bool early_stopped;
+	unsigned long int number_of_completed_outward_escapes;
+	unsigned long int number_of_complete_evaporation_particles;
+	unsigned long int number_of_censored_captured_particles;
+	unsigned long int number_of_invalid_survival_captured_particles;
+	unsigned long int number_of_initial_shift_failures;
+	unsigned long int number_of_final_reflection_shift_failures;
+	unsigned long int number_of_numerical_failures;
+	unsigned long int number_of_computational_truncations;
+	double average_number_of_scatterings;
+	double computing_time;
+	bool early_stopped;
+	SimulationStopReason early_stop_reason;
 
 	// Aggregated bincount histograms
 	std::array<double, NUM_BINS> captured_dt_hist;
@@ -119,16 +130,18 @@ class Simulation_Data
 	// Output files
 	void Write_Output_Files(const std::string& output_dir, obscura::DM_Particle& DM);
 
-		double Free_Ratio() const;
-		double Capture_Ratio() const;
-		double Reflection_Ratio(int isoreflection_ring = -1) const;
-		unsigned long int Valid_Trajectories() const;
-		double Free_Ratio_Valid() const;
-		double Capture_Ratio_Valid() const;
-		double Reflection_Ratio_Valid(int isoreflection_ring = -1) const;
-		double Numerical_Failure_Ratio() const;
+	double Free_Ratio() const;
+	double Capture_Ratio() const;
+	double Reflection_Ratio(int isoreflection_ring = -1) const;
+	// Only physically classified captures and completed outward escapes
+	// belong in the capture-rate normalization.
+	unsigned long int Valid_Trajectories() const;
+	double Free_Ratio_Valid() const;
+	double Capture_Ratio_Valid() const;
+	double Reflection_Ratio_Valid(int isoreflection_ring = -1) const;
+	double Numerical_Failure_Ratio() const;
 
-		double Minimum_Speed() const;
+	double Minimum_Speed() const;
 	double Lowest_Speed(unsigned int iso_ring = 0) const;
 	double Highest_Speed(unsigned int iso_ring = 0) const;
 

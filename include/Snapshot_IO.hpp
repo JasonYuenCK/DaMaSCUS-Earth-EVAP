@@ -33,6 +33,7 @@ struct SnapshotRankState
 	int32_t trajectory_in_progress = 0;
 	uint64_t local_captured = 0;
 	uint64_t local_total = 0;
+	uint64_t local_classified = 0;
 	uint64_t bincount_captured_samples = 0;
 	uint64_t bincount_not_captured_samples = 0;
 	uint64_t current_trajectory_id = 0;
@@ -61,6 +62,7 @@ enum class SnapshotMergeStatus
 struct SnapshotMergeResult
 {
 	SnapshotMergeStatus status = SnapshotMergeStatus::NoRanksReady;
+	bool cleanup_succeeded = true;
 	std::vector<int> ready_ranks;
 	std::vector<int> missing_ranks;
 };
@@ -75,8 +77,8 @@ SnapshotEvaporationProgressEntry MakeSnapshotEvaporationProgressEntry(const Comp
 
 bool WriteSnapshotRankState(const std::string& path, const SnapshotRankState& state);
 bool ReadSnapshotRankState(const std::string& path, uint64_t expected_run_id, SnapshotRankState& state);
-void CleanupSnapshotCheckpoints(const std::string& rank_snapshot_dir, int snapshot_index, double interval_seconds, int mpi_processes);
-void CleanupFinalSnapshotStates(const std::string& rank_snapshot_dir, int mpi_processes);
+bool CleanupSnapshotCheckpoints(const std::string& rank_snapshot_dir, int snapshot_index, double interval_seconds, int mpi_processes);
+bool CleanupFinalSnapshotStates(const std::string& rank_snapshot_dir, int mpi_processes);
 
 SnapshotMergeResult TryWriteSnapshot(
 	const std::string& snapshot_root,
@@ -93,6 +95,7 @@ bool WriteMissedSnapshotMarker(
 	const std::string& snapshot_root,
 	int snapshot_index,
 	double interval_seconds,
+	uint64_t run_id,
 	double actual_write_wall_time_sec);
 
 }	// namespace DaMaSCUS_SUN

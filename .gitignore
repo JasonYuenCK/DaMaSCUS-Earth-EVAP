@@ -38,7 +38,7 @@ CMakeLists.txt.user
 /external/
 
 # Runtime data, generated results, and large simulation outputs
-/data/
+/data/*
 /results/
 /smoke_results/
 /PREVIOUS_WORK/
@@ -112,3 +112,4 @@ coverage.info
 
 # Generic generated tables from runs
 *.dat
+!/data/model_agss09.dat

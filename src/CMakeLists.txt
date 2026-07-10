@@ -34,7 +34,10 @@ target_compile_options(lib_damascus_sun PUBLIC -Wall -pedantic)
 target_include_directories(lib_damascus_sun 
     PRIVATE
 		${GENERATED_DIR})
-		
+
+add_dependencies(DaMaSCUS-SUN generate_version_header)
+add_dependencies(lib_damascus_sun generate_version_header)
+
 target_link_libraries(lib_damascus_sun
 	    PUBLIC
 	        coverage_config

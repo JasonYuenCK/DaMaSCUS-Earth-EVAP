@@ -20,7 +20,11 @@ using namespace libphysica::natural_units;
 int main(int argc, char* argv[])
 {
 	int mpi_thread_provided = MPI_THREAD_SINGLE;
-	MPI_Init_thread(&argc, &argv, MPI_THREAD_FUNNELED, &mpi_thread_provided);
+	if(MPI_Init_thread(&argc, &argv, MPI_THREAD_FUNNELED, &mpi_thread_provided) != MPI_SUCCESS)
+	{
+		std::cerr << "Error: MPI initialization failed." << std::endl;
+		return 1;
+	}
 	int mpi_processes, mpi_rank;
 	MPI_Comm_size(MPI_COMM_WORLD, &mpi_processes);
 	MPI_Comm_rank(MPI_COMM_WORLD, &mpi_rank);

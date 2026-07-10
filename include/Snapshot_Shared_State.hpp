@@ -49,6 +49,7 @@ class SnapshotSharedState
 
 	uint64_t completed_trajectories_ = 0;
 	uint64_t captured_particles_ = 0;
+	uint64_t classified_trajectories_ = 0;
 	uint64_t bincount_captured_samples_ = 0;
 	uint64_t bincount_not_captured_samples_ = 0;
 
