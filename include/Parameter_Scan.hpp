@@ -27,7 +27,7 @@ class Configuration : public obscura::Configuration
   public:
 	std::string run_mode;
 	unsigned int isoreflection_rings, interpolation_points;
-	unsigned int sample_size, cross_sections;
+	unsigned int sample_size, cross_sections, fixed_seed;
 	unsigned int max_trajectories;
 	unsigned long int maximum_number_of_scatterings;
 	SnapshotConfig snapshot_config;

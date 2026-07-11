@@ -194,25 +194,46 @@ bool Bound_Kepler_Return_At_Same_Radius(const Event& outward_event, Event& inbou
 Event Interpolate_Event(const Event& before, const Event& after, double fraction)
 {
 	fraction = Clamp_Unit_Interval(fraction);
-	return Event(before.time + fraction * (after.time - before.time),
-	             before.position + fraction * (after.position - before.position),
-	             before.velocity + fraction * (after.velocity - before.velocity));
+	libphysica::Vector position(3);
+	libphysica::Vector velocity(3);
+	for(unsigned int component = 0; component < 3; component++)
+	{
+		position[component] = before.position[component]
+		                    + fraction * (after.position[component] - before.position[component]);
+		velocity[component] = before.velocity[component]
+		                    + fraction * (after.velocity[component] - before.velocity[component]);
+	}
+	return Event(before.time + fraction * (after.time - before.time), position, velocity);
 }
 
 double Radius_At_Fraction(const Event& before, const Event& after, double fraction)
 {
-	return Interpolate_Event(before, after, fraction).Radius();
+	fraction = Clamp_Unit_Interval(fraction);
+	double radius_squared = 0.0;
+	for(unsigned int component = 0; component < 3; component++)
+	{
+		const double value = before.position[component]
+		                   + fraction * (after.position[component] - before.position[component]);
+		radius_squared += value * value;
+	}
+	return sqrt(std::max(0.0, radius_squared));
 }
 
 bool Surface_Crossing_Fractions(const Event& before, const Event& after, double& first, double& second)
 {
-	const libphysica::Vector displacement = after.position - before.position;
-	const double a = displacement.Dot(displacement);
+	double a = 0.0;
+	double b = 0.0;
+	double c = -rSun * rSun;
+	for(unsigned int component = 0; component < 3; component++)
+	{
+		const double displacement = after.position[component] - before.position[component];
+		a += displacement * displacement;
+		b += 2.0 * before.position[component] * displacement;
+		c += before.position[component] * before.position[component];
+	}
 	if(a <= 0.0)
 		return false;
 
-	const double b = 2.0 * before.position.Dot(displacement);
-	const double c = before.position.Dot(before.position) - rSun * rSun;
 	const double discriminant = b * b - 4.0 * a * c;
 	if(!std::isfinite(discriminant) || discriminant < 0.0)
 		return false;
@@ -296,11 +317,22 @@ bool Solar_Interior_Fraction_Interval(const Event& before, const Event& after, d
 
 double Scattering_Rate_At_Fraction(const Event& before, const Event& after, double fraction, Solar_Model& solar_model, obscura::DM_Particle& DM)
 {
-	const Event event = Interpolate_Event(before, after, fraction);
-	const double radius = event.Radius();
+	fraction = Clamp_Unit_Interval(fraction);
+	double radius_squared = 0.0;
+	double speed_squared = 0.0;
+	for(unsigned int component = 0; component < 3; component++)
+	{
+		const double position = before.position[component]
+		                      + fraction * (after.position[component] - before.position[component]);
+		const double velocity = before.velocity[component]
+		                      + fraction * (after.velocity[component] - before.velocity[component]);
+		radius_squared += position * position;
+		speed_squared += velocity * velocity;
+	}
+	const double radius = sqrt(std::max(0.0, radius_squared));
 	if(radius >= rSun)
 		return 0.0;
-	return solar_model.Total_DM_Scattering_Rate(DM, radius, event.Speed());
+	return solar_model.Total_DM_Scattering_Rate(DM, radius, sqrt(std::max(0.0, speed_squared)));
 }
 
 bool Build_Optical_Depth_Pieces(const Event& before,
@@ -544,7 +576,7 @@ void Trajectory_Result::Print_Summary(Solar_Model& solar_model, unsigned int mpi
 
 // 2. Simulator
 Trajectory_Simulator::Trajectory_Simulator(const Solar_Model& model, unsigned long int max_time_steps, unsigned long int max_scatterings, double max_distance)
-: solar_model(model), free_flight_reference_energy_eV(std::numeric_limits<double>::quiet_NaN()), current_physical_bound_state(false), terminate_on_capture(false), snapshot_recorder(nullptr), trajectory_in_progress(false), accumulated_snapshot_overhead_sec(0.0), maximum_time_steps(max_time_steps), maximum_scatterings(max_scatterings), maximum_distance(max_distance), current_mpi_rank(0), current_trajectory_id(0)
+: solar_model(model), free_flight_reference_energy_eV(std::numeric_limits<double>::quiet_NaN()), current_physical_bound_state(false), terminate_on_capture(false), snapshot_recorder(nullptr), trajectory_in_progress(false), track_trajectory_wall_time(false), accumulated_snapshot_overhead_sec(0.0), maximum_time_steps(max_time_steps), maximum_scatterings(max_scatterings), maximum_distance(max_distance), current_mpi_rank(0), current_trajectory_id(0)
 {
 	std::random_device rd;
 	PRNG.seed(rd());
@@ -573,7 +605,7 @@ unsigned long int Trajectory_Simulator::Current_Trajectory_ID() const
 
 double Trajectory_Simulator::Current_Trajectory_Wall_Time_Seconds() const
 {
-	if(!trajectory_in_progress)
+	if(!trajectory_in_progress || !track_trajectory_wall_time)
 		return 0.0;
 
 	const double total_wall_time_sec = 1.0e-9 * std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - current_trajectory_wall_start).count();
@@ -582,7 +614,7 @@ double Trajectory_Simulator::Current_Trajectory_Wall_Time_Seconds() const
 
 void Trajectory_Simulator::Accumulate_Snapshot_Overhead(const std::chrono::steady_clock::time_point& operation_start)
 {
-	if(!trajectory_in_progress)
+	if(!trajectory_in_progress || !track_trajectory_wall_time)
 		return;
 	accumulated_snapshot_overhead_sec += 1.0e-9 * std::chrono::duration_cast<std::chrono::nanoseconds>(
 		std::chrono::steady_clock::now() - operation_start).count();
@@ -1161,7 +1193,9 @@ Trajectory_Result Trajectory_Simulator::Simulate(const Event& initial_condition,
 	current_mpi_rank = mpi_rank;
 	current_trajectory_id++;
 	trajectory_in_progress = true;
-	current_trajectory_wall_start = std::chrono::steady_clock::now();
+	track_trajectory_wall_time = snapshot_recorder != nullptr || max_trajectory_wall_time_sec > 0.0;
+	if(track_trajectory_wall_time)
+		current_trajectory_wall_start = std::chrono::steady_clock::now();
 	accumulated_snapshot_overhead_sec = 0.0;
 	if(snapshot_recorder != nullptr)
 	{
@@ -1207,6 +1241,7 @@ Trajectory_Result Trajectory_Simulator::Simulate(const Event& initial_condition,
 		termination_reason = TrajectoryTerminationReason::MaxScatterings;
 
 	trajectory_in_progress = false;
+	track_trajectory_wall_time = false;
 	current_bincount.termination_reason = termination_reason;
 	current_bincount.number_of_scatterings = number_of_scatterings;
 	current_bincount.t_termination = In_Units(current_event.time, sec);
@@ -1571,18 +1606,30 @@ double Free_Particle_Propagator::Current_Speed()
 Event Free_Particle_Propagator::Event_In_3D()
 {
 	const double safe_radius = (std::isfinite(radius) && radius > 0.0) ? radius : 0.0;
+	libphysica::Vector position(3);
+	libphysica::Vector velocity(3);
 	if(radial_mode || angular_momentum == 0.0 || safe_radius == 0.0)
 	{
-		libphysica::Vector xRadial = safe_radius * axis_x;
-		libphysica::Vector vRadial = v_radial * axis_x;
-		return Event(time, xRadial, vRadial);
+		for(unsigned int component = 0; component < 3; component++)
+		{
+			position[component] = safe_radius * axis_x[component];
+			velocity[component] = v_radial * axis_x[component];
+		}
+		return Event(time, position, velocity);
 	}
 
-	double v_phi			= angular_momentum / pow(safe_radius, 2);
-	libphysica::Vector xNew = safe_radius * (cos(phi) * axis_x + sin(phi) * axis_y);
-	libphysica::Vector vNew = (v_radial * cos(phi) - v_phi * safe_radius * sin(phi)) * axis_x + (v_radial * sin(phi) + safe_radius * v_phi * cos(phi)) * axis_y;
+	const double cos_phi = cos(phi);
+	const double sin_phi = sin(phi);
+	const double tangential_speed = angular_momentum / safe_radius;
+	const double velocity_x = v_radial * cos_phi - tangential_speed * sin_phi;
+	const double velocity_y = v_radial * sin_phi + tangential_speed * cos_phi;
+	for(unsigned int component = 0; component < 3; component++)
+	{
+		position[component] = safe_radius * (cos_phi * axis_x[component] + sin_phi * axis_y[component]);
+		velocity[component] = velocity_x * axis_x[component] + velocity_y * axis_y[component];
+	}
 
-	return Event(time, xNew, vNew);
+	return Event(time, position, velocity);
 }
 
 }	// namespace DaMaSCUS_SUN

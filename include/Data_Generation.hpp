@@ -86,6 +86,7 @@ class Simulation_Data
 	unsigned long int number_of_final_reflection_shift_failures;
 	unsigned long int number_of_numerical_failures;
 	unsigned long int number_of_computational_truncations;
+	uint64_t total_number_of_scatterings;
 	double average_number_of_scatterings;
 	double computing_time;
 	bool early_stopped;

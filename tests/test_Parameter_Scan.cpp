@@ -27,6 +27,7 @@ TEST(TestParameterScan, TestConfiguration)
 	// ASSERT
 	EXPECT_TRUE(cfg.compute_halo_constraints);
 	EXPECT_EQ(cfg.sample_size, 50);
+	EXPECT_EQ(cfg.fixed_seed, 20260710u);
 	EXPECT_DOUBLE_EQ(cfg.cross_section_min, 1.0e-35 * cm * cm);
 	EXPECT_DOUBLE_EQ(cfg.cross_section_max, 1.0e-32 * cm * cm);
 	EXPECT_EQ(cfg.cross_sections, 5);
@@ -49,6 +50,7 @@ TEST(TestParameterScan, TestMinimalCaptureConfigurationDefaults)
 	EXPECT_EQ(cfg.cross_sections, 0);
 	EXPECT_FALSE(cfg.compute_halo_constraints);
 	EXPECT_FALSE(cfg.perform_full_scan);
+	EXPECT_EQ(cfg.fixed_seed, 0u);
 }
 
 TEST(TestParameterScan, TestConfigurationSummary)

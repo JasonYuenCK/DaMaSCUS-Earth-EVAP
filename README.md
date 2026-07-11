@@ -107,6 +107,7 @@ Configuration files use libconfig syntax. The most important controls are:
 | `run_mode` | `"Parameter point"` for the main evaporation workflow, `"Capture"` for capture-rate runs, or `"Parameter scan"` for the older scan path. |
 | `capture_mode` | Boolean override for capture-only behavior. `run_mode = "Capture"` also enables capture mode. |
 | `sample_size` | Target number of captured particles. Normal-mode MPI runs batch trajectories between reductions, so the final captured count may slightly exceed this target. |
+| `fixed_seed` | Optional non-negative PRNG seed. `0` or an omitted setting uses nondeterministic seeding; a nonzero value is expanded independently by MPI rank. |
 | `max_trajectories` | Optional hard cap on generated trajectories. `0` or unset means no trajectory-count cap. |
 | `interpolation_points` | Scattering-rate interpolation grid size. `0` disables interpolation; production runs should compare representative values before fixing this. |
 | `output_dir` | Root directory for generated result folders. |

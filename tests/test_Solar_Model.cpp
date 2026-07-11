@@ -1,5 +1,6 @@
 #include "gtest/gtest.h"
 
+#include <algorithm>
 #include <cmath>
 #include <mpi.h>
 #include <random>
@@ -185,6 +186,54 @@ TEST(TestSolarModel, TestTotalDMScatteringRateInterpolation)
 		double max_deviation = tolerance * correct_value;
 		ASSERT_NEAR(SSM.Total_DM_Scattering_Rate(DM, r, w), correct_value, max_deviation);
 	}
+}
+
+TEST(TestSolarModel, TestTotalDMScatteringRateRegularGridNodes)
+{
+	Solar_Model SSM;
+	obscura::DM_Particle_SI DM(0.01);
+	DM.Set_Low_Mass_Mode(true);
+	DM.Set_Sigma_Proton(pb);
+	const unsigned int radius_points = 31;
+	const unsigned int speed_points = 29;
+	const unsigned int radius_indices[] = {0, 7, 15, 30};
+	const unsigned int speed_indices[] = {0, 5, 14, 28};
+
+	SSM.Interpolate_Total_DM_Scattering_Rate(DM, radius_points, speed_points);
+	for(const auto radius_index : radius_indices)
+	{
+		const double radius = rSun * radius_index / (radius_points - 1);
+		for(const auto speed_index : speed_indices)
+		{
+			const double speed = 0.75 * speed_index / (speed_points - 1);
+			const double expected = SSM.Total_DM_Scattering_Rate_Computed(DM, radius, speed);
+			const double tolerance = std::max(1.0e-30, 1.0e-10 * std::fabs(expected));
+			EXPECT_NEAR(SSM.Total_DM_Scattering_Rate(DM, radius, speed), expected, tolerance);
+		}
+	}
+
+	SSM.Interpolate_Total_DM_Scattering_Rate(DM, 1, speed_points);
+	const double radius = 0.37 * rSun;
+	const double speed = 0.21;
+	EXPECT_DOUBLE_EQ(SSM.Total_DM_Scattering_Rate(DM, radius, speed),
+	                 SSM.Total_DM_Scattering_Rate_Computed(DM, radius, speed));
+}
+
+TEST(TestSolarModel, TestTotalDMScatteringRateRegularGridSDProton)
+{
+	Solar_Model SSM;
+	obscura::DM_Particle_SD DM(4.0 * GeV);
+	DM.Set_Low_Mass_Mode(true);
+	DM.Fix_Coupling_Ratio(1.0, 0.0);
+	DM.Set_Sigma_Proton(1.0e-36 * cm * cm);
+	const unsigned int grid_points = 17;
+
+	SSM.Interpolate_Total_DM_Scattering_Rate(DM, grid_points, grid_points);
+	const double radius = rSun * 9.0 / (grid_points - 1);
+	const double speed = 0.75 * 11.0 / (grid_points - 1);
+	const double expected = SSM.Total_DM_Scattering_Rate_Computed(DM, radius, speed);
+	const double tolerance = std::max(1.0e-30, 1.0e-10 * std::fabs(expected));
+	EXPECT_NEAR(SSM.Total_DM_Scattering_Rate(DM, radius, speed), expected, tolerance);
 }
 
 TEST(TestSolarModel, TestPrintSummary)

@@ -138,6 +138,7 @@ class Trajectory_Simulator
 
 	SnapshotRecorder* snapshot_recorder;
 	bool trajectory_in_progress;
+	bool track_trajectory_wall_time;
 	std::chrono::steady_clock::time_point current_trajectory_wall_start;
 	double accumulated_snapshot_overhead_sec;
 	void Accumulate_Snapshot_Overhead(const std::chrono::steady_clock::time_point& operation_start);

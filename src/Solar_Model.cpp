@@ -1,6 +1,8 @@
 #include "Solar_Model.hpp"
 
+#include <algorithm>
 #include <cmath>
+#include <cstddef>
 #include <mpi.h>
 
 #include "libphysica/Integration.hpp"
@@ -120,7 +122,10 @@ std::vector<std::vector<double>> Solar_Model::Create_Number_Density_Table_Electr
 }
 
 Solar_Model::Solar_Model()
-: using_interpolated_rate(false), name("Standard Solar Model AGSS09")
+: using_interpolated_rate(false),
+  rate_grid_radius_points(0), rate_grid_speed_points(0),
+  rate_grid_inverse_radius_step(0.0), rate_grid_inverse_speed_step(0.0),
+  rate_grid_max_speed(0.0), name("Standard Solar Model AGSS09")
 {
 	Import_Raw_Data();
 
@@ -284,7 +289,7 @@ double Solar_Model::Total_DM_Scattering_Rate(obscura::DM_Particle& DM, double r,
 		r = 0.0;
 	if(DM_speed < 0.0)
 		DM_speed = 0.0;
-	if(using_interpolated_rate && DM_speed < rate_interpolation.domain[1][1])
+	if(using_interpolated_rate && DM_speed <= rate_grid_max_speed)
 		return Total_DM_Scattering_Rate_Interpolated(DM, r, DM_speed);
 	else
 	{
@@ -323,18 +328,43 @@ double Solar_Model::Total_DM_Scattering_Rate_Interpolated(obscura::DM_Particle& 
 		return 0.0;
 	}
 	// 确保速度不超过插值上限
-	if(DM_speed > rate_interpolation.domain[1][1])
+	if(DM_speed > rate_grid_max_speed)
 	{
 		std::cerr << "Warning Solar_Model::Total_DM_Scattering_Rate_Interpolated(): DM speed (" << DM_speed << ") exceeds interpolation domain, using computed rate." << std::endl;
 		return Total_DM_Scattering_Rate_Computed(DM, r, DM_speed);
 	}
-	return rate_interpolation(r, DM_speed);
+
+	const double radius_coordinate = r * rate_grid_inverse_radius_step;
+	const double speed_coordinate = DM_speed * rate_grid_inverse_speed_step;
+	const unsigned int radius_index = std::min(
+	    static_cast<unsigned int>(radius_coordinate), rate_grid_radius_points - 2);
+	const unsigned int speed_index = std::min(
+	    static_cast<unsigned int>(speed_coordinate), rate_grid_speed_points - 2);
+	const double radius_fraction = radius_coordinate - radius_index;
+	const double speed_fraction = speed_coordinate - speed_index;
+	const size_t row_stride = rate_grid_speed_points;
+	const size_t lower_offset = static_cast<size_t>(radius_index) * row_stride + speed_index;
+	const size_t upper_offset = lower_offset + row_stride;
+
+	const double lower_rate = rate_grid[lower_offset]
+	                        + speed_fraction * (rate_grid[lower_offset + 1] - rate_grid[lower_offset]);
+	const double upper_rate = rate_grid[upper_offset]
+	                        + speed_fraction * (rate_grid[upper_offset + 1] - rate_grid[upper_offset]);
+	return std::max(0.0, lower_rate + radius_fraction * (upper_rate - lower_rate));
 }
 
 void Solar_Model::Interpolate_Total_DM_Scattering_Rate(obscura::DM_Particle& DM, unsigned int N_radius, unsigned int N_speed)
 {
-	if(N_radius == 0 || N_speed == 0)
+	if(N_radius < 2 || N_speed < 2)
+	{
 		using_interpolated_rate = false;
+		rate_grid.clear();
+		rate_grid_radius_points = 0;
+		rate_grid_speed_points = 0;
+		rate_grid_inverse_radius_step = 0.0;
+		rate_grid_inverse_speed_step = 0.0;
+		rate_grid_max_speed = 0.0;
+	}
 	else
 	{
 		int mpi_processes, mpi_rank;
@@ -355,20 +385,20 @@ void Solar_Model::Interpolate_Total_DM_Scattering_Rate(obscura::DM_Particle& DM,
 		std::vector<double> speeds = libphysica::Linear_Space(0, vMax, N_speed);
 		std::vector<double> local_rates;
 		local_rates.reserve(static_cast<size_t>(local_N_radius) * N_speed);
-		std::vector<double> global_rates(N_speed * global_N_radius, 0.0);
+		std::vector<double> global_rates(static_cast<size_t>(N_speed) * global_N_radius, 0.0);
 		for(auto& radius : local_radii)
 			for(auto& speed : speeds)
 				local_rates.push_back(Total_DM_Scattering_Rate_Computed(DM, radius, speed));
 		MPI_Allgather(local_rates.data(), local_N_radius * N_speed, MPI_DOUBLE, global_rates.data(), local_N_radius * N_speed, MPI_DOUBLE, MPI_COMM_WORLD);
 
-		// Re-organize into a 2D array and interpolate.
-		std::vector<std::vector<double>> rates;
-		rates.reserve(static_cast<size_t>(global_N_radius) * N_speed);
-		int i = 0;
-		for(auto& radius : global_radii)
-			for(auto& speed : speeds)
-				rates.push_back({radius, speed, global_rates[i++]});
-		rate_interpolation = libphysica::Interpolation_2D(rates);
+		// The table is regular and radius-major, so queries can use direct indices
+		// instead of two generic binary searches and nested vector lookups.
+		rate_grid.swap(global_rates);
+		rate_grid_radius_points = global_N_radius;
+		rate_grid_speed_points = N_speed;
+		rate_grid_inverse_radius_step = static_cast<double>(global_N_radius - 1) / rSun;
+		rate_grid_inverse_speed_step = static_cast<double>(N_speed - 1) / vMax;
+		rate_grid_max_speed = vMax;
 	}
 }
 

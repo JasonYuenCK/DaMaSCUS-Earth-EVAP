@@ -65,6 +65,20 @@ void Configuration::Import_Parameter_Scan_Parameter()
 		std::cerr << "No 'sample_size' setting in configuration file." << std::endl;
 		std::exit(EXIT_FAILURE);
 	}
+	fixed_seed = 0;
+	try
+	{
+		const int configured_seed = config.lookup("fixed_seed");
+		if(configured_seed < 0)
+		{
+			std::cerr << "Error in Configuration::Import_Parameter_Scan_Parameter(): 'fixed_seed' must be non-negative." << std::endl;
+			std::exit(EXIT_FAILURE);
+		}
+		fixed_seed = static_cast<unsigned int>(configured_seed);
+	}
+	catch(const SettingNotFoundException& nfex)
+	{
+	}
 	try
 	{
 		run_mode = config.lookup("run_mode").c_str();
@@ -413,6 +427,7 @@ void Configuration::Print_Summary(int mpi_rank)
 				  << "\tRun mode:\t\t\t" << run_mode << std::endl
 				  << "\tCapture mode:\t\t\t" << (capture_mode ? "[x]" : "[ ]") << std::endl
 				  << "\tSample size:\t\t\t" << sample_size << std::endl
+				  << "\tFixed PRNG seed:\t\t" << (fixed_seed == 0 ? "random" : std::to_string(fixed_seed)) << std::endl
 				  << "\tMax scatterings/traj:\t\t" << maximum_number_of_scatterings << std::endl
 				  << "\tSc. rate interpolation:\t\t" << ((interpolation_points > 0) ? "[x] (Grid: " + std::to_string(interpolation_points) + "×" + std::to_string(interpolation_points) + ")" : "[ ]") << std::endl;
 		if(run_mode == "Parameter point" && isoreflection_rings > 1)

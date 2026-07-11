@@ -41,7 +41,12 @@ class Solar_Model
 
 	// Interpolation of total scattering rate
 	bool using_interpolated_rate;
-	libphysica::Interpolation_2D rate_interpolation;
+	std::vector<double> rate_grid;
+	unsigned int rate_grid_radius_points;
+	unsigned int rate_grid_speed_points;
+	double rate_grid_inverse_radius_step;
+	double rate_grid_inverse_speed_step;
+	double rate_grid_max_speed;
 
   public:
 	std::string name;

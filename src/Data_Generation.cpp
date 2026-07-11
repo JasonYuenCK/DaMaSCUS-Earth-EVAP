@@ -447,7 +447,7 @@ Simulation_Data::Simulation_Data(unsigned int sample_size, unsigned int max_traj
   number_of_invalid_survival_captured_particles(0),
   number_of_initial_shift_failures(0), number_of_final_reflection_shift_failures(0), number_of_numerical_failures(0),
   number_of_computational_truncations(0),
-  average_number_of_scatterings(0.0), computing_time(0.0), early_stopped(false), early_stop_reason(SimulationStopReason::None),
+  total_number_of_scatterings(0), average_number_of_scatterings(0.0), computing_time(0.0), early_stopped(false), early_stop_reason(SimulationStopReason::None),
   mpi_rank(0), mpi_processes(1), isoreflection_rings(iso_rings), minimum_speed_threshold(u_min),
   number_of_data_points(std::vector<unsigned long int>(iso_rings, 0)),
   data(iso_rings, std::vector<libphysica::DataPoint>())
@@ -734,9 +734,6 @@ void Simulation_Data::Generate_Data(obscura::DM_Particle& DM, Solar_Model& solar
 		for(unsigned long int trajectory_in_round = 0; trajectory_in_round < local_trajectories_this_round; trajectory_in_round++)
 		{
 			Event IC = Initial_Conditions(halo_model, solar_model, simulator.PRNG);
-			TrajectoryBincount failed_bincount;
-			failed_bincount.termination_reason = TrajectoryTerminationReason::NumericalFailure;
-			failed_bincount.survival_valid = false;
 			const bool initial_shift_ok = Hyperbolic_Kepler_Shift(IC, initial_and_final_radius);
 			if(!initial_shift_ok)
 			{
@@ -744,13 +741,19 @@ void Simulation_Data::Generate_Data(obscura::DM_Particle& DM, Solar_Model& solar
 				number_of_numerical_failures++;
 			}
 			Trajectory_Result trajectory = initial_shift_ok
-			                                   ? simulator.Simulate(IC, DM, mpi_rank)
-			                                   : Trajectory_Result(IC, IC, 0, failed_bincount);
-			const double trajectory_completion_wall_time_sec = elapsed_since_start();
+			    ? simulator.Simulate(IC, DM, mpi_rank)
+			    : [&]() {
+				TrajectoryBincount failed_bincount;
+				failed_bincount.termination_reason = TrajectoryTerminationReason::NumericalFailure;
+				failed_bincount.survival_valid = false;
+				return Trajectory_Result(IC, IC, 0, failed_bincount);
+			}();
+			const double trajectory_completion_wall_time_sec =
+			    (!capture_mode && trajectory.bincount.is_captured) ? elapsed_since_start() : 0.0;
 
 			local_total++;
 			number_of_trajectories++;
-			average_number_of_scatterings = 1.0 / number_of_trajectories * ((number_of_trajectories - 1) * average_number_of_scatterings + trajectory.number_of_scatterings);
+			total_number_of_scatterings += static_cast<uint64_t>(trajectory.number_of_scatterings);
 			const bool completed_outward_escape = Completed_Outward_Escape(trajectory.bincount.termination_reason);
 			if(initial_shift_ok && Is_Numerical_Termination(trajectory.bincount.termination_reason))
 				number_of_numerical_failures++;
@@ -846,11 +849,13 @@ void Simulation_Data::Generate_Data(obscura::DM_Particle& DM, Solar_Model& solar
 			}
 		}
 
-		MPI_Allreduce(&local_captured, &global_captured, 1, MPI_UNSIGNED_LONG, MPI_SUM, MPI_COMM_WORLD);
-		unsigned long int global_attempted_trajectories = 0;
-		unsigned long int global_initial_shift_failures = 0;
-		MPI_Allreduce(&number_of_trajectories, &global_attempted_trajectories, 1, MPI_UNSIGNED_LONG, MPI_SUM, MPI_COMM_WORLD);
-		MPI_Allreduce(&number_of_initial_shift_failures, &global_initial_shift_failures, 1, MPI_UNSIGNED_LONG, MPI_SUM, MPI_COMM_WORLD);
+		const std::array<unsigned long int, 3> local_progress = {
+		    local_captured, number_of_trajectories, number_of_initial_shift_failures};
+		std::array<unsigned long int, 3> global_progress = {{0, 0, 0}};
+		MPI_Allreduce(local_progress.data(), global_progress.data(), static_cast<int>(global_progress.size()), MPI_UNSIGNED_LONG, MPI_SUM, MPI_COMM_WORLD);
+		global_captured = global_progress[0];
+		const unsigned long int global_attempted_trajectories = global_progress[1];
+		const unsigned long int global_initial_shift_failures = global_progress[2];
 
 		if(global_attempted_trajectories > 0)
 		{
@@ -915,24 +920,28 @@ void Simulation_Data::Generate_Data(obscura::DM_Particle& DM, Solar_Model& solar
 void Simulation_Data::Perform_MPI_Reductions(bool capture_mode)
 {
 	MPI_Trace_Point(mpi_rank, "enter Perform_MPI_Reductions");
-	average_number_of_scatterings *= number_of_trajectories;
-	MPI_Trace_Point(mpi_rank, "before allreduce number_of_trajectories");
-	MPI_Allreduce(MPI_IN_PLACE, &number_of_trajectories, 1, MPI_UNSIGNED_LONG, MPI_SUM, MPI_COMM_WORLD);
-	MPI_Trace_Point(mpi_rank, "before allreduce number_of_captured_particles");
-	MPI_Allreduce(MPI_IN_PLACE, &number_of_captured_particles, 1, MPI_UNSIGNED_LONG, MPI_SUM, MPI_COMM_WORLD);
-	MPI_Trace_Point(mpi_rank, "before allreduce number_of_completed_outward_escapes");
-	MPI_Allreduce(MPI_IN_PLACE, &number_of_completed_outward_escapes, 1, MPI_UNSIGNED_LONG, MPI_SUM, MPI_COMM_WORLD);
-	MPI_Trace_Point(mpi_rank, "before allreduce number_of_initial_shift_failures");
-	MPI_Allreduce(MPI_IN_PLACE, &number_of_initial_shift_failures, 1, MPI_UNSIGNED_LONG, MPI_SUM, MPI_COMM_WORLD);
-	MPI_Trace_Point(mpi_rank, "before allreduce number_of_final_reflection_shift_failures");
-	MPI_Allreduce(MPI_IN_PLACE, &number_of_final_reflection_shift_failures, 1, MPI_UNSIGNED_LONG, MPI_SUM, MPI_COMM_WORLD);
-	MPI_Trace_Point(mpi_rank, "before allreduce number_of_numerical_failures");
-	MPI_Allreduce(MPI_IN_PLACE, &number_of_numerical_failures, 1, MPI_UNSIGNED_LONG, MPI_SUM, MPI_COMM_WORLD);
-	MPI_Trace_Point(mpi_rank, "before allreduce number_of_computational_truncations");
-	MPI_Allreduce(MPI_IN_PLACE, &number_of_computational_truncations, 1, MPI_UNSIGNED_LONG, MPI_SUM, MPI_COMM_WORLD);
-	MPI_Trace_Point(mpi_rank, "before allreduce average_number_of_scatterings");
-	MPI_Allreduce(MPI_IN_PLACE, &average_number_of_scatterings, 1, MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
-	average_number_of_scatterings = (number_of_trajectories > 0) ? average_number_of_scatterings / number_of_trajectories : 0.0;
+	std::array<unsigned long int, 7> primary_counters = {{
+	    number_of_trajectories,
+	    number_of_captured_particles,
+	    number_of_completed_outward_escapes,
+	    number_of_initial_shift_failures,
+	    number_of_final_reflection_shift_failures,
+	    number_of_numerical_failures,
+	    number_of_computational_truncations}};
+	MPI_Trace_Point(mpi_rank, "before allreduce primary counters");
+	MPI_Allreduce(MPI_IN_PLACE, primary_counters.data(), static_cast<int>(primary_counters.size()), MPI_UNSIGNED_LONG, MPI_SUM, MPI_COMM_WORLD);
+	number_of_trajectories = primary_counters[0];
+	number_of_captured_particles = primary_counters[1];
+	number_of_completed_outward_escapes = primary_counters[2];
+	number_of_initial_shift_failures = primary_counters[3];
+	number_of_final_reflection_shift_failures = primary_counters[4];
+	number_of_numerical_failures = primary_counters[5];
+	number_of_computational_truncations = primary_counters[6];
+	MPI_Trace_Point(mpi_rank, "before allreduce total scatterings");
+	MPI_Allreduce(MPI_IN_PLACE, &total_number_of_scatterings, 1, MPI_UINT64_T, MPI_SUM, MPI_COMM_WORLD);
+	average_number_of_scatterings = (number_of_trajectories > 0)
+	                               ? static_cast<double>(total_number_of_scatterings) / number_of_trajectories
+	                               : 0.0;
 
 	int global_stop_reason = static_cast<int>(early_stop_reason);
 	MPI_Trace_Point(mpi_rank, "before allreduce early_stop_reason");
@@ -948,16 +957,19 @@ void Simulation_Data::Perform_MPI_Reductions(bool capture_mode)
 		return;
 	}
 
-	MPI_Trace_Point(mpi_rank, "before allreduce number_of_free_particles");
-	MPI_Allreduce(MPI_IN_PLACE, &number_of_free_particles, 1, MPI_UNSIGNED_LONG, MPI_SUM, MPI_COMM_WORLD);
-	MPI_Trace_Point(mpi_rank, "before allreduce number_of_reflected_particles");
-	MPI_Allreduce(MPI_IN_PLACE, &number_of_reflected_particles, 1, MPI_UNSIGNED_LONG, MPI_SUM, MPI_COMM_WORLD);
-	MPI_Trace_Point(mpi_rank, "before allreduce number_of_complete_evaporation_particles");
-	MPI_Allreduce(MPI_IN_PLACE, &number_of_complete_evaporation_particles, 1, MPI_UNSIGNED_LONG, MPI_SUM, MPI_COMM_WORLD);
-	MPI_Trace_Point(mpi_rank, "before allreduce number_of_censored_captured_particles");
-	MPI_Allreduce(MPI_IN_PLACE, &number_of_censored_captured_particles, 1, MPI_UNSIGNED_LONG, MPI_SUM, MPI_COMM_WORLD);
-	MPI_Trace_Point(mpi_rank, "before allreduce number_of_invalid_survival_captured_particles");
-	MPI_Allreduce(MPI_IN_PLACE, &number_of_invalid_survival_captured_particles, 1, MPI_UNSIGNED_LONG, MPI_SUM, MPI_COMM_WORLD);
+	std::array<unsigned long int, 5> result_counters = {{
+	    number_of_free_particles,
+	    number_of_reflected_particles,
+	    number_of_complete_evaporation_particles,
+	    number_of_censored_captured_particles,
+	    number_of_invalid_survival_captured_particles}};
+	MPI_Trace_Point(mpi_rank, "before allreduce result counters");
+	MPI_Allreduce(MPI_IN_PLACE, result_counters.data(), static_cast<int>(result_counters.size()), MPI_UNSIGNED_LONG, MPI_SUM, MPI_COMM_WORLD);
+	number_of_free_particles = result_counters[0];
+	number_of_reflected_particles = result_counters[1];
+	number_of_complete_evaporation_particles = result_counters[2];
+	number_of_censored_captured_particles = result_counters[3];
+	number_of_invalid_survival_captured_particles = result_counters[4];
 
 	// Reduce bincount histograms across all ranks
 	MPI_Trace_Point(mpi_rank, "before allreduce captured_dt_hist");
