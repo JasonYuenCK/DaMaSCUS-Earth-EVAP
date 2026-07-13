@@ -28,6 +28,7 @@ set(EXTERNAL_DIR  ${PROJECT_SOURCE_DIR}/external)
 #External projects
 find_package(MPI REQUIRED)
 include_directories(${MPI_INCLUDE_PATH})
+find_package(Threads REQUIRED)
 
 # Prefer Homebrew Boost on local macOS builds, but do not force that path on
 # clusters where Boost is supplied by the module environment.
@@ -63,9 +64,7 @@ FetchContent_Declare(googletest
   INSTALL_COMMAND   ""
   TEST_COMMAND      "" )
 
-# Version header. A custom target runs on every build; configure_file only
-# updates the header when its content changes, so source files are not rebuilt
-# unnecessarily.
+# Refresh the build-tree version header on every build.
 set(VERSION_HEADER_TEMPLATE ${INCLUDE_DIR}/version.hpp.in)
 set(VERSION_HEADER ${GENERATED_DIR}/version.hpp)
 add_custom_target(generate_version_header ALL

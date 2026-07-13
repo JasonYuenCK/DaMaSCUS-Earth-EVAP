@@ -49,6 +49,13 @@ void TouchFile(const std::string& path)
 	file << "stale\n";
 }
 
+void RemoveTestOutputDir(const std::string& directory)
+{
+	std::remove((directory + "bincount.txt").c_str());
+	std::remove((directory + "evaporation_times.txt").c_str());
+	rmdir(directory.c_str());
+}
+
 // Retired with the block/manifest snapshot workflow.
 #if 0
 struct TestEvaporationRow
@@ -283,6 +290,16 @@ TEST(TestDataGeneration, TestInitialShiftFailureIsReported)
 	EXPECT_EQ(data_set.Valid_Trajectories(), 0UL);
 	EXPECT_DOUBLE_EQ(data_set.Numerical_Failure_Ratio(), 1.0);
 	EXPECT_DOUBLE_EQ(data_set.Capture_Ratio_Valid(), 0.0);
+
+	int rank = 0;
+	MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+	const std::string output_dir = TestOutputDir("initial_shift_failure_contract");
+	data_set.Write_Output_Files(output_dir, DM);
+	if(rank == 0)
+	{
+		EXPECT_TRUE(FileContains(output_dir + "bincount.txt", "# EARLY_STOP: initial_shift_failure_fraction_exceeded"));
+		RemoveTestOutputDir(output_dir);
+	}
 }
 
 TEST(TestDataGeneration, TestComputationallyTruncatedNonCaptureIsExcludedFromCaptureRate)
@@ -296,14 +313,27 @@ TEST(TestDataGeneration, TestComputationallyTruncatedNonCaptureIsExcludedFromCap
 	DM.Set_Sigma_Electron(1.0e-100 * pb);
 
 	Simulation_Data data_set(1, 1);
-	// Zero permitted scatterings deterministically terminates the trajectory
-	// before it can be classified as an outward escape or a sticky capture.
 	data_set.Configure(2.0 * rSun, 0, 0, 10);
 	data_set.Generate_Data(DM, SSM, SHM, SnapshotConfig(), 20260710);
 
 	EXPECT_EQ(data_set.Valid_Trajectories(), 0UL);
 	EXPECT_DOUBLE_EQ(data_set.Capture_Ratio_Valid(), 0.0);
 	EXPECT_DOUBLE_EQ(data_set.Numerical_Failure_Ratio(), 0.0);
+
+	int rank = 0;
+	MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+	const std::string output_dir = TestOutputDir("truncated_output_contract");
+	data_set.Write_Output_Files(output_dir, DM);
+	if(rank == 0)
+	{
+		EXPECT_TRUE(FileContains(output_dir + "bincount.txt", "# valid_trajectories = 0"));
+		EXPECT_TRUE(FileContains(output_dir + "bincount.txt", "# unresolved_not_captured_trajectories = 1"));
+		EXPECT_TRUE(FileContains(output_dir + "bincount.txt", "# computational_truncations = 1"));
+		EXPECT_TRUE(FileContains(output_dir + "bincount.txt", "# capture_rate_valid = 0.00000000"));
+		EXPECT_TRUE(FileContains(output_dir + "bincount.txt", "# capture_rate_valid_CI_95_lower = 0.00000000"));
+		EXPECT_TRUE(FileContains(output_dir + "bincount.txt", "# EARLY_STOP: max_trajectories_reached"));
+		RemoveTestOutputDir(output_dir);
+	}
 }
 
 TEST(TestDataGeneration, TestCaptureModeCompletedEscapeIsIncludedInCaptureRate)
@@ -455,6 +485,7 @@ TEST(TestDataGeneration, TestDefaultOutputContract)
 		EXPECT_FALSE(FileExists(output_dir + std::string("evaporation_") + "mode_summary.txt"));
 		EXPECT_FALSE(FileExists(output_dir + std::string("evaporation_") + "mode_" + "bincount.txt"));
 		EXPECT_FALSE(FileExists(output_dir + std::string("computation_") + "time_summary.txt"));
+		RemoveTestOutputDir(output_dir);
 	}
 }
 
@@ -485,5 +516,6 @@ TEST(TestDataGeneration, TestFinalOutputContainsOnlyRequestedReports)
 		EXPECT_FALSE(FileExists(output_dir + std::string("evaporation_") + "mode_summary.txt"));
 		EXPECT_FALSE(FileExists(output_dir + std::string("evaporation_") + "mode_" + "bincount.txt"));
 		EXPECT_FALSE(FileExists(output_dir + std::string("computation_") + "time_summary.txt"));
+		RemoveTestOutputDir(output_dir);
 	}
 }

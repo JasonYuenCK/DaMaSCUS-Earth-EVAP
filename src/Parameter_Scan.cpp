@@ -244,7 +244,24 @@ void Configuration::Import_Parameter_Scan_Parameter()
 	{
 		try
 		{
-			double interval = config.lookup("snapshot_interval");
+			double interval = 0.0;
+			if(!config.lookupValue("snapshot_interval", interval))
+			{
+				long long integer_interval = 0;
+				if(!config.lookupValue("snapshot_interval", integer_interval))
+				{
+					std::cerr << "Error in Configuration::Import_Parameter_Scan_Parameter(): "
+					          << "'snapshot_interval' must be a numeric value." << std::endl;
+					std::exit(EXIT_FAILURE);
+				}
+				interval = static_cast<double>(integer_interval);
+			}
+			if(!IsValidSnapshotIntervalSeconds(interval))
+			{
+				std::cerr << "Error in Configuration::Import_Parameter_Scan_Parameter(): "
+				          << "'snapshot_interval' must be a positive integer number of seconds." << std::endl;
+				std::exit(EXIT_FAILURE);
+			}
 			snapshot_config.interval_seconds = interval;
 		}
 		catch(const SettingNotFoundException& nfex)

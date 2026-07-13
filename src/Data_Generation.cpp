@@ -12,10 +12,12 @@
 #include <functional>
 #include <iomanip>
 #include <limits>
+#include <memory>
 #include <mpi.h>
 #include <numeric>
 #include <unordered_set>
 #include <sstream>
+#include <stdexcept>
 #include <sys/stat.h>
 #include <unistd.h>
 #include <utility>
@@ -26,6 +28,8 @@
 #include "libphysica/Utilities.hpp"
 
 #include "obscura/Astronomy.hpp"
+#include "Snapshot_Heartbeat.hpp"
+#include "Snapshot_Shared_State.hpp"
 
 namespace DaMaSCUS_SUN
 {
@@ -170,125 +174,62 @@ bool Make_Compact_Evaporation_Event(const EvaporationRecord& rec, CompactEvapora
 	return true;
 }
 
-struct SnapshotEvaporationEntry
+struct BinomialRateEstimate
 {
-	uint64_t trajectory_id = 0;
-	double completion_wall_time_sec = 0.0;
-	double lifetime_unbinding_sec = -1.0;
+	double rate = 0.0;
+	double standard_error = 0.0;
+	double ci_lower = 0.0;
+	double ci_upper = 0.0;
 };
 
-struct RankedSnapshotEvaporationEntry
+BinomialRateEstimate Estimate_Binomial_Rate(uint64_t trials, uint64_t successes)
 {
-	int rank = -1;
-	SnapshotEvaporationEntry entry;
-};
+	BinomialRateEstimate estimate;
+	if(trials == 0)
+		return estimate;
 
-struct Rank_Snapshot_State
-{
-	uint64_t run_id = 0;
-	int32_t snapshot_index = 0;
-	int32_t rank = 0;
-	int32_t done = 0;
-	int32_t trajectory_in_progress = 0;
-	uint64_t local_captured = 0;
-	uint64_t local_total = 0;
-	uint64_t bincount_captured_samples = 0;
-	uint64_t bincount_not_captured_samples = 0;
-	uint64_t current_trajectory_id = 0;
-	double rank_elapsed_wall_sec = 0.0;
-	int32_t current_trajectory_captured = 0;
-	std::array<double, NUM_BINS> current_trajectory_dt_hist{};
-	std::array<double, NUM_BINS> current_trajectory_v2dt_hist{};
-	std::array<double, NUM_BINS> captured_dt_hist{};
-	std::array<double, NUM_BINS> captured_v2dt_hist{};
-	std::array<double, NUM_BINS> captured_dt_sq_hist{};
-	std::array<double, NUM_BINS> captured_v2dt_sq_hist{};
-	std::array<double, NUM_BINS> not_captured_dt_hist{};
-	std::array<double, NUM_BINS> not_captured_v2dt_hist{};
-	std::array<double, NUM_BINS> not_captured_dt_sq_hist{};
-	std::array<double, NUM_BINS> not_captured_v2dt_sq_hist{};
-	std::vector<SnapshotEvaporationEntry> new_evaporation_events;
-};
-
-struct Snapshot_Report_State
-{
-	double snapshot_target_wall_time_sec = 0.0;
-	double snapshot_interval_seconds = 0.0;
-	uint64_t total_trajectories = 0;
-	uint64_t captured_particles = 0;
-	uint64_t snapshot_bincount_captured_samples = 0;
-	uint64_t snapshot_bincount_not_captured_samples = 0;
-	std::array<double, NUM_BINS> captured_dt_hist{};
-	std::array<double, NUM_BINS> captured_v2dt_hist{};
-	std::array<double, NUM_BINS> captured_dt_sq_hist{};
-	std::array<double, NUM_BINS> captured_v2dt_sq_hist{};
-	std::array<double, NUM_BINS> not_captured_dt_hist{};
-	std::array<double, NUM_BINS> not_captured_v2dt_hist{};
-	std::array<double, NUM_BINS> not_captured_dt_sq_hist{};
-	std::array<double, NUM_BINS> not_captured_v2dt_sq_hist{};
-	std::vector<RankedSnapshotEvaporationEntry> new_evaporation_events;
-};
-
-template<typename T>
-void Write_Binary_Value(std::ofstream& file, const T& value)
-{
-	file.write(reinterpret_cast<const char*>(&value), sizeof(T));
+	const double N = static_cast<double>(trials);
+	estimate.rate = static_cast<double>(std::min(successes, trials)) / N;
+	estimate.standard_error = sqrt(estimate.rate * (1.0 - estimate.rate) / N);
+	const double z = 1.96;
+	const double denominator = 1.0 + z * z / N;
+	const double center = estimate.rate + z * z / (2.0 * N);
+	const double spread = z * sqrt(estimate.rate * (1.0 - estimate.rate) / N + z * z / (4.0 * N * N));
+	estimate.ci_lower = std::max(0.0, (center - spread) / denominator);
+	estimate.ci_upper = std::min(1.0, (center + spread) / denominator);
+	return estimate;
 }
 
-template<typename T, size_t N>
-void Write_Binary_Array(std::ofstream& file, const std::array<T, N>& values)
+const char* Stop_Reason_Key(SimulationStopReason reason)
 {
-	file.write(reinterpret_cast<const char*>(values.data()), N * sizeof(T));
+	switch(reason)
+	{
+		case SimulationStopReason::MaxTrajectoriesReached:
+			return "max_trajectories_reached";
+		case SimulationStopReason::CaptureTargetNotReached:
+			return "capture_target_not_reached";
+		case SimulationStopReason::InitialShiftFailureFractionExceeded:
+			return "initial_shift_failure_fraction_exceeded";
+		case SimulationStopReason::None:
+		default:
+			return "none";
+	}
 }
 
-template<typename T>
-void Read_Binary_Value(std::ifstream& file, T& value)
+const char* Stop_Reason_Display(SimulationStopReason reason)
 {
-	file.read(reinterpret_cast<char*>(&value), sizeof(T));
-}
-
-template<typename T, size_t N>
-void Read_Binary_Array(std::ifstream& file, std::array<T, N>& values)
-{
-	file.read(reinterpret_cast<char*>(values.data()), N * sizeof(T));
-}
-
-void Write_Snapshot_Evaporation_Entry_Binary(std::ofstream& file, const SnapshotEvaporationEntry& entry)
-{
-	Write_Binary_Value(file, entry.trajectory_id);
-	Write_Binary_Value(file, entry.completion_wall_time_sec);
-	Write_Binary_Value(file, entry.lifetime_unbinding_sec);
-}
-
-void Read_Snapshot_Evaporation_Entry_Binary(std::ifstream& file, SnapshotEvaporationEntry& entry)
-{
-	Read_Binary_Value(file, entry.trajectory_id);
-	Read_Binary_Value(file, entry.completion_wall_time_sec);
-	Read_Binary_Value(file, entry.lifetime_unbinding_sec);
-}
-
-SnapshotEvaporationEntry Make_Snapshot_Evaporation_Entry(const CompactEvaporationEvent& event)
-{
-	SnapshotEvaporationEntry entry;
-	entry.trajectory_id = static_cast<uint64_t>(event.trajectory_id);
-	entry.completion_wall_time_sec = event.completion_wall_time_sec;
-	entry.lifetime_unbinding_sec = event.lifetime_unbinding;
-	return entry;
-}
-
-CompactEvaporationEvent Make_Log_Event(int rank, const SnapshotEvaporationEntry& entry)
-{
-	CompactEvaporationEvent event;
-	event.rank = rank;
-	event.trajectory_id = entry.trajectory_id;
-	event.completion_wall_time_sec = entry.completion_wall_time_sec;
-	event.lifetime_unbinding = entry.lifetime_unbinding_sec;
-	return event;
-}
-
-double Capture_Ratio_From_Counts(uint64_t total_trajectories, uint64_t captured_particles)
-{
-	return (total_trajectories > 0) ? static_cast<double>(captured_particles) / static_cast<double>(total_trajectories) : 0.0;
+	switch(reason)
+	{
+		case SimulationStopReason::MaxTrajectoriesReached:
+			return "max_trajectories reached";
+		case SimulationStopReason::CaptureTargetNotReached:
+			return "capture target not reached";
+		case SimulationStopReason::InitialShiftFailureFractionExceeded:
+			return "initial shift failure fraction exceeded";
+		case SimulationStopReason::None:
+		default:
+			return "none";
+	}
 }
 
 double Snapshot_Bin_Error(double sum, double sum_sq, double count)
@@ -304,50 +245,31 @@ double Snapshot_Bin_Error(double sum, double sum_sq, double count)
 	return sqrt(count * variance);
 }
 
-bool Has_Bincount_Contribution(const std::array<double, NUM_BINS>& dt_hist, const std::array<double, NUM_BINS>& v2dt_hist)
+void Write_Report_Header(
+	std::ofstream& file,
+	double mass_gev,
+	double sigma_cm2,
+	uint64_t total_trajectories,
+	uint64_t captured_particles,
+	SimulationStopReason stop_reason)
 {
-	return std::any_of(dt_hist.begin(), dt_hist.end(), [](double value) { return value != 0.0; })
-	    || std::any_of(v2dt_hist.begin(), v2dt_hist.end(), [](double value) { return value != 0.0; });
-}
-
-void Write_Report_Header(std::ofstream& file, double mass_gev, double sigma_cm2, uint64_t total_trajectories, uint64_t captured_particles, bool early_stopped, double snapshot_target_wall_time_sec = -1.0, double snapshot_interval_seconds = 0.0)
-{
-	if(snapshot_target_wall_time_sec >= 0.0)
-	{
-		file << "# snapshot_target_wall_time_s = " << std::defaultfloat << std::setprecision(10) << snapshot_target_wall_time_sec << "\n";
-		file << "# snapshot_interval_s = " << std::fixed << std::setprecision(3) << snapshot_interval_seconds << "\n";
-	}
-
 	file << "# DM_mass_GeV = " << std::scientific << std::setprecision(6) << mass_gev << "\n";
 	file << "# DM_sigma_cm2 = " << std::scientific << std::setprecision(6) << sigma_cm2 << "\n";
 	file << "# total_trajectories = " << total_trajectories << "\n";
 	file << "# captured_particles = " << captured_particles << "\n";
 
-	double p_cap = Capture_Ratio_From_Counts(total_trajectories, captured_particles);
-	file << "# capture_rate = " << std::fixed << std::setprecision(8) << p_cap << "\n";
+	const BinomialRateEstimate raw = Estimate_Binomial_Rate(total_trajectories, captured_particles);
+	file << "# capture_rate = " << std::fixed << std::setprecision(8) << raw.rate << "\n";
+	file << "# capture_rate_raw = " << std::fixed << std::setprecision(8) << raw.rate << "\n";
+	file << "# capture_rate_err = " << std::fixed << std::setprecision(8) << raw.standard_error << "\n";
+	file << "# capture_rate_raw_err = " << std::fixed << std::setprecision(8) << raw.standard_error << "\n";
+	file << "# capture_rate_CI_95_lower = " << std::fixed << std::setprecision(8) << raw.ci_lower << "\n";
+	file << "# capture_rate_CI_95_upper = " << std::fixed << std::setprecision(8) << raw.ci_upper << "\n";
+	file << "# capture_rate_raw_CI_95_lower = " << std::fixed << std::setprecision(8) << raw.ci_lower << "\n";
+	file << "# capture_rate_raw_CI_95_upper = " << std::fixed << std::setprecision(8) << raw.ci_upper << "\n";
 
-	{
-		double N = static_cast<double>(total_trajectories);
-		double p = p_cap;
-		double z = 1.96;
-		double sigma_p = (N > 0.0) ? sqrt(p * (1.0 - p) / N) : 0.0;
-		file << "# capture_rate_err = " << std::fixed << std::setprecision(8) << sigma_p << "\n";
-		if(N > 0.0)
-		{
-			double denom = 1.0 + z * z / N;
-			double center = p + z * z / (2.0 * N);
-			double spread = z * sqrt(p * (1.0 - p) / N + z * z / (4.0 * N * N));
-			double ci_lower = (center - spread) / denom;
-			double ci_upper = (center + spread) / denom;
-			if(ci_lower < 0.0) ci_lower = 0.0;
-			if(ci_upper > 1.0) ci_upper = 1.0;
-			file << "# capture_rate_CI_95_lower = " << std::fixed << std::setprecision(8) << ci_lower << "\n";
-			file << "# capture_rate_CI_95_upper = " << std::fixed << std::setprecision(8) << ci_upper << "\n";
-		}
-	}
-
-	if(early_stopped)
-		file << "# EARLY_STOP: max_trajectories reached\n";
+	if(stop_reason != SimulationStopReason::None)
+		file << "# EARLY_STOP: " << Stop_Reason_Key(stop_reason) << "\n";
 }
 
 std::string Join_Path(const std::string& directory, const std::string& name)
@@ -361,9 +283,6 @@ std::string Evaporation_Log_Path_From_Output_Dir(const std::string& output_dir)
 {
 	return Join_Path(output_dir, "evaporation_times.txt");
 }
-
-double Snapshot_Target_Wall_Time_Seconds(int snapshot_index, double interval_seconds);
-std::string Snapshot_Time_File_Label(int snapshot_index, double interval_seconds);
 
 void Write_Evaporation_Log_File_Header(std::ofstream& file, double mass_gev, double sigma_cm2)
 {
@@ -506,619 +425,6 @@ bool Ensure_Directory_Exists(const std::string& directory)
 	return S_ISDIR(info.st_mode);
 }
 
-double Snapshot_Target_Wall_Time_Seconds(int snapshot_index, double interval_seconds)
-{
-	return snapshot_index * interval_seconds;
-}
-
-std::string Snapshot_Time_File_Label(int snapshot_index, double interval_seconds)
-{
-	const double seconds = Snapshot_Target_Wall_Time_Seconds(snapshot_index, interval_seconds);
-	const long long whole_seconds = static_cast<long long>(std::llround(seconds));
-	if(std::fabs(seconds - static_cast<double>(whole_seconds)) < 1.0e-9)
-		return std::to_string(whole_seconds) + "s";
-
-	const long long milliseconds = static_cast<long long>(std::llround(seconds * 1000.0));
-	if(milliseconds > 0 && std::fabs(seconds - static_cast<double>(milliseconds) / 1000.0) < 1.0e-9)
-		return std::to_string(milliseconds) + "ms";
-
-	const long long microseconds = static_cast<long long>(std::llround(seconds * 1000000.0));
-	if(microseconds > 0 && std::fabs(seconds - static_cast<double>(microseconds) / 1000000.0) < 1.0e-9)
-		return std::to_string(microseconds) + "us";
-
-	std::ostringstream stream;
-	stream << std::fixed << std::setprecision(6) << seconds;
-	std::string label = stream.str();
-	while(!label.empty() && label.back() == '0')
-		label.pop_back();
-	if(!label.empty() && label.back() == '.')
-		label.pop_back();
-	std::replace(label.begin(), label.end(), '.', 'p');
-	return label + "s";
-}
-
-std::string Snapshot_Text_File_Path(const std::string& snapshot_root, int snapshot_index, double interval_seconds)
-{
-	return snapshot_root + "snapshot_" + Snapshot_Time_File_Label(snapshot_index, interval_seconds) + ".txt";
-}
-
-std::string Snapshot_Evaporation_Time_File_Path(const std::string& snapshot_root, int snapshot_index, double interval_seconds)
-{
-	return snapshot_root + "snapshot_" + Snapshot_Time_File_Label(snapshot_index, interval_seconds) + "_evaporation_times.txt";
-}
-
-// Retired block/manifest implementation. Snapshots are now standalone atomic
-// bincount and evaporation-time files, so this path is deliberately inactive.
-#if 0
-std::string Snapshot_Evaporation_Block_Dir(const std::string& snapshot_root)
-{
-	return Join_Path(snapshot_root, "evaporation_blocks") + "/";
-}
-
-std::string Snapshot_Evaporation_Block_Path(const std::string& snapshot_root, int snapshot_index)
-{
-	std::ostringstream stream;
-	stream << "block_" << std::setw(6) << std::setfill('0') << snapshot_index << ".txt";
-	return Snapshot_Evaporation_Block_Dir(snapshot_root) + stream.str();
-}
-
-std::string Snapshot_Evaporation_Block_Dir_From_Output_Dir(const std::string& output_dir)
-{
-	return Snapshot_Evaporation_Block_Dir(Join_Path(output_dir, "snapshot"));
-}
-
-std::string Snapshot_Run_Manifest_Path(const std::string& snapshot_root)
-{
-	return Join_Path(snapshot_root, "run_manifest.txt");
-}
-
-std::string Evaporation_Partial_Log_Path_From_Output_Dir(const std::string& output_dir)
-{
-	return Join_Path(output_dir, "evaporation_times.partial.txt");
-}
-
-bool Is_Evaporation_Block_File_Name(const std::string& name)
-{
-	return name.size() > 10
-	    && name.compare(0, 6, "block_") == 0
-	    && name.compare(name.size() - 4, 4, ".txt") == 0;
-}
-
-struct EvaporationBlockFile
-{
-	int snapshot_index = -1;
-	std::string path;
-};
-
-bool List_Evaporation_Block_Files(const std::string& snapshot_root, std::vector<EvaporationBlockFile>& block_files)
-{
-	block_files.clear();
-	const std::string block_dir = Snapshot_Evaporation_Block_Dir(snapshot_root);
-	DIR* dir = opendir(block_dir.c_str());
-	if(dir == NULL)
-		return errno == ENOENT;
-
-	bool success = true;
-	struct dirent* entry = NULL;
-	while((entry = readdir(dir)) != NULL)
-	{
-		const std::string name = entry->d_name;
-		if(!Is_Evaporation_Block_File_Name(name))
-			continue;
-
-		const std::string path = Join_Path(block_dir, name);
-		EvaporationBlockMetadata metadata;
-		if(!Read_Evaporation_Block_Metadata(path, metadata))
-		{
-			success = false;
-			continue;
-		}
-
-		EvaporationBlockFile block_file;
-		block_file.snapshot_index = metadata.snapshot_index;
-		block_file.path = path;
-		block_files.push_back(block_file);
-	}
-	closedir(dir);
-
-	std::sort(block_files.begin(), block_files.end(), [](const EvaporationBlockFile& lhs, const EvaporationBlockFile& rhs)
-	{
-		return lhs.snapshot_index < rhs.snapshot_index;
-	});
-
-	return success;
-}
-
-bool Snapshot_Evaporation_Block_Dir_Has_Blocks(const std::string& snapshot_root)
-{
-	const std::string block_dir = Snapshot_Evaporation_Block_Dir(snapshot_root);
-	DIR* dir = opendir(block_dir.c_str());
-	if(dir == NULL)
-		return false;
-
-	bool has_blocks = false;
-	struct dirent* entry = NULL;
-	while((entry = readdir(dir)) != NULL)
-	{
-		if(Is_Evaporation_Block_File_Name(entry->d_name))
-		{
-			has_blocks = true;
-			break;
-		}
-	}
-	closedir(dir);
-	return has_blocks;
-}
-
-bool Write_Snapshot_Run_Manifest(const std::string& snapshot_root, uint64_t run_id, double snapshot_interval_sec, double mass_gev, double sigma_cm2)
-{
-	const std::string path = Snapshot_Run_Manifest_Path(snapshot_root);
-	const std::string tmp_path = path + ".tmp." + std::to_string(getpid());
-	std::ofstream file(tmp_path, std::ios::out | std::ios::trunc);
-	if(!file.is_open())
-		return false;
-
-	file << "# format_version = " << SNAPSHOT_RUN_MANIFEST_FORMAT_VERSION << "\n";
-	file << "# run_id = " << run_id << "\n";
-	file << "# snapshot_interval_sec = " << std::scientific << std::setprecision(17) << snapshot_interval_sec << "\n";
-	file << "# DM_mass_GeV = " << std::scientific << std::setprecision(17) << mass_gev << "\n";
-	file << "# DM_sigma_cm2 = " << std::scientific << std::setprecision(17) << sigma_cm2 << "\n";
-	file.close();
-
-	if(!file.good())
-	{
-		std::remove(tmp_path.c_str());
-		return false;
-	}
-	if(std::rename(tmp_path.c_str(), path.c_str()) != 0)
-	{
-		std::remove(tmp_path.c_str());
-		return false;
-	}
-	return true;
-}
-
-bool Read_Snapshot_Run_Manifest(const std::string& snapshot_root, SnapshotRunManifest& manifest)
-{
-	std::ifstream file(Snapshot_Run_Manifest_Path(snapshot_root));
-	if(!file.is_open())
-		return false;
-
-	int format_version = 0;
-	bool has_format_version = false;
-	bool has_run_id = false;
-	bool has_snapshot_interval = false;
-	bool has_mass = false;
-	bool has_sigma = false;
-
-	std::string line;
-	while(std::getline(file, line))
-	{
-		std::string key;
-		std::string value;
-		if(!Parse_Metadata_Line(line, key, value))
-			continue;
-
-		if(key == "format_version")
-			has_format_version = Parse_Metadata_Int(value, format_version);
-		else if(key == "run_id")
-			has_run_id = Parse_Metadata_UInt64(value, manifest.run_id);
-		else if(key == "snapshot_interval_sec")
-			has_snapshot_interval = Parse_Metadata_Double(value, manifest.snapshot_interval_sec);
-		else if(key == "DM_mass_GeV")
-			has_mass = Parse_Metadata_Double(value, manifest.mass_gev);
-		else if(key == "DM_sigma_cm2")
-			has_sigma = Parse_Metadata_Double(value, manifest.sigma_cm2);
-	}
-
-	return has_format_version
-	    && format_version == SNAPSHOT_RUN_MANIFEST_FORMAT_VERSION
-	    && has_run_id
-	    && has_snapshot_interval
-	    && has_mass
-	    && has_sigma;
-}
-
-void Remove_Stale_Snapshot_Evaporation_Block(const std::string& snapshot_root, int snapshot_index)
-{
-	std::string path = Snapshot_Evaporation_Block_Path(snapshot_root, snapshot_index);
-	std::remove(path.c_str());
-}
-
-bool Write_Evaporation_Block_File(const std::string& snapshot_root, int snapshot_index, double snapshot_interval_sec, uint64_t run_id, double mass_gev, double sigma_cm2, const std::vector<CompactEvaporationEvent>& events, EvaporationLogState& state)
-{
-	const std::string path = Snapshot_Evaporation_Block_Path(snapshot_root, snapshot_index);
-	if(!File_Is_Empty_Or_Missing(path))
-	{
-		if(Evaporation_Block_Metadata_Matches(path, run_id, snapshot_index, snapshot_interval_sec, mass_gev, sigma_cm2))
-		{
-			Recover_Evaporation_Log_State(path, state);
-			return true;
-		}
-		if(std::remove(path.c_str()) != 0 && errno != ENOENT)
-			return false;
-	}
-
-	std::vector<CompactEvaporationEvent> sorted_events = events;
-	std::sort(sorted_events.begin(), sorted_events.end(), Evaporation_Event_Order);
-
-	std::vector<CompactEvaporationEvent> pending_events;
-	std::vector<EvaporationRecordKey> newly_written_keys;
-	std::unordered_set<EvaporationRecordKey, EvaporationRecordKeyHash> pending_record_keys;
-	for(const auto& event : sorted_events)
-	{
-		if(!Is_Completed_Evaporation_Event(event))
-			continue;
-		const EvaporationRecordKey key = Make_Evaporation_Record_Key(event.rank, event.trajectory_id);
-		if(state.written_record_keys.count(key) != 0 || !pending_record_keys.insert(key).second)
-			continue;
-		pending_events.push_back(event);
-		newly_written_keys.push_back(key);
-	}
-
-	Remove_Stale_Snapshot_Evaporation_Block(snapshot_root, snapshot_index);
-	if(pending_events.empty())
-		return true;
-
-	const std::string tmp_path = path + ".tmp." + std::to_string(getpid()) + "." + std::to_string(snapshot_index);
-	{
-		std::ofstream file(tmp_path, std::ios::out | std::ios::trunc);
-		if(!file.is_open())
-			return false;
-		Write_Evaporation_Block_Header(file, run_id, snapshot_index, snapshot_interval_sec, mass_gev, sigma_cm2);
-		for(const auto& event : pending_events)
-			Write_Evaporation_Log_Event(file, event);
-		file.close();
-		if(!file.good())
-		{
-			std::remove(tmp_path.c_str());
-			return false;
-		}
-	}
-
-	if(std::rename(tmp_path.c_str(), path.c_str()) != 0)
-	{
-		std::remove(tmp_path.c_str());
-		return false;
-	}
-
-	state.written_record_keys.insert(newly_written_keys.begin(), newly_written_keys.end());
-	return true;
-}
-#endif
-
-bool Snapshot_Text_File_Is_Merged(const std::string& path)
-{
-	std::ifstream file(path);
-	if(!file.is_open())
-		return false;
-
-	std::string line;
-	while(std::getline(file, line))
-	{
-		if(line == "# snapshot_status = merged")
-			return true;
-		if(!line.empty() && line[0] != '#')
-			break;
-	}
-
-	return false;
-}
-
-std::string Rank_Snapshot_Checkpoint_Path(const std::string& rank_snapshot_dir, int rank, int snapshot_index, double interval_seconds)
-{
-	return rank_snapshot_dir + "snapshot_" + Snapshot_Time_File_Label(snapshot_index, interval_seconds) + "_rank" + std::to_string(rank) + ".bin";
-}
-
-std::string Rank_Snapshot_Final_Path(const std::string& rank_snapshot_dir, int rank)
-{
-	return rank_snapshot_dir + "rank" + std::to_string(rank) + "_final.bin";
-}
-
-void Cleanup_Snapshot_Checkpoints(const std::string& rank_snapshot_dir, int snapshot_index, double interval_seconds, int mpi_processes)
-{
-	for(int rank = 0; rank < mpi_processes; rank++)
-		std::remove(Rank_Snapshot_Checkpoint_Path(rank_snapshot_dir, rank, snapshot_index, interval_seconds).c_str());
-}
-
-void Cleanup_Final_Snapshot_States(const std::string& rank_snapshot_dir, int mpi_processes)
-{
-	for(int rank = 0; rank < mpi_processes; rank++)
-		std::remove(Rank_Snapshot_Final_Path(rank_snapshot_dir, rank).c_str());
-
-	rmdir(rank_snapshot_dir.c_str());
-}
-
-bool Write_Text_File_Atomically(const std::string& path, int unique_tag, const std::function<void(std::ofstream&)>& writer)
-{
-	std::string tmp_path = path + ".tmp." + std::to_string(getpid()) + "." + std::to_string(unique_tag);
-	std::ofstream file(tmp_path, std::ios::trunc);
-	if(!file.is_open())
-		return false;
-
-	writer(file);
-	file.close();
-
-	if(!file.good())
-	{
-		std::remove(tmp_path.c_str());
-		return false;
-	}
-
-	if(std::rename(tmp_path.c_str(), path.c_str()) != 0)
-	{
-		std::remove(tmp_path.c_str());
-		return false;
-	}
-
-	return true;
-}
-
-bool Write_Snapshot_Evaporation_Time_File(const std::string& snapshot_root, int snapshot_index, double interval_seconds, double mass_gev, double sigma_cm2, const std::vector<RankedSnapshotEvaporationEntry>& entries)
-{
-	std::vector<CompactEvaporationEvent> events;
-	events.reserve(entries.size());
-	for(const auto& entry : entries)
-		events.push_back(Make_Log_Event(entry.rank, entry.entry));
-
-	const std::string path = Snapshot_Evaporation_Time_File_Path(snapshot_root, snapshot_index, interval_seconds);
-	return Write_Text_File_Atomically(path, snapshot_index, [&](std::ofstream& file)
-	{
-		file << "# snapshot_status = merged\n";
-		file << "# snapshot_target_wall_time_s = " << std::defaultfloat << std::setprecision(10) << Snapshot_Target_Wall_Time_Seconds(snapshot_index, interval_seconds) << "\n";
-		file << "# snapshot_interval_s = " << std::fixed << std::setprecision(3) << interval_seconds << "\n";
-		file << "# completed_evaporation_events_in_interval_only = 1\n";
-		file << "# DIAGNOSTIC_ONLY = 1\n";
-		file << "# NOT_FOR_FINAL_SURVIVAL_ANALYSIS = 1\n";
-		file << "# completion_time_selected = 1\n";
-		Write_Evaporation_Log_File_Header(file, mass_gev, sigma_cm2);
-		Write_Evaporation_Log_Events(file, events);
-	});
-}
-
-bool Write_Rank_Snapshot_State(const std::string& path, const Rank_Snapshot_State& state)
-{
-	std::string tmp_path = path + ".tmp." + std::to_string(getpid()) + "." + std::to_string(state.rank);
-	std::ofstream file(tmp_path, std::ios::binary | std::ios::trunc);
-	if(!file.is_open())
-		return false;
-
-	Write_Binary_Value(file, state.run_id);
-	Write_Binary_Value(file, state.snapshot_index);
-	Write_Binary_Value(file, state.rank);
-	Write_Binary_Value(file, state.done);
-	Write_Binary_Value(file, state.trajectory_in_progress);
-	Write_Binary_Value(file, state.local_captured);
-	Write_Binary_Value(file, state.local_total);
-	Write_Binary_Value(file, state.bincount_captured_samples);
-	Write_Binary_Value(file, state.bincount_not_captured_samples);
-	Write_Binary_Value(file, state.current_trajectory_id);
-	Write_Binary_Value(file, state.rank_elapsed_wall_sec);
-	Write_Binary_Value(file, state.current_trajectory_captured);
-	Write_Binary_Array(file, state.current_trajectory_dt_hist);
-	Write_Binary_Array(file, state.current_trajectory_v2dt_hist);
-	Write_Binary_Array(file, state.captured_dt_hist);
-	Write_Binary_Array(file, state.captured_v2dt_hist);
-	Write_Binary_Array(file, state.captured_dt_sq_hist);
-	Write_Binary_Array(file, state.captured_v2dt_sq_hist);
-	Write_Binary_Array(file, state.not_captured_dt_hist);
-	Write_Binary_Array(file, state.not_captured_v2dt_hist);
-	Write_Binary_Array(file, state.not_captured_dt_sq_hist);
-	Write_Binary_Array(file, state.not_captured_v2dt_sq_hist);
-	const uint64_t new_evaporation_event_count = static_cast<uint64_t>(state.new_evaporation_events.size());
-	Write_Binary_Value(file, new_evaporation_event_count);
-	for(const auto& entry : state.new_evaporation_events)
-		Write_Snapshot_Evaporation_Entry_Binary(file, entry);
-	file.close();
-
-	if(!file.good())
-	{
-		std::remove(tmp_path.c_str());
-		return false;
-	}
-
-	if(std::rename(tmp_path.c_str(), path.c_str()) != 0)
-	{
-		std::remove(tmp_path.c_str());
-		return false;
-	}
-
-	return true;
-}
-
-bool Read_Rank_Snapshot_State(const std::string& path, uint64_t expected_run_id, Rank_Snapshot_State& state)
-{
-	std::ifstream file(path, std::ios::binary);
-	if(!file.is_open())
-		return false;
-
-	Read_Binary_Value(file, state.run_id);
-	Read_Binary_Value(file, state.snapshot_index);
-	Read_Binary_Value(file, state.rank);
-	Read_Binary_Value(file, state.done);
-	Read_Binary_Value(file, state.trajectory_in_progress);
-	Read_Binary_Value(file, state.local_captured);
-	Read_Binary_Value(file, state.local_total);
-	Read_Binary_Value(file, state.bincount_captured_samples);
-	Read_Binary_Value(file, state.bincount_not_captured_samples);
-	Read_Binary_Value(file, state.current_trajectory_id);
-	Read_Binary_Value(file, state.rank_elapsed_wall_sec);
-	Read_Binary_Value(file, state.current_trajectory_captured);
-	Read_Binary_Array(file, state.current_trajectory_dt_hist);
-	Read_Binary_Array(file, state.current_trajectory_v2dt_hist);
-	Read_Binary_Array(file, state.captured_dt_hist);
-	Read_Binary_Array(file, state.captured_v2dt_hist);
-	Read_Binary_Array(file, state.captured_dt_sq_hist);
-	Read_Binary_Array(file, state.captured_v2dt_sq_hist);
-	Read_Binary_Array(file, state.not_captured_dt_hist);
-	Read_Binary_Array(file, state.not_captured_v2dt_hist);
-	Read_Binary_Array(file, state.not_captured_dt_sq_hist);
-	Read_Binary_Array(file, state.not_captured_v2dt_sq_hist);
-	uint64_t new_evaporation_event_count = 0;
-	Read_Binary_Value(file, new_evaporation_event_count);
-	state.new_evaporation_events.clear();
-	state.new_evaporation_events.resize(static_cast<size_t>(new_evaporation_event_count));
-	for(size_t i = 0; i < state.new_evaporation_events.size(); i++)
-		Read_Snapshot_Evaporation_Entry_Binary(file, state.new_evaporation_events[i]);
-
-	if(!file)
-		return false;
-
-	return state.run_id == expected_run_id;
-}
-
-void Accumulate_Snapshot_Report_State(Snapshot_Report_State& report, const Rank_Snapshot_State& state)
-{
-	report.total_trajectories += state.local_total;
-	report.captured_particles += state.local_captured;
-	report.snapshot_bincount_captured_samples += state.bincount_captured_samples;
-	report.snapshot_bincount_not_captured_samples += state.bincount_not_captured_samples;
-	const double lower_wall_time = (report.snapshot_target_wall_time_sec > report.snapshot_interval_seconds) ? (report.snapshot_target_wall_time_sec - report.snapshot_interval_seconds) : 0.0;
-	const double upper_wall_time = report.snapshot_target_wall_time_sec;
-	for(const auto& entry : state.new_evaporation_events)
-	{
-		if(entry.completion_wall_time_sec > lower_wall_time && entry.completion_wall_time_sec <= upper_wall_time)
-		{
-			RankedSnapshotEvaporationEntry ranked_entry;
-			ranked_entry.rank = state.rank;
-			ranked_entry.entry = entry;
-			report.new_evaporation_events.push_back(ranked_entry);
-		}
-	}
-
-	for(int bin = 0; bin < NUM_BINS; bin++)
-	{
-		report.captured_dt_hist[bin] += state.captured_dt_hist[bin];
-		report.captured_v2dt_hist[bin] += state.captured_v2dt_hist[bin];
-		report.captured_dt_sq_hist[bin] += state.captured_dt_sq_hist[bin];
-		report.captured_v2dt_sq_hist[bin] += state.captured_v2dt_sq_hist[bin];
-		report.not_captured_dt_hist[bin] += state.not_captured_dt_hist[bin];
-		report.not_captured_v2dt_hist[bin] += state.not_captured_v2dt_hist[bin];
-		report.not_captured_dt_sq_hist[bin] += state.not_captured_dt_sq_hist[bin];
-		report.not_captured_v2dt_sq_hist[bin] += state.not_captured_v2dt_sq_hist[bin];
-	}
-
-	if(state.trajectory_in_progress && Has_Bincount_Contribution(state.current_trajectory_dt_hist, state.current_trajectory_v2dt_hist))
-	{
-		report.total_trajectories++;
-		if(state.current_trajectory_captured)
-		{
-			report.captured_particles++;
-			report.snapshot_bincount_captured_samples++;
-			for(int bin = 0; bin < NUM_BINS; bin++)
-			{
-				report.captured_dt_hist[bin] += state.current_trajectory_dt_hist[bin];
-				report.captured_v2dt_hist[bin] += state.current_trajectory_v2dt_hist[bin];
-				report.captured_dt_sq_hist[bin] += state.current_trajectory_dt_hist[bin] * state.current_trajectory_dt_hist[bin];
-				report.captured_v2dt_sq_hist[bin] += state.current_trajectory_v2dt_hist[bin] * state.current_trajectory_v2dt_hist[bin];
-			}
-		}
-		else
-		{
-			report.snapshot_bincount_not_captured_samples++;
-			for(int bin = 0; bin < NUM_BINS; bin++)
-			{
-				report.not_captured_dt_hist[bin] += state.current_trajectory_dt_hist[bin];
-				report.not_captured_v2dt_hist[bin] += state.current_trajectory_v2dt_hist[bin];
-				report.not_captured_dt_sq_hist[bin] += state.current_trajectory_dt_hist[bin] * state.current_trajectory_dt_hist[bin];
-				report.not_captured_v2dt_sq_hist[bin] += state.current_trajectory_v2dt_hist[bin] * state.current_trajectory_v2dt_hist[bin];
-			}
-		}
-	}
-
-
-}
-
-bool Load_Snapshot_Report_State(const std::string& rank_snapshot_dir, int snapshot_index, double interval_seconds, int mpi_processes, uint64_t run_id, Snapshot_Report_State& report)
-{
-	report = Snapshot_Report_State();
-	report.snapshot_target_wall_time_sec = Snapshot_Target_Wall_Time_Seconds(snapshot_index, interval_seconds);
-	report.snapshot_interval_seconds = interval_seconds;
-
-	bool all_ranks_ready = true;
-
-	for(int rank = 0; rank < mpi_processes; rank++)
-	{
-		Rank_Snapshot_State state;
-		const std::string checkpoint_path = Rank_Snapshot_Checkpoint_Path(rank_snapshot_dir, rank, snapshot_index, interval_seconds);
-		if(Read_Rank_Snapshot_State(checkpoint_path, run_id, state))
-		{
-			Accumulate_Snapshot_Report_State(report, state);
-			continue;
-		}
-
-		const std::string final_path = Rank_Snapshot_Final_Path(rank_snapshot_dir, rank);
-		if(Read_Rank_Snapshot_State(final_path, run_id, state) && state.done && state.rank_elapsed_wall_sec <= report.snapshot_target_wall_time_sec)
-		{
-			Accumulate_Snapshot_Report_State(report, state);
-			continue;
-		}
-
-		all_ranks_ready = false;
-	}
-
-	return all_ranks_ready;
-}
-
-bool Write_Snapshot_Report_File(const std::string& snapshot_root, int snapshot_index, double interval_seconds, double mass_gev, double sigma_cm2, const Snapshot_Report_State& report)
-{
-	if(!Write_Snapshot_Evaporation_Time_File(snapshot_root, snapshot_index, interval_seconds, mass_gev, sigma_cm2, report.new_evaporation_events))
-		return false;
-
-	if(!Write_Text_File_Atomically(Snapshot_Text_File_Path(snapshot_root, snapshot_index, interval_seconds), snapshot_index, [&](std::ofstream& file)
-	{
-		file << "# snapshot_status = merged\n";
-		file << "# Cumulative snapshot report\n";
-		Write_Report_Header(file, mass_gev, sigma_cm2, report.total_trajectories, report.captured_particles, false, report.snapshot_target_wall_time_sec, report.snapshot_interval_seconds);
-
-		double snapshot_captured_samples = static_cast<double>(report.snapshot_bincount_captured_samples);
-		double snapshot_not_captured_samples = static_cast<double>(report.snapshot_bincount_not_captured_samples);
-		file << "#\n";
-		file << "# [Bincount histogram]\n";
-		file << "# bin_index  cap_dt[s]  cap_v2dt[km2/s]  cap_err_dt[s]  cap_err_v2dt[km2/s]  not_cap_dt[s]  not_cap_v2dt[km2/s]  not_cap_err_dt[s]  not_cap_err_v2dt[km2/s]\n";
-		for(int bin = 0; bin < NUM_BINS; bin++)
-		{
-			double cap_err_dt = Snapshot_Bin_Error(report.captured_dt_hist[bin], report.captured_dt_sq_hist[bin], snapshot_captured_samples);
-			double cap_err_v2dt = Snapshot_Bin_Error(report.captured_v2dt_hist[bin], report.captured_v2dt_sq_hist[bin], snapshot_captured_samples);
-			double not_cap_err_dt = Snapshot_Bin_Error(report.not_captured_dt_hist[bin], report.not_captured_dt_sq_hist[bin], snapshot_not_captured_samples);
-			double not_cap_err_v2dt = Snapshot_Bin_Error(report.not_captured_v2dt_hist[bin], report.not_captured_v2dt_sq_hist[bin], snapshot_not_captured_samples);
-
-			file << bin << "\t" << std::scientific << std::setprecision(10)
-			     << report.captured_dt_hist[bin] << "\t" << report.captured_v2dt_hist[bin]
-			     << "\t" << cap_err_dt << "\t" << cap_err_v2dt
-			     << "\t" << report.not_captured_dt_hist[bin] << "\t" << report.not_captured_v2dt_hist[bin]
-			     << "\t" << not_cap_err_dt << "\t" << not_cap_err_v2dt << "\n";
-		}
-	}))
-		return false;
-
-	return true;
-}
-
-bool Try_Write_Merged_Snapshot(const std::string& snapshot_root, const std::string& rank_snapshot_dir, int snapshot_index, double interval_seconds, int mpi_processes, uint64_t run_id, double mass_gev, double sigma_cm2, int caller_rank)
-{
-	if(caller_rank != 0)
-		return false;
-
-	const std::string snapshot_text_path = Snapshot_Text_File_Path(snapshot_root, snapshot_index, interval_seconds);
-	const std::string snapshot_evaporation_path = Snapshot_Evaporation_Time_File_Path(snapshot_root, snapshot_index, interval_seconds);
-	if(Snapshot_Text_File_Is_Merged(snapshot_text_path) && Snapshot_Text_File_Is_Merged(snapshot_evaporation_path))
-	{
-		Cleanup_Snapshot_Checkpoints(rank_snapshot_dir, snapshot_index, interval_seconds, mpi_processes);
-		return true;
-	}
-
-	Snapshot_Report_State report;
-	if(!Load_Snapshot_Report_State(rank_snapshot_dir, snapshot_index, interval_seconds, mpi_processes, run_id, report))
-		return false;
-
-	if(!Write_Snapshot_Report_File(snapshot_root, snapshot_index, interval_seconds, mass_gev, sigma_cm2, report))
-		return false;
-
-	Cleanup_Snapshot_Checkpoints(rank_snapshot_dir, snapshot_index, interval_seconds, mpi_processes);
-	return true;
-}
-
 void Build_MPI_Gatherv_Layout(const std::vector<int>& item_counts, int fields_per_item, std::vector<int>& recv_counts, std::vector<int>& displacements, int& total_items)
 {
 	recv_counts.resize(item_counts.size());
@@ -1132,39 +438,6 @@ void Build_MPI_Gatherv_Layout(const std::vector<int>& item_counts, int fields_pe
 }
 }
 
-// Retired with the block/manifest snapshot workflow.
-#if 0
-bool Recover_Evaporation_Time_File_From_Blocks(const std::string& snapshot_root, const std::string& output_path, uint64_t expected_run_id, double mass_gev, double sigma_cm2)
-{
-	std::vector<EvaporationBlockFile> block_files;
-	if(!List_Evaporation_Block_Files(snapshot_root, block_files))
-		return false;
-
-	std::vector<CompactEvaporationEvent> recovered_events;
-	EvaporationLogState recovered_state;
-	bool found_matching_block = false;
-	for(const auto& block_file : block_files)
-	{
-		EvaporationBlockMetadata metadata;
-		if(!Read_Evaporation_Block_Metadata(block_file.path, metadata))
-			return false;
-		if(metadata.run_id != expected_run_id)
-			continue;
-		if(!Metadata_Double_Matches(metadata.mass_gev, mass_gev) || !Metadata_Double_Matches(metadata.sigma_cm2, sigma_cm2))
-			continue;
-
-		found_matching_block = true;
-		if(!Read_Evaporation_Block_Events(block_file.path, recovered_events, recovered_state))
-			return false;
-	}
-
-	if(!found_matching_block)
-		return false;
-
-	return Write_Final_Evaporation_Time_File(output_path, mass_gev, sigma_cm2, recovered_events);
-}
-#endif
-
 Simulation_Data::Simulation_Data(unsigned int sample_size, unsigned int max_trajectories, double u_min, unsigned int iso_rings)
 : requested_captured_particles(sample_size),
   normal_mode_mpi_sync_interval(NORMAL_MODE_MPI_SYNC_INTERVAL_FALLBACK),
@@ -1174,7 +447,7 @@ Simulation_Data::Simulation_Data(unsigned int sample_size, unsigned int max_traj
   number_of_invalid_survival_captured_particles(0),
   number_of_initial_shift_failures(0), number_of_final_reflection_shift_failures(0), number_of_numerical_failures(0),
   number_of_computational_truncations(0),
-  average_number_of_scatterings(0.0), computing_time(0.0), early_stopped(false),
+  average_number_of_scatterings(0.0), computing_time(0.0), early_stopped(false), early_stop_reason(SimulationStopReason::None),
   mpi_rank(0), mpi_processes(1), isoreflection_rings(iso_rings), minimum_speed_threshold(u_min),
   number_of_data_points(std::vector<unsigned long int>(iso_rings, 0)),
   data(iso_rings, std::vector<libphysica::DataPoint>())
@@ -1209,9 +482,18 @@ void Simulation_Data::Generate_Data(obscura::DM_Particle& DM, Solar_Model& solar
 {
 	if(capture_mode)
 		snapshot_cfg.enabled = false;
+	if(snapshot_cfg.enabled && !IsValidSnapshotIntervalSeconds(snapshot_cfg.interval_seconds))
+		throw std::invalid_argument("snapshot interval must be a positive integer number of seconds");
+	if(snapshot_cfg.enabled)
+	{
+		int mpi_thread_level = MPI_THREAD_SINGLE;
+		MPI_Query_thread(&mpi_thread_level);
+		if(mpi_thread_level < MPI_THREAD_FUNNELED)
+			throw std::runtime_error("snapshot heartbeat requires MPI_THREAD_FUNNELED or stronger thread support");
+	}
 	normal_mode_mpi_sync_interval = capture_mode ? 0UL : Normal_Mode_MPI_Sync_Interval(In_Units(DM.Sigma_Proton(), cm * cm));
 
-	auto time_start = std::chrono::system_clock::now();
+	auto time_start = std::chrono::steady_clock::now();
 	unsigned long int local_captured = 0;
 	unsigned long int local_total = 0;
 	bool initial_shift_failure_warning_emitted = false;
@@ -1234,13 +516,6 @@ void Simulation_Data::Generate_Data(obscura::DM_Particle& DM, Solar_Model& solar
 	std::string snapshot_root;
 	std::string rank_snapshot_dir;
 	uint64_t snapshot_run_id = 0;
-	int next_snapshot_index = 1;
-	if(snapshot_cfg.enabled && mpi_rank == 0 && snapshot_cfg.max_trajectory_wall_time_sec <= 0.0)
-		std::cerr << "Warning in Generate_Data(): snapshot_enabled=true but max_trajectory_wall_time_sec="
-		          << snapshot_cfg.max_trajectory_wall_time_sec
-		          << " disables the per-trajectory wall-time guard. A single slow trajectory can keep snapshot files in waiting status. "
-		          << "Consider setting max_trajectory_wall_time_sec to a finite value below snapshot_interval="
-		          << snapshot_interval << " s." << std::endl;
 	if(snapshot_cfg.enabled)
 	{
 		snapshot_root = output_root + "snapshot/";
@@ -1293,95 +568,85 @@ void Simulation_Data::Generate_Data(obscura::DM_Particle& DM, Solar_Model& solar
 				MPI_Bcast(&snapshot_run_id, 1, MPI_UNSIGNED_LONG_LONG, 0, MPI_COMM_WORLD);
 		}
 	}
+	std::unique_ptr<SnapshotSharedState> snapshot_state;
+	std::unique_ptr<SnapshotRecorder> snapshot_recorder;
+	std::unique_ptr<SnapshotHeartbeat> snapshot_heartbeat;
+	if(snapshot_cfg.enabled)
+	{
+		int local_objects_ready = 1;
+		try
+		{
+			snapshot_state.reset(new SnapshotSharedState());
+			snapshot_state->Initialize(snapshot_run_id, mpi_rank);
+			snapshot_recorder.reset(new SnapshotRecorder(*snapshot_state));
+			snapshot_heartbeat.reset(new SnapshotHeartbeat(
+				*snapshot_state,
+				mpi_rank,
+				mpi_processes,
+				snapshot_run_id,
+				snapshot_root,
+				rank_snapshot_dir,
+				snapshot_interval,
+				snapshot_mass_gev,
+				snapshot_sigma_cm2));
+		}
+		catch(const std::exception& error)
+		{
+			local_objects_ready = 0;
+			std::cerr << "Warning in Generate_Data(): rank " << mpi_rank
+			          << " failed to initialize snapshot heartbeat: " << error.what() << std::endl;
+		}
+		catch(...)
+		{
+			local_objects_ready = 0;
+			std::cerr << "Warning in Generate_Data(): rank " << mpi_rank
+			          << " failed to initialize snapshot heartbeat with an unknown exception." << std::endl;
+		}
+
+		int all_objects_ready = local_objects_ready;
+		MPI_Allreduce(MPI_IN_PLACE, &all_objects_ready, 1, MPI_INT, MPI_MIN, MPI_COMM_WORLD);
+		if(all_objects_ready)
+		{
+			simulator.Set_Snapshot_Recorder(snapshot_recorder.get());
+			MPI_Barrier(MPI_COMM_WORLD);
+			time_start = std::chrono::steady_clock::now();
+			int all_threads_started = snapshot_heartbeat->Start(time_start) ? 1 : 0;
+			MPI_Allreduce(MPI_IN_PLACE, &all_threads_started, 1, MPI_INT, MPI_MIN, MPI_COMM_WORLD);
+			if(!all_threads_started)
+			{
+				snapshot_heartbeat->Stop();
+				simulator.Set_Snapshot_Recorder(nullptr);
+				MPI_Barrier(MPI_COMM_WORLD);
+				if(mpi_rank == 0 && !Clear_Directory_Contents(snapshot_root))
+					std::cerr << "Warning in Generate_Data(): failed to clear snapshot files after heartbeat startup rollback." << std::endl;
+				MPI_Barrier(MPI_COMM_WORLD);
+				snapshot_cfg.enabled = false;
+			}
+		}
+
+		if(!all_objects_ready || !snapshot_cfg.enabled)
+		{
+			if(snapshot_heartbeat)
+				snapshot_heartbeat->Stop();
+			simulator.Set_Snapshot_Recorder(nullptr);
+			snapshot_heartbeat.reset();
+			snapshot_recorder.reset();
+			snapshot_state.reset();
+			snapshot_cfg.enabled = false;
+			if(mpi_rank == 0)
+				std::cerr << "Warning in Generate_Data(): snapshot heartbeat setup failed on at least one rank; "
+				             "snapshots are disabled for this run." << std::endl;
+		}
+	}
+	if(!snapshot_cfg.enabled)
+		time_start = std::chrono::steady_clock::now();
 
 	auto elapsed_since_start = [&]()
 	{
-		return 1e-6 * std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::system_clock::now() - time_start).count();
-	};
-
-	size_t first_uncommitted_evaporation_entry = 0;
-
-	auto build_rank_snapshot_state = [&](bool done, double snapshot_upper_wall_time, size_t evaporation_entry_begin, size_t evaporation_entry_end)
-	{
-		Rank_Snapshot_State state;
-		state.run_id = snapshot_run_id;
-		state.rank = mpi_rank;
-		state.done = done ? 1 : 0;
-		state.trajectory_in_progress = (!done && simulator.Trajectory_In_Progress()) ? 1 : 0;
-		state.local_captured = static_cast<uint64_t>(local_captured);
-		state.local_total = static_cast<uint64_t>(local_total);
-		state.bincount_captured_samples = static_cast<uint64_t>(number_of_captured_particles);
-		state.bincount_not_captured_samples = static_cast<uint64_t>(number_of_free_particles + number_of_reflected_particles);
-		state.current_trajectory_id = state.trajectory_in_progress ? static_cast<uint64_t>(simulator.Current_Trajectory_ID()) : 0;
-		state.rank_elapsed_wall_sec = done ? computing_time : elapsed_since_start();
-		if(state.trajectory_in_progress)
-		{
-			const TrajectoryBincount& current_bincount = simulator.Current_Trajectory_Bincount();
-			state.current_trajectory_captured = current_bincount.is_captured ? 1 : 0;
-			state.current_trajectory_dt_hist = current_bincount.dt_hist;
-			state.current_trajectory_v2dt_hist = current_bincount.v2dt_hist;
-		}
-		state.captured_dt_hist = captured_dt_hist;
-		state.captured_v2dt_hist = captured_v2dt_hist;
-		state.captured_dt_sq_hist = captured_dt_sq_hist;
-		state.captured_v2dt_sq_hist = captured_v2dt_sq_hist;
-		state.not_captured_dt_hist = not_captured_dt_hist;
-		state.not_captured_v2dt_hist = not_captured_v2dt_hist;
-		state.not_captured_dt_sq_hist = not_captured_dt_sq_hist;
-		state.not_captured_v2dt_sq_hist = not_captured_v2dt_sq_hist;
-		(void)snapshot_upper_wall_time;
-		state.new_evaporation_events.reserve(evaporation_entry_end - evaporation_entry_begin);
-		for(size_t entry_index = evaporation_entry_begin; entry_index < evaporation_entry_end; entry_index++)
-			state.new_evaporation_events.push_back(Make_Snapshot_Evaporation_Entry(compact_evaporation_events[entry_index]));
-		return state;
-	};
-
-	int last_committed_snapshot_index = 0;
-	auto try_write_ready_snapshots = [&](int max_snapshot_index)
-	{
-		if(mpi_rank != 0)
-			return false;
-
-		bool all_snapshots_merged = true;
-		for(int snapshot_index = last_committed_snapshot_index + 1; snapshot_index <= max_snapshot_index; snapshot_index++)
-		{
-			if(!Try_Write_Merged_Snapshot(snapshot_root, rank_snapshot_dir, snapshot_index, snapshot_interval, mpi_processes, snapshot_run_id, snapshot_mass_gev, snapshot_sigma_cm2, mpi_rank))
-			{
-				all_snapshots_merged = false;
-				break;
-			}
-			last_committed_snapshot_index = snapshot_index;
-		}
-		return all_snapshots_merged;
-	};
-
-	auto publish_checkpoint_snapshots = [&]()
-	{
-		if(!snapshot_cfg.enabled)
-			return;
-
-		double elapsed = elapsed_since_start();
-		while(elapsed >= next_snapshot_index * snapshot_interval)
-		{
-			const double snapshot_upper_wall_time = next_snapshot_index * snapshot_interval;
-			size_t evaporation_entry_end = first_uncommitted_evaporation_entry;
-			while(evaporation_entry_end < compact_evaporation_events.size()
-			      && compact_evaporation_events[evaporation_entry_end].completion_wall_time_sec <= snapshot_upper_wall_time)
-				evaporation_entry_end++;
-			Rank_Snapshot_State state = build_rank_snapshot_state(false, snapshot_upper_wall_time, first_uncommitted_evaporation_entry, evaporation_entry_end);
-			state.snapshot_index = next_snapshot_index;
-			if(Write_Rank_Snapshot_State(Rank_Snapshot_Checkpoint_Path(rank_snapshot_dir, mpi_rank, next_snapshot_index, snapshot_interval), state))
-				first_uncommitted_evaporation_entry = evaporation_entry_end;
-			try_write_ready_snapshots(next_snapshot_index);
-			next_snapshot_index++;
-		}
+		return 1e-6 * std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - time_start).count();
 	};
 	early_stopped = false;
-	if(snapshot_cfg.enabled)
-		simulator.Set_Snapshot_Progress_Callback([&](const Trajectory_Simulator&)
-		{
-			publish_checkpoint_snapshots();
-		});
+	early_stop_reason = SimulationStopReason::None;
 
 	unsigned long int global_captured = 0;
 	const std::vector<double> progress_milestones = {0.0, 0.01, 0.05, 0.10, 0.20, 0.40, 0.60, 0.80, 1.0};
@@ -1462,6 +727,7 @@ void Simulation_Data::Generate_Data(obscura::DM_Particle& DM, Solar_Model& solar
 		if(assigned_trajectories == 0)
 		{
 			early_stopped = true;
+			early_stop_reason = SimulationStopReason::MaxTrajectoriesReached;
 			break;
 		}
 
@@ -1490,6 +756,7 @@ void Simulation_Data::Generate_Data(obscura::DM_Particle& DM, Solar_Model& solar
 				number_of_numerical_failures++;
 			if(Is_Computational_Truncation(trajectory.bincount.termination_reason))
 				number_of_computational_truncations++;
+			std::vector<SnapshotEvaporationProgressEntry> trajectory_snapshot_evaporation_events;
 
 			if(trajectory.bincount.is_captured)
 			{
@@ -1505,7 +772,6 @@ void Simulation_Data::Generate_Data(obscura::DM_Particle& DM, Solar_Model& solar
 
 				if(!capture_mode)
 				{
-					// Accumulate captured bincount
 					for(int b = 0; b < NUM_BINS; b++)
 					{
 						captured_dt_hist[b]   += trajectory.bincount.dt_hist[b];
@@ -1521,17 +787,18 @@ void Simulation_Data::Generate_Data(obscura::DM_Particle& DM, Solar_Model& solar
 							evaporation_records.push_back(rec);
 						CompactEvaporationEvent event;
 						if(Make_Compact_Evaporation_Event(rec, event))
+						{
 							compact_evaporation_events.push_back(event);
+							trajectory_snapshot_evaporation_events.push_back(MakeSnapshotEvaporationProgressEntry(event));
+						}
 					}
 				}
-
 			}
 			else if(completed_outward_escape)
 			{
 				number_of_completed_outward_escapes++;
 				if(!capture_mode)
 				{
-					// Accumulate non-captured bincount
 					for(int b = 0; b < NUM_BINS; b++)
 					{
 						not_captured_dt_hist[b]   += trajectory.bincount.dt_hist[b];
@@ -1565,7 +832,17 @@ void Simulation_Data::Generate_Data(obscura::DM_Particle& DM, Solar_Model& solar
 						}
 					}
 				}
+			}
 
+			if(snapshot_state)
+			{
+				const bool count_as_captured_bincount_sample = (!capture_mode && trajectory.bincount.is_captured);
+				const bool count_as_not_captured_bincount_sample = (!capture_mode && completed_outward_escape && !trajectory.bincount.is_captured);
+				snapshot_state->RecordCompletedTrajectory(
+					trajectory.bincount,
+					count_as_captured_bincount_sample,
+					count_as_not_captured_bincount_sample,
+					trajectory_snapshot_evaporation_events);
 			}
 		}
 
@@ -1588,6 +865,7 @@ void Simulation_Data::Generate_Data(obscura::DM_Particle& DM, Solar_Model& solar
 					          << NUMERICAL_FAILURE_ABORT_FRACTION
 					          << ". Stopping this run to avoid biased capture statistics." << std::endl;
 				early_stopped = true;
+				early_stop_reason = SimulationStopReason::InitialShiftFailureFractionExceeded;
 				break;
 			}
 			if(!initial_shift_failure_warning_emitted
@@ -1604,31 +882,27 @@ void Simulation_Data::Generate_Data(obscura::DM_Particle& DM, Solar_Model& solar
 		}
 
 		print_progress_update(global_captured, false);
-
-		publish_checkpoint_snapshots();
 	}
 
 	if(global_captured < requested_captured_particles)
+	{
 		early_stopped = true;
+		if(early_stop_reason == SimulationStopReason::None)
+			early_stop_reason = SimulationStopReason::CaptureTargetNotReached;
+	}
 
-	auto time_end  = std::chrono::system_clock::now();
+	auto time_end  = std::chrono::steady_clock::now();
 	computing_time = 1e-6 * std::chrono::duration_cast<std::chrono::microseconds>(time_end - time_start).count();
 
-	publish_checkpoint_snapshots();
-
-	// Final snapshot state lets rank 0 merge only intervals that the run actually reached.
-	if(snapshot_cfg.enabled)
+	if(snapshot_heartbeat)
 	{
-		Rank_Snapshot_State final_state = build_rank_snapshot_state(true, computing_time, first_uncommitted_evaporation_entry, compact_evaporation_events.size());
-		final_state.snapshot_index = next_snapshot_index - 1;
-		Write_Rank_Snapshot_State(Rank_Snapshot_Final_Path(rank_snapshot_dir, mpi_rank), final_state);
+		snapshot_heartbeat->MarkDoneAndWriteFinal(computing_time);
 
 		MPI_Barrier(MPI_COMM_WORLD);
 		double final_snapshot_elapsed = computing_time;
 		MPI_Allreduce(MPI_IN_PLACE, &final_snapshot_elapsed, 1, MPI_DOUBLE, MPI_MAX, MPI_COMM_WORLD);
-		int final_snapshot_index = std::max(0, static_cast<int>(std::floor(final_snapshot_elapsed / snapshot_interval)));
-		if(final_snapshot_index == 0 || try_write_ready_snapshots(final_snapshot_index))
-			Cleanup_Final_Snapshot_States(rank_snapshot_dir, mpi_processes);
+		if(mpi_rank == 0)
+			snapshot_heartbeat->FinalizeAfterAllRanksDone(final_snapshot_elapsed);
 	}
 
 	print_progress_update(global_captured, global_captured > 0 || !early_stopped);
@@ -1660,12 +934,11 @@ void Simulation_Data::Perform_MPI_Reductions(bool capture_mode)
 	MPI_Allreduce(MPI_IN_PLACE, &average_number_of_scatterings, 1, MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
 	average_number_of_scatterings = (number_of_trajectories > 0) ? average_number_of_scatterings / number_of_trajectories : 0.0;
 
-	// Reduce early_stopped flag (any rank early stopped => global flag)
-	int local_es = early_stopped ? 1 : 0;
-	int global_es = 0;
-	MPI_Trace_Point(mpi_rank, "before allreduce early_stopped");
-	MPI_Allreduce(&local_es, &global_es, 1, MPI_INT, MPI_MAX, MPI_COMM_WORLD);
-	early_stopped = (global_es > 0);
+	int global_stop_reason = static_cast<int>(early_stop_reason);
+	MPI_Trace_Point(mpi_rank, "before allreduce early_stop_reason");
+	MPI_Allreduce(MPI_IN_PLACE, &global_stop_reason, 1, MPI_INT, MPI_MAX, MPI_COMM_WORLD);
+	early_stop_reason = static_cast<SimulationStopReason>(global_stop_reason);
+	early_stopped = early_stop_reason != SimulationStopReason::None;
 
 	if(capture_mode)
 	{
@@ -1889,7 +1162,7 @@ void Simulation_Data::Write_Output_Files(const std::string& output_dir, obscura:
 	};
 
 	auto write_header = [&](std::ofstream& f) {
-		Write_Report_Header(f, mass_gev, sigma_cm2, number_of_trajectories, number_of_captured_particles, early_stopped);
+		Write_Report_Header(f, mass_gev, sigma_cm2, number_of_trajectories, number_of_captured_particles, early_stop_reason);
 		f << "# valid_trajectories = " << Valid_Trajectories() << "\n";
 		f << "# completed_outward_escapes = " << number_of_completed_outward_escapes << "\n";
 		f << "# unresolved_not_captured_trajectories = " << unresolved_not_captured_trajectories() << "\n";
@@ -1898,7 +1171,11 @@ void Simulation_Data::Write_Output_Files(const std::string& output_dir, obscura:
 		f << "# initial_shift_failures = " << number_of_initial_shift_failures << "\n";
 		f << "# final_reflection_shift_failures = " << number_of_final_reflection_shift_failures << "\n";
 		f << "# normal_mode_mpi_sync_interval = " << normal_mode_mpi_sync_interval << "\n";
-		f << "# capture_rate_valid = " << std::fixed << std::setprecision(8) << Capture_Ratio_Valid() << "\n";
+		const BinomialRateEstimate valid = Estimate_Binomial_Rate(Valid_Trajectories(), number_of_captured_particles);
+		f << "# capture_rate_valid = " << std::fixed << std::setprecision(8) << valid.rate << "\n";
+		f << "# capture_rate_valid_err = " << std::fixed << std::setprecision(8) << valid.standard_error << "\n";
+		f << "# capture_rate_valid_CI_95_lower = " << std::fixed << std::setprecision(8) << valid.ci_lower << "\n";
+		f << "# capture_rate_valid_CI_95_upper = " << std::fixed << std::setprecision(8) << valid.ci_upper << "\n";
 		f << "# numerical_failure_rate = " << std::fixed << std::setprecision(8) << Numerical_Failure_Ratio() << "\n";
 	};
 
@@ -2015,22 +1292,8 @@ void Simulation_Data::Print_Capture_Mode_Summary(unsigned int mpi_rank)
 {
 	if(mpi_rank == 0)
 	{
-		double N = static_cast<double>(number_of_trajectories);
-		double p = Capture_Ratio();
-		double p_valid = Capture_Ratio_Valid();
-		double z = 1.96;
-		double ci_lower = p;
-		double ci_upper = p;
-		if(N > 0.0)
-		{
-			double denom = 1.0 + z * z / N;
-			double center = p + z * z / (2.0 * N);
-			double spread = z * sqrt(p * (1.0 - p) / N + z * z / (4.0 * N * N));
-			ci_lower = (center - spread) / denom;
-			ci_upper = (center + spread) / denom;
-			if(ci_lower < 0.0) ci_lower = 0.0;
-			if(ci_upper > 1.0) ci_upper = 1.0;
-		}
+		const BinomialRateEstimate raw = Estimate_Binomial_Rate(number_of_trajectories, number_of_captured_particles);
+		const BinomialRateEstimate valid = Estimate_Binomial_Rate(Valid_Trajectories(), number_of_captured_particles);
 
 		std::cout << SEPARATOR
 		          << "CAPTURE MODE summary" << std::endl
@@ -2041,11 +1304,10 @@ void Simulation_Data::Print_Capture_Mode_Summary(unsigned int mpi_rank)
 		          << "Capture-classified trajectories:\t" << Valid_Trajectories() << std::endl
 		          << "Unresolved non-captures:\t\t" << (number_of_trajectories - Valid_Trajectories()) << std::endl
 		          << "Captured count:\t\t\t" << number_of_captured_particles << std::endl
-		          << "Capture rate raw:\t\t" << std::fixed << std::setprecision(8) << p << std::endl
-		          << "Capture rate valid:\t\t" << std::fixed << std::setprecision(8) << p_valid << std::endl
-		          << "Capture rate -error (95%):\t" << std::fixed << std::setprecision(8) << (p - ci_lower) << std::endl
-		          << "Capture rate +error (95%):\t" << std::fixed << std::setprecision(8) << (ci_upper - p) << std::endl
-		          << "Capture rate 95% CI raw:\t[" << std::fixed << std::setprecision(8) << ci_lower << ", " << ci_upper << "]" << std::endl
+		          << "Capture rate raw:\t\t" << std::fixed << std::setprecision(8) << raw.rate << std::endl
+		          << "Capture rate valid:\t\t" << std::fixed << std::setprecision(8) << valid.rate << std::endl
+		          << "Capture rate raw 95% CI:\t[" << std::fixed << std::setprecision(8) << raw.ci_lower << ", " << raw.ci_upper << "]" << std::endl
+		          << "Capture rate valid 95% CI:\t[" << std::fixed << std::setprecision(8) << valid.ci_lower << ", " << valid.ci_upper << "]" << std::endl
 		          << "Numerical failure count:\t" << number_of_numerical_failures << std::endl
 		          << "Computational truncations:\t" << number_of_computational_truncations << std::endl
 		          << "Initial shift failures:\t\t" << number_of_initial_shift_failures << std::endl
@@ -2053,7 +1315,7 @@ void Simulation_Data::Print_Capture_Mode_Summary(unsigned int mpi_rank)
 		          << "Numerical failure rate:\t\t" << std::fixed << std::setprecision(8) << Numerical_Failure_Ratio() << std::endl;
 
 		if(early_stopped)
-			std::cout << "*** EARLY STOP: max_trajectories reached ***" << std::endl;
+			std::cout << "*** EARLY STOP: " << Stop_Reason_Display(early_stop_reason) << " ***" << std::endl;
 		if(Numerical_Failure_Ratio() > NUMERICAL_FAILURE_WARNING_FRACTION)
 			std::cout << "*** WARNING: numerical failure rate exceeded "
 			          << NUMERICAL_FAILURE_WARNING_FRACTION << " ***" << std::endl;
@@ -2094,28 +1356,18 @@ void Simulation_Data::Print_Summary(unsigned int mpi_rank)
 				  << "Censored captured count:\t" << number_of_censored_captured_particles << std::endl
 				  << "Invalid survival count:\t\t" << number_of_invalid_survival_captured_particles << std::endl;
 
-		// Capture rate error (Wilson interval)
+		// Raw and classified-sample capture-rate intervals.
 		{
-			double N = static_cast<double>(number_of_trajectories);
-			double p = Capture_Ratio();
-			double z = 1.96;
-			double sigma_p = (N > 0) ? sqrt(p * (1.0 - p) / N) : 0.0;
-			std::cout << "Capture rate error (1σ):\t" << std::fixed << std::setprecision(6) << sigma_p << std::endl;
-			if(N > 0)
-			{
-				double denom = 1.0 + z * z / N;
-				double center = p + z * z / (2.0 * N);
-				double spread = z * sqrt(p * (1.0 - p) / N + z * z / (4.0 * N * N));
-				double ci_lower = (center - spread) / denom;
-				double ci_upper = (center + spread) / denom;
-				if(ci_lower < 0.0) ci_lower = 0.0;
-				if(ci_upper > 1.0) ci_upper = 1.0;
-				std::cout << "Capture rate 95% CI:\t\t[" << std::fixed << std::setprecision(6) << ci_lower << ", " << ci_upper << "]" << std::endl;
-			}
+			const BinomialRateEstimate raw = Estimate_Binomial_Rate(number_of_trajectories, number_of_captured_particles);
+			const BinomialRateEstimate valid = Estimate_Binomial_Rate(Valid_Trajectories(), number_of_captured_particles);
+			std::cout << "Capture rate raw error (1σ):\t" << std::fixed << std::setprecision(6) << raw.standard_error << std::endl
+			          << "Capture rate raw 95% CI:\t[" << raw.ci_lower << ", " << raw.ci_upper << "]" << std::endl
+			          << "Capture rate valid error (1σ):\t" << valid.standard_error << std::endl
+			          << "Capture rate valid 95% CI:\t[" << valid.ci_lower << ", " << valid.ci_upper << "]" << std::endl;
 		}
 
 		if(early_stopped)
-			std::cout << "*** EARLY STOP: max_trajectories reached ***" << std::endl;
+			std::cout << "*** EARLY STOP: " << Stop_Reason_Display(early_stop_reason) << " ***" << std::endl;
 		if(Numerical_Failure_Ratio() > NUMERICAL_FAILURE_WARNING_FRACTION)
 			std::cout << "*** WARNING: numerical failure rate exceeded "
 			          << NUMERICAL_FAILURE_WARNING_FRACTION << " ***" << std::endl;

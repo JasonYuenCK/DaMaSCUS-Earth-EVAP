@@ -467,27 +467,29 @@ $$\int \sum_i n_i \frac{m_\chi m_i}{(m_\chi + m_i)^2} \langle v_\text{rel} \rang
 - `bincount.txt`：captured 与 not_captured 的径向占据时间 $\sum \Delta t$、速度二阶矩 $\sum v^2\Delta t$，以及逐 bin 误差估计。
 - `evaporation_times.txt`：始终只写完整、有效、未删失的真实蒸发事件，列为 `rank trajectory_id lifetime_unbinding_sec`，并按 `lifetime_unbinding_sec` 升序输出，`rank trajectory_id` 只作为并列时的稳定排序键。
 
-`capture_rate`、`capture_rate_err` 和 `capture_rate_CI_95_lower/upper` 会写入这些文件头部；Capture Mode 不写这些文件，只在终端打印同类捕获率统计。
+`bincount.txt` 与 snapshot 报告的文件头保留兼容字段 `capture_rate`、`capture_rate_err` 和 `capture_rate_CI_95_lower/upper`，其口径为全部尝试轨迹的 raw 比例；同时明确输出 `capture_rate_raw*`。按 captured + completed outward escape 归一化的结果使用 `capture_rate_valid`、`capture_rate_valid_err` 和 `capture_rate_valid_CI_95_lower/upper`。`evaporation_times.txt` 只包含运行元数据与事件列定义。Capture Mode 不写这些文件，只在终端分别打印 raw / valid 统计及各自 Wilson 区间。
 
 ### 6.3 Snapshot 输出
 
 若设置 `snapshot_enabled = true`，代码按 wall-clock 间隔输出累计 snapshot。相关参数为：
 
-- `snapshot_interval`：snapshot 间隔，默认 `60 s`。
-- `max_trajectory_wall_time_sec`：单条轨迹 wall-clock 上限，默认 `0` 表示不限制；若启用 snapshot 且希望避免某个 MPI rank 卡在单条轨迹上，可显式设为有限正值。
+- `snapshot_interval`：snapshot 间隔，必须为正整数秒，默认 `60 s`。
+- `max_trajectory_wall_time_sec`：单条轨迹 wall-clock 上限，默认 `0` 表示不限制；snapshot recorder 的锁等待与记录开销不计入此上限。
 
-Snapshot 会合并各 rank 的当前进度，包括已完成轨迹的 captured / not_captured bincount，以及正在运行轨迹的临时 bincount。Capture Mode 会强制关闭 snapshot，因为该模式只需要终端捕获率。
+Snapshot 会合并各 rank 的当前进度，包括已完成轨迹的 captured / not_captured bincount，以及正在运行轨迹的临时 bincount。报告分别记录 attempted、physically classified 与 unresolved 数量，并输出 raw / valid 两套捕获率及 Wilson 区间。Capture Mode 会强制关闭 snapshot，因为该模式只需要终端捕获率。
+
+程序通过 `MPI_THREAD_FUNNELED` 启动 MPI。每个 rank 只有一个独立 heartbeat 线程执行本地状态复制和文件 I/O，所有 MPI 调用仍由主线程完成。
 
 正式运行前还应验证散射率插值收敛：至少比较 `interpolation_points = 0`、`1000`、`2000`，检查蒸发时间中位数、长尾比例、完整蒸发事件比例和平均散射次数是否在统计误差内一致。若差异不可忽略，应提高插值网格或关闭插值生成基准结果。
 
 每个 snapshot 时间点在 `snapshot/` 目录下生成主报告文件：
 
 - `snapshot_{time}s.txt`：主 snapshot 报告，输出累计统计和 bincount histogram。
-- `snapshot_{time}s_evaporation_times.txt`：该 snapshot 间隔内新完成的、有效的蒸发事件，文件内部同样按 `lifetime_unbinding_sec` 升序输出。
+- `snapshot_{time}s_evaporation_times.txt`：截至该 checkpoint 首次发布的、有效的蒸发事件，文件内部同样按 `lifetime_unbinding_sec` 升序输出。若事件恰在 snapshot 边界并发提交，则只归入下一个 checkpoint，避免重复或丢失。
 
-每个已合并 snapshot 只写入自身的两个固定文件，不会修改根目录最终报告。`snapshot_{time}s_evaporation_times.txt` 只包含该时间区间 `(T_{k-1}, T_k]` 的增量。模拟完成、MPI 汇总后，根目录只输出 `evaporation_times.txt` 与 `bincount.txt`。
+每个已合并 snapshot 只写入自身的两个固定文件，不会修改根目录最终报告。`snapshot_{time}s_evaporation_times.txt` 包含由该 checkpoint 首次发布的增量；通常对应 `(T_{k-1}, T_k]`，边界并发导致延迟提交的事件会归入下一文件且仅出现一次。模拟完成、MPI 汇总后，根目录只输出 `evaporation_times.txt` 与 `bincount.txt`。
 
-各 rank 的二进制 checkpoint 临时文件位于 `snapshot/rank_snapshot/`，只用于合并中间状态；snapshot 合并成功后会清理对应 checkpoint。
+各 rank 的带版本二进制状态文件位于 `snapshot/rank_snapshot/`，只用于同一次运行内合并中间状态，不支持作业重启恢复。报告可能短暂标记为 `partial`；若某个 rank 错过 deadline，则保留不完整状态而不伪造历史回溯。最终合并未完成时会保留 final rank state 供排查。并发任务必须使用不同的 `output_dir`。
 
 ---
 

@@ -2,7 +2,6 @@
 #define __Simulation_Trajectory_hpp_
 
 #include <fstream>
-#include <functional>
 #include <random>
 #include <string>
 #include <vector>
@@ -21,6 +20,8 @@ extern std::string g_top_level_dir;  // 从config文件读取的输出目录
 
 namespace DaMaSCUS_SUN
 {
+
+class SnapshotRecorder;
 
 // Bincount histogram constants
 constexpr int NUM_BINS = 2000;
@@ -94,6 +95,8 @@ struct SnapshotConfig
 	double max_trajectory_wall_time_sec = 0.0;
 };
 
+bool IsValidSnapshotIntervalSeconds(double interval_seconds);
+
 // 1. Result of one trajectory
 struct Trajectory_Result
 {
@@ -133,12 +136,11 @@ class Trajectory_Simulator
 	double Capture_Energy_eV(double radius, double speed, obscura::DM_Particle& DM);
 	bool Update_Capture_State(double radius, double speed, double time, obscura::DM_Particle& DM, bool allow_new_capture);
 
-	std::function<void(const Trajectory_Simulator&)> snapshot_progress_callback;
+	SnapshotRecorder* snapshot_recorder;
 	bool trajectory_in_progress;
 	std::chrono::steady_clock::time_point current_trajectory_wall_start;
-	mutable double accumulated_snapshot_overhead_sec;
-
-	void Publish_Snapshot_Progress() const;
+	double accumulated_snapshot_overhead_sec;
+	void Accumulate_Snapshot_Overhead(const std::chrono::steady_clock::time_point& operation_start);
 
 	TrajectoryTerminationReason Propagate_Freely(Event& current_event, obscura::DM_Particle& DM);
 
@@ -164,7 +166,7 @@ class Trajectory_Simulator
 	Trajectory_Simulator(const Solar_Model& model, unsigned long int max_time_steps = DEFAULT_MAXIMUM_FREE_TIME_STEPS, unsigned long int max_scatterings = DEFAULT_MAXIMUM_SCATTERINGS, double max_distance = 2.0 * libphysica::natural_units::rSun);
 
 	void Fix_PRNG_Seed(unsigned int fixed_seed);
-	void Set_Snapshot_Progress_Callback(std::function<void(const Trajectory_Simulator&)> callback);
+	void Set_Snapshot_Recorder(SnapshotRecorder* recorder);
 	void Enable_Capture_Mode(bool enabled);
 
 	void Scatter(Event& current_event, obscura::DM_Particle& DM);

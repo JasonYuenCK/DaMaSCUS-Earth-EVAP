@@ -20,6 +20,9 @@ add_library(lib_damascus_sun STATIC
 	Data_Generation.cpp
 	Parameter_Scan.cpp
 	Reflection_Spectrum.cpp
+	Snapshot_Heartbeat.cpp
+	Snapshot_IO.cpp
+	Snapshot_Shared_State.cpp
 	Simulation_Trajectory.cpp
 	Simulation_Utilities.cpp
 	Solar_Model.cpp )
@@ -34,11 +37,12 @@ target_include_directories(lib_damascus_sun
 
 add_dependencies(DaMaSCUS-SUN generate_version_header)
 add_dependencies(lib_damascus_sun generate_version_header)
-		
+
 target_link_libraries(lib_damascus_sun
-    PUBLIC
-        coverage_config 
-		libobscura
-		${MPI_CXX_LIBRARIES} )	
+	    PUBLIC
+	        coverage_config
+			libobscura
+			${MPI_CXX_LIBRARIES}
+			Threads::Threads )
 
 install(TARGETS lib_damascus_sun DESTINATION ${LIB_DIR})

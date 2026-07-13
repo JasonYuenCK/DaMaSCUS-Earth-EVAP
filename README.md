@@ -69,6 +69,10 @@ bin/DaMaSCUS-SUN
 The repository ignores `bin/`, so local run scripts, cluster submission scripts,
 and private configuration files can live there without being committed.
 
+The installed binary is currently checkout-bound: its build records the source
+directory used to locate `data/model_agss09.dat`. Keep the checkout in place and
+rebuild after moving it; copying the executable alone is not supported.
+
 ### Cluster Deployment
 
 A typical cluster checkout follows the same pattern:
@@ -124,8 +128,8 @@ DM-nucleon cross section. The selected value is written to output headers as
 | `[1e-39, 1e-38)` | 65536 |
 | `< 1e-39` including `1e-40` and below | 1048576 |
 | `snapshot_enabled` | Enables intermediate wall-clock progress reports for parameter-point runs. Disabled automatically in capture mode. |
-| `snapshot_interval` | Wall-clock spacing, in seconds, for snapshot reports. Defaults to 60 seconds when snapshots are enabled. |
-| `max_trajectory_wall_time_sec` | Optional per-trajectory wall-time guard. Useful with snapshots so one slow trajectory does not block MPI progress reporting. |
+| `snapshot_interval` | Positive integer wall-clock spacing, in seconds, for snapshot reports. Defaults to 60 seconds when snapshots are enabled. |
+| `max_trajectory_wall_time_sec` | Optional per-trajectory wall-time guard. Snapshot recorder overhead is excluded from this budget. |
 
 For reproducible MPI runs, a nonzero fixed seed is expanded by rank as
 `base_seed + 1000003 * mpi_rank`. Computational cutoffs are tracked separately
@@ -143,15 +147,35 @@ reduction:
   `rank trajectory_id lifetime_unbinding_sec`, sorted by
   `lifetime_unbinding_sec` with `rank trajectory_id` tie-breakers.
 
+The `bincount.txt` and snapshot report headers expose both `capture_rate_raw`
+(captured / all attempted) and `capture_rate_valid` (captured / physically
+classified), with separate standard errors and Wilson intervals. The legacy
+`capture_rate*` fields remain aliases for the raw definition.
+
 When snapshots are enabled, intermediate files are written under `snapshot/`:
 
 - `snapshot_{time}s.txt`: cumulative progress report at the snapshot wall time.
 - `snapshot_{time}s_evaporation_times.txt`: complete valid evaporation events
-  newly finished in that snapshot interval, sorted by
-  `lifetime_unbinding_sec`.
+  first published by that checkpoint, sorted by `lifetime_unbinding_sec`.
+  An event committed concurrently with a snapshot boundary is assigned once to
+  the next checkpoint rather than being dropped.
 
 Snapshot files are progress diagnostics. They do not replace the final
-post-reduction `bincount.txt` and `evaporation_times.txt` products.
+post-reduction `bincount.txt` and `evaporation_times.txt` products, and they are
+not restart checkpoints. A report can temporarily have `snapshot_status =
+partial` while ranks publish their state. If a rank misses the deadline, the
+report remains incomplete rather than reconstructing state that was not
+captured. Final rank states are retained when the last merge is incomplete.
+Snapshot reports likewise expose attempted, classified, and unresolved counts
+plus raw and valid capture-rate intervals.
+
+The executable requests `MPI_THREAD_FUNNELED`; only the main thread calls MPI,
+while one heartbeat thread per rank performs local state copies and file I/O.
+Concurrent jobs must use distinct output directories.
+
+Snapshot checkpoint I/O is supported on homogeneous POSIX (Linux/macOS) MPI
+nodes sharing the output filesystem. The binary checkpoint representation is
+local to a run and is not a portable interchange or restart format.
 
 Capture-mode runs skip the full output path and print the capture summary
 instead.
