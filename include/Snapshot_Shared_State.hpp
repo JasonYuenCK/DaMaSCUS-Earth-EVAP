@@ -1,6 +1,7 @@
 #ifndef __Snapshot_Shared_State_hpp_
 #define __Snapshot_Shared_State_hpp_
 
+#include <chrono>
 #include <mutex>
 #include <vector>
 
@@ -14,8 +15,10 @@ class SnapshotSharedState
 {
   public:
 	void Initialize(uint64_t run_id, int rank);
-	void BeginTrajectory(uint64_t trajectory_id);
-	void AddCurrentBincountStep(int bin, double dt_sec, double v2dt);
+	void BeginTrajectory(uint64_t trajectory_id, double initial_simulated_time_sec = 0.0);
+	void AddCurrentBincountStep(int bin, double dt_sec, double v2dt, double simulated_time_sec);
+	void UpdateCurrentSimulationTime(double simulated_time_sec);
+	void UpdateCurrentScatterings(uint64_t scatterings);
 	void MarkCurrentCaptured(bool captured);
 
 	void RecordCompletedTrajectory(
@@ -44,6 +47,10 @@ class SnapshotSharedState
 	bool trajectory_in_progress_ = false;
 	bool current_trajectory_captured_ = false;
 	uint64_t current_trajectory_id_ = 0;
+	std::chrono::steady_clock::time_point current_trajectory_wall_start_{};
+	double current_trajectory_simulation_start_sec_ = 0.0;
+	double current_trajectory_simulated_elapsed_sec_ = 0.0;
+	uint64_t current_trajectory_scatterings_ = 0;
 	std::array<double, NUM_BINS> current_dt_hist_{};
 	std::array<double, NUM_BINS> current_v2dt_hist_{};
 
@@ -70,8 +77,10 @@ class SnapshotRecorder
   public:
 	explicit SnapshotRecorder(SnapshotSharedState& state);
 
-	void BeginTrajectory(uint64_t trajectory_id);
-	void AddCurrentBincountStep(int bin, double dt_sec, double v2dt);
+	void BeginTrajectory(uint64_t trajectory_id, double initial_simulated_time_sec = 0.0);
+	void AddCurrentBincountStep(int bin, double dt_sec, double v2dt, double simulated_time_sec);
+	void UpdateCurrentSimulationTime(double simulated_time_sec);
+	void UpdateCurrentScatterings(uint64_t scatterings);
 	void MarkCurrentCaptured(bool captured);
 
   private:

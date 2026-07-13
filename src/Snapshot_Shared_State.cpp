@@ -1,6 +1,7 @@
 #include "Snapshot_Shared_State.hpp"
 
 #include <algorithm>
+#include <cmath>
 
 namespace DaMaSCUS_SUN
 {
@@ -13,6 +14,10 @@ void SnapshotSharedState::Initialize(uint64_t run_id, int rank)
 	trajectory_in_progress_ = false;
 	current_trajectory_captured_ = false;
 	current_trajectory_id_ = 0;
+	current_trajectory_wall_start_ = std::chrono::steady_clock::time_point();
+	current_trajectory_simulation_start_sec_ = 0.0;
+	current_trajectory_simulated_elapsed_sec_ = 0.0;
+	current_trajectory_scatterings_ = 0;
 	current_dt_hist_.fill(0.0);
 	current_v2dt_hist_.fill(0.0);
 	completed_trajectories_ = 0;
@@ -31,26 +36,49 @@ void SnapshotSharedState::Initialize(uint64_t run_id, int rank)
 	evaporation_events_.clear();
 }
 
-void SnapshotSharedState::BeginTrajectory(uint64_t trajectory_id)
+void SnapshotSharedState::BeginTrajectory(uint64_t trajectory_id, double initial_simulated_time_sec)
 {
 	std::lock_guard<std::mutex> lock(mutex_);
 	trajectory_in_progress_ = true;
 	current_trajectory_captured_ = false;
 	current_trajectory_id_ = trajectory_id;
+	current_trajectory_wall_start_ = std::chrono::steady_clock::now();
+	current_trajectory_simulation_start_sec_ = std::isfinite(initial_simulated_time_sec) ? initial_simulated_time_sec : 0.0;
+	current_trajectory_simulated_elapsed_sec_ = 0.0;
+	current_trajectory_scatterings_ = 0;
 	current_dt_hist_.fill(0.0);
 	current_v2dt_hist_.fill(0.0);
 }
 
-void SnapshotSharedState::AddCurrentBincountStep(int bin, double dt_sec, double v2dt)
+void SnapshotSharedState::AddCurrentBincountStep(int bin, double dt_sec, double v2dt, double simulated_time_sec)
 {
-	if(bin < 0 || bin >= NUM_BINS)
-		return;
-
 	std::lock_guard<std::mutex> lock(mutex_);
 	if(!trajectory_in_progress_)
 		return;
-	current_dt_hist_[bin] += dt_sec;
-	current_v2dt_hist_[bin] += v2dt;
+	if(std::isfinite(simulated_time_sec))
+		current_trajectory_simulated_elapsed_sec_ =
+			std::max(0.0, simulated_time_sec - current_trajectory_simulation_start_sec_);
+	if(bin >= 0 && bin < NUM_BINS)
+	{
+		current_dt_hist_[bin] += dt_sec;
+		current_v2dt_hist_[bin] += v2dt;
+	}
+}
+
+void SnapshotSharedState::UpdateCurrentSimulationTime(double simulated_time_sec)
+{
+	std::lock_guard<std::mutex> lock(mutex_);
+	if(!trajectory_in_progress_ || !std::isfinite(simulated_time_sec))
+		return;
+	current_trajectory_simulated_elapsed_sec_ =
+		std::max(0.0, simulated_time_sec - current_trajectory_simulation_start_sec_);
+}
+
+void SnapshotSharedState::UpdateCurrentScatterings(uint64_t scatterings)
+{
+	std::lock_guard<std::mutex> lock(mutex_);
+	if(trajectory_in_progress_)
+		current_trajectory_scatterings_ = scatterings;
 }
 
 void SnapshotSharedState::MarkCurrentCaptured(bool captured)
@@ -127,6 +155,10 @@ void SnapshotSharedState::ClearCurrentTrajectoryLocked()
 	trajectory_in_progress_ = false;
 	current_trajectory_captured_ = false;
 	current_trajectory_id_ = 0;
+	current_trajectory_wall_start_ = std::chrono::steady_clock::time_point();
+	current_trajectory_simulation_start_sec_ = 0.0;
+	current_trajectory_simulated_elapsed_sec_ = 0.0;
+	current_trajectory_scatterings_ = 0;
 	current_dt_hist_.fill(0.0);
 	current_v2dt_hist_.fill(0.0);
 }
@@ -154,6 +186,10 @@ SnapshotRankState SnapshotSharedState::CopyLocked(
 	state.current_trajectory_captured = (state.trajectory_in_progress && current_trajectory_captured_) ? 1 : 0;
 	if(state.trajectory_in_progress)
 	{
+		state.current_trajectory_wall_sec = 1.0e-9 * std::chrono::duration_cast<std::chrono::nanoseconds>(
+			std::chrono::steady_clock::now() - current_trajectory_wall_start_).count();
+		state.current_trajectory_simulated_elapsed_sec = current_trajectory_simulated_elapsed_sec_;
+		state.current_trajectory_scatterings = current_trajectory_scatterings_;
 		state.current_trajectory_dt_hist = current_dt_hist_;
 		state.current_trajectory_v2dt_hist = current_v2dt_hist_;
 	}
@@ -179,14 +215,24 @@ SnapshotRecorder::SnapshotRecorder(SnapshotSharedState& state)
 {
 }
 
-void SnapshotRecorder::BeginTrajectory(uint64_t trajectory_id)
+void SnapshotRecorder::BeginTrajectory(uint64_t trajectory_id, double initial_simulated_time_sec)
 {
-	state_.BeginTrajectory(trajectory_id);
+	state_.BeginTrajectory(trajectory_id, initial_simulated_time_sec);
 }
 
-void SnapshotRecorder::AddCurrentBincountStep(int bin, double dt_sec, double v2dt)
+void SnapshotRecorder::AddCurrentBincountStep(int bin, double dt_sec, double v2dt, double simulated_time_sec)
 {
-	state_.AddCurrentBincountStep(bin, dt_sec, v2dt);
+	state_.AddCurrentBincountStep(bin, dt_sec, v2dt, simulated_time_sec);
+}
+
+void SnapshotRecorder::UpdateCurrentSimulationTime(double simulated_time_sec)
+{
+	state_.UpdateCurrentSimulationTime(simulated_time_sec);
+}
+
+void SnapshotRecorder::UpdateCurrentScatterings(uint64_t scatterings)
+{
+	state_.UpdateCurrentScatterings(scatterings);
 }
 
 void SnapshotRecorder::MarkCurrentCaptured(bool captured)

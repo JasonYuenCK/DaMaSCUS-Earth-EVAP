@@ -156,6 +156,10 @@ classified), with separate standard errors and Wilson intervals. The legacy
 When snapshots are enabled, intermediate files are written under `snapshot/`:
 
 - `snapshot_{time}s.txt`: cumulative progress report at the snapshot wall time.
+  Its commented `[MPI rank status]` table reports each rank's activity, local
+  trajectory ID, trajectory wall time, simulated elapsed time, scattering
+  count, and the rank-local observation time. Status rows remain comments so
+  existing readers that skip `#` lines continue to see only bincount bins.
 - `snapshot_{time}s_evaporation_times.txt`: complete valid evaporation events
   first published by that checkpoint, sorted by `lifetime_unbinding_sec`.
   An event committed concurrently with a snapshot boundary is assigned once to

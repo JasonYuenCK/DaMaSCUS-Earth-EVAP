@@ -626,19 +626,33 @@ const TrajectoryBincount& Trajectory_Simulator::Current_Trajectory_Bincount() co
 }
 
 // Accumulate one step into the current bincount
-void Trajectory_Simulator::Accumulate_Bincount_Step(double r_km, double v2_km2s2, double dt_sec)
+void Trajectory_Simulator::Accumulate_Bincount_Step(
+	double r_km,
+	double v2_km2s2,
+	double dt_sec,
+	double simulated_time_sec)
 {
-	if(dt_sec <= 0.0 || r_km < 0.0 || r_km >= BIN_MAX_KM)
+	if(!std::isfinite(dt_sec) || dt_sec <= 0.0)
 		return;
-	int bin_idx = static_cast<int>(r_km / BIN_WIDTH_KM);
-	if(bin_idx < 0) bin_idx = 0;
-	if(bin_idx >= NUM_BINS) return;
-	current_bincount.dt_hist[bin_idx] += dt_sec;
-	current_bincount.v2dt_hist[bin_idx] += v2_km2s2 * dt_sec;
+	int bin_idx = -1;
+	if(std::isfinite(r_km) && r_km >= 0.0 && r_km < BIN_MAX_KM)
+	{
+		bin_idx = static_cast<int>(r_km / BIN_WIDTH_KM);
+		if(bin_idx < 0)
+			bin_idx = 0;
+		if(bin_idx >= NUM_BINS)
+			bin_idx = -1;
+	}
+	const double v2dt = (bin_idx >= 0) ? v2_km2s2 * dt_sec : 0.0;
+	if(bin_idx >= 0)
+	{
+		current_bincount.dt_hist[bin_idx] += dt_sec;
+		current_bincount.v2dt_hist[bin_idx] += v2dt;
+	}
 	if(snapshot_recorder != nullptr)
 	{
 		const auto snapshot_operation_start = std::chrono::steady_clock::now();
-		snapshot_recorder->AddCurrentBincountStep(bin_idx, dt_sec, v2_km2s2 * dt_sec);
+		snapshot_recorder->AddCurrentBincountStep(bin_idx, dt_sec, v2dt, simulated_time_sec);
 		Accumulate_Snapshot_Overhead(snapshot_operation_start);
 	}
 }
@@ -795,6 +809,9 @@ TrajectoryTerminationReason Trajectory_Simulator::Propagate_Freely(Event& curren
 
 	auto commit_accepted_event = [&](const Event& local_accepted_event)
 	{
+		const Event absolute_accepted_event = to_absolute_event(local_accepted_event);
+		const double simulated_time_sec = In_Units(absolute_accepted_event.time, sec);
+		bool snapshot_progress_updated = false;
 		const double t_now_sec = In_Units(local_accepted_event.time, sec);
 		if(!terminate_on_capture)
 		{
@@ -805,7 +822,8 @@ TrajectoryTerminationReason Trajectory_Simulator::Propagate_Freely(Event& curren
 			if(prev_time_sec >= 0.0)
 			{
 				const double dt_sec = t_now_sec - prev_time_sec;
-				Accumulate_Bincount_Step(prev_r_km, prev_v2_km2s2, dt_sec);
+				Accumulate_Bincount_Step(prev_r_km, prev_v2_km2s2, dt_sec, simulated_time_sec);
+				snapshot_progress_updated = std::isfinite(dt_sec) && dt_sec > 0.0;
 				prev_dt_sec = dt_sec;
 			}
 
@@ -814,7 +832,12 @@ TrajectoryTerminationReason Trajectory_Simulator::Propagate_Freely(Event& curren
 			prev_v2_km2s2 = v2_now;
 		}
 
-		const Event absolute_accepted_event = to_absolute_event(local_accepted_event);
+		if(snapshot_recorder != nullptr && !snapshot_progress_updated)
+		{
+			const auto snapshot_operation_start = std::chrono::steady_clock::now();
+			snapshot_recorder->UpdateCurrentSimulationTime(In_Units(absolute_accepted_event.time, sec));
+			Accumulate_Snapshot_Overhead(snapshot_operation_start);
+		}
 		return Update_Capture_State(absolute_accepted_event.Radius(), absolute_accepted_event.Speed(), absolute_accepted_event.time, DM, false);
 	};
 
@@ -1030,6 +1053,12 @@ TrajectoryTerminationReason Trajectory_Simulator::Propagate_Freely(Event& curren
 					optical_depth_retries = 0;
 						commit_accepted_event(boundary_event);
 						current_event = to_absolute_event(inbound_boundary_event);
+						if(snapshot_recorder != nullptr)
+						{
+							const auto snapshot_operation_start = std::chrono::steady_clock::now();
+							snapshot_recorder->UpdateCurrentSimulationTime(In_Units(current_event.time, sec));
+							Accumulate_Snapshot_Overhead(snapshot_operation_start);
+						}
 						reset_propagator_at_absolute_event(current_event);
 						continue;
 					}
@@ -1200,7 +1229,7 @@ Trajectory_Result Trajectory_Simulator::Simulate(const Event& initial_condition,
 	if(snapshot_recorder != nullptr)
 	{
 		const auto snapshot_operation_start = std::chrono::steady_clock::now();
-		snapshot_recorder->BeginTrajectory(current_trajectory_id);
+		snapshot_recorder->BeginTrajectory(current_trajectory_id, In_Units(current_event.time, sec));
 		Accumulate_Snapshot_Overhead(snapshot_operation_start);
 	}
 
@@ -1222,6 +1251,12 @@ Trajectory_Result Trajectory_Simulator::Simulate(const Event& initial_condition,
 				break;
 			}
 			number_of_scatterings++;
+			if(snapshot_recorder != nullptr)
+			{
+				const auto snapshot_operation_start = std::chrono::steady_clock::now();
+				snapshot_recorder->UpdateCurrentScatterings(number_of_scatterings);
+				Accumulate_Snapshot_Overhead(snapshot_operation_start);
+			}
 			bool captured_after_scatter = Update_Capture_State(current_event.Radius(), current_event.Speed(), current_event.time, DM, true);
 			Reset_Bincount_Anchor(current_event);
 			if(terminate_on_capture && captured_after_scatter)

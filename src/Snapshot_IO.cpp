@@ -20,7 +20,7 @@ namespace DaMaSCUS_SUN
 namespace
 {
 constexpr uint64_t SNAPSHOT_RANK_STATE_MAGIC = 0x4453534e41503031ULL;
-constexpr uint32_t SNAPSHOT_RANK_STATE_VERSION = 2;
+constexpr uint32_t SNAPSHOT_RANK_STATE_VERSION = 3;
 constexpr uint32_t SNAPSHOT_RANK_STATE_HEADER_BYTES = sizeof(uint64_t) + 2 * sizeof(uint32_t);
 constexpr uint64_t MAX_SNAPSHOT_EVAPORATION_EVENTS = 10000000ULL;
 
@@ -29,8 +29,8 @@ uint64_t SnapshotRankStateFixedBytes()
 	return SNAPSHOT_RANK_STATE_HEADER_BYTES
 	     + sizeof(uint64_t)
 	     + 4 * sizeof(int32_t)
-	     + 6 * sizeof(uint64_t)
-	     + sizeof(double)
+	     + 7 * sizeof(uint64_t)
+	     + 3 * sizeof(double)
 	     + sizeof(int32_t)
 	     + 10ULL * NUM_BINS * sizeof(double)
 	     + sizeof(uint64_t);
@@ -102,7 +102,10 @@ bool IsValidRankState(const SnapshotRankState& state)
 	   || state.bincount_not_captured_samples > state.local_total
 	   || state.bincount_captured_samples > state.local_total - state.bincount_not_captured_samples)
 		return false;
-	if(!std::isfinite(state.rank_elapsed_wall_sec) || state.rank_elapsed_wall_sec < 0.0)
+	if(!std::isfinite(state.rank_elapsed_wall_sec) || state.rank_elapsed_wall_sec < 0.0
+	   || !std::isfinite(state.current_trajectory_wall_sec) || state.current_trajectory_wall_sec < 0.0
+	   || !std::isfinite(state.current_trajectory_simulated_elapsed_sec)
+	   || state.current_trajectory_simulated_elapsed_sec < 0.0)
 		return false;
 	if(state.done && state.trajectory_in_progress)
 		return false;
@@ -114,7 +117,11 @@ bool IsValidRankState(const SnapshotRankState& state)
 	if(state.trajectory_in_progress && state.current_trajectory_id == 0)
 		return false;
 	if(!state.trajectory_in_progress
-	   && (state.current_trajectory_id != 0 || state.current_trajectory_captured != 0))
+	   && (state.current_trajectory_id != 0
+	       || state.current_trajectory_captured != 0
+	       || state.current_trajectory_wall_sec != 0.0
+	       || state.current_trajectory_simulated_elapsed_sec != 0.0
+	       || state.current_trajectory_scatterings != 0))
 		return false;
 
 	return IsValidHistogram(state.current_trajectory_dt_hist)
@@ -315,6 +322,19 @@ bool SnapshotTextFileIsMerged(const std::string& path, uint64_t expected_run_id)
 
 struct SnapshotReportState
 {
+	struct RankProgress
+	{
+		int rank = -1;
+		int done = 0;
+		int trajectory_in_progress = 0;
+		int current_trajectory_captured = 0;
+		uint64_t current_trajectory_id = 0;
+		uint64_t current_trajectory_scatterings = 0;
+		double rank_elapsed_wall_sec = 0.0;
+		double current_trajectory_wall_sec = 0.0;
+		double current_trajectory_simulated_elapsed_sec = 0.0;
+	};
+
 	int snapshot_index = 0;
 	long long snapshot_time_label = 0;
 	double snapshot_interval_seconds = 0.0;
@@ -332,10 +352,32 @@ struct SnapshotReportState
 	std::array<double, NUM_BINS> not_captured_dt_sq_hist{};
 	std::array<double, NUM_BINS> not_captured_v2dt_sq_hist{};
 	std::vector<SnapshotRankedEvaporationEntry> new_evaporation_events;
+	std::vector<RankProgress> rank_progress;
 };
+
+const char* SnapshotRankActivityLabel(const SnapshotReportState::RankProgress& progress)
+{
+	if(progress.done)
+		return "done";
+	if(!progress.trajectory_in_progress)
+		return "idle_or_waiting";
+	return progress.current_trajectory_captured ? "running_captured" : "running_uncaptured";
+}
 
 void AccumulateSnapshotReportState(SnapshotReportState& report, const SnapshotRankState& state)
 {
+	SnapshotReportState::RankProgress progress;
+	progress.rank = state.rank;
+	progress.done = state.done;
+	progress.trajectory_in_progress = state.trajectory_in_progress;
+	progress.current_trajectory_captured = state.current_trajectory_captured;
+	progress.current_trajectory_id = state.current_trajectory_id;
+	progress.current_trajectory_scatterings = state.current_trajectory_scatterings;
+	progress.rank_elapsed_wall_sec = state.rank_elapsed_wall_sec;
+	progress.current_trajectory_wall_sec = state.current_trajectory_wall_sec;
+	progress.current_trajectory_simulated_elapsed_sec = state.current_trajectory_simulated_elapsed_sec;
+	report.rank_progress.push_back(progress);
+
 	report.total_trajectories += state.local_total;
 	report.captured_particles += state.local_captured;
 	report.classified_trajectories += state.local_classified;
@@ -565,6 +607,19 @@ bool WriteSnapshotReportFile(
 			report.snapshot_time_label,
 			report.snapshot_interval_seconds);
 
+		file << "#\n";
+		file << "# [MPI rank status]\n";
+		file << "# rank  state  trajectory_id  trajectory_wall_s  simulated_elapsed_s  scatterings  observed_at_wall_s\n";
+		for(const auto& progress : report.rank_progress)
+		{
+			file << "# " << progress.rank << "\t" << SnapshotRankActivityLabel(progress)
+			     << "\t" << progress.current_trajectory_id
+			     << "\t" << std::scientific << std::setprecision(10) << progress.current_trajectory_wall_sec
+			     << "\t" << progress.current_trajectory_simulated_elapsed_sec
+			     << "\t" << progress.current_trajectory_scatterings
+			     << "\t" << progress.rank_elapsed_wall_sec << "\n";
+		}
+
 		const double snapshot_captured_samples = static_cast<double>(report.snapshot_bincount_captured_samples);
 		const double snapshot_not_captured_samples = static_cast<double>(report.snapshot_bincount_not_captured_samples);
 		file << "#\n";
@@ -664,6 +719,9 @@ bool WriteSnapshotRankState(const std::string& path, const SnapshotRankState& st
 	WriteBinaryValue(file, state.bincount_not_captured_samples);
 	WriteBinaryValue(file, state.current_trajectory_id);
 	WriteBinaryValue(file, state.rank_elapsed_wall_sec);
+	WriteBinaryValue(file, state.current_trajectory_wall_sec);
+	WriteBinaryValue(file, state.current_trajectory_simulated_elapsed_sec);
+	WriteBinaryValue(file, state.current_trajectory_scatterings);
 	WriteBinaryValue(file, state.current_trajectory_captured);
 	WriteBinaryArray(file, state.current_trajectory_dt_hist);
 	WriteBinaryArray(file, state.current_trajectory_v2dt_hist);
@@ -734,6 +792,9 @@ bool ReadSnapshotRankState(const std::string& path, uint64_t expected_run_id, Sn
 	ReadBinaryValue(file, state.bincount_not_captured_samples);
 	ReadBinaryValue(file, state.current_trajectory_id);
 	ReadBinaryValue(file, state.rank_elapsed_wall_sec);
+	ReadBinaryValue(file, state.current_trajectory_wall_sec);
+	ReadBinaryValue(file, state.current_trajectory_simulated_elapsed_sec);
+	ReadBinaryValue(file, state.current_trajectory_scatterings);
 	ReadBinaryValue(file, state.current_trajectory_captured);
 	ReadBinaryArray(file, state.current_trajectory_dt_hist);
 	ReadBinaryArray(file, state.current_trajectory_v2dt_hist);
