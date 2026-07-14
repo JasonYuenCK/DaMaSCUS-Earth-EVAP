@@ -1,6 +1,8 @@
 #include "gtest/gtest.h"
 
 #include <cmath>
+#include <limits>
+#include <stdexcept>
 #include <vector>
 
 #include "libphysica/Natural_Units.hpp"
@@ -121,6 +123,13 @@ TEST(TestSimulationTrajectory, TestDefaultTrajectoryWallTimeIsUnlimited)
 	Solar_Model SSM;
 	Trajectory_Simulator simulator(SSM);
 	EXPECT_DOUBLE_EQ(simulator.max_trajectory_wall_time_sec, 0.0);
+}
+
+TEST(TestSimulationTrajectory, TestSimulatorRejectsInvalidNumericalBounds)
+{
+	Solar_Model SSM;
+	EXPECT_THROW(Trajectory_Simulator(SSM, 100, 100, 0.0), std::invalid_argument);
+	EXPECT_THROW(Trajectory_Simulator(SSM, 100, 100, std::numeric_limits<double>::quiet_NaN()), std::invalid_argument);
 }
 
 TEST(TestSimulationTrajectory, TestTrajectoryBincountSurvivalDefaults)

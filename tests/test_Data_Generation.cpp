@@ -336,6 +336,31 @@ TEST(TestDataGeneration, TestComputationallyTruncatedNonCaptureIsExcludedFromCap
 	}
 }
 
+TEST(TestDataGeneration, TestUnlimitedBudgetStopsWhenEveryTrajectoryIsInvalid)
+{
+	Solar_Model SSM;
+	obscura::Standard_Halo_Model SHM;
+
+	obscura::DM_Particle_SI DM(0.01 * GeV);
+	DM.Set_Low_Mass_Mode(true);
+	DM.Set_Sigma_Proton(1.0e-100 * pb);
+	DM.Set_Sigma_Electron(1.0e-100 * pb);
+
+	Simulation_Data data_set(1, 0);
+	data_set.Configure(2.0 * rSun, 0, 0, 10);
+	data_set.Generate_Data(DM, SSM, SHM, SnapshotConfig(), 20260710, true);
+
+	int rank = 0;
+	MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+	const std::string output_dir = TestOutputDir("invalid_trajectory_fuse");
+	data_set.Write_Output_Files(output_dir, DM);
+	if(rank == 0)
+	{
+		EXPECT_TRUE(FileContains(output_dir + "bincount.txt", "# EARLY_STOP: invalid_trajectory_fraction_exceeded"));
+		RemoveTestOutputDir(output_dir);
+	}
+}
+
 TEST(TestDataGeneration, TestCaptureModeCompletedEscapeIsIncludedInCaptureRate)
 {
 	Solar_Model SSM;
@@ -478,6 +503,11 @@ TEST(TestDataGeneration, TestDefaultOutputContract)
 		EXPECT_TRUE(FileExists(output_dir + "bincount.txt"));
 		EXPECT_TRUE(FileExists(output_dir + "evaporation_times.txt"));
 		EXPECT_TRUE(FileContains(output_dir + "bincount.txt", "# normal_mode_mpi_sync_interval = 1048576"));
+		EXPECT_TRUE(FileContains(output_dir + "bincount.txt", "# mpi_sync_rounds = 1"));
+		EXPECT_TRUE(FileContains(output_dir + "bincount.txt", "# final_mpi_round_trajectories = 1"));
+		EXPECT_TRUE(FileContains(output_dir + "bincount.txt", "# capture_target_overshoot = 0"));
+		EXPECT_TRUE(FileContains(output_dir + "bincount.txt", "# total_scatterings = 0"));
+		EXPECT_TRUE(FileContains(output_dir + "bincount.txt", "# simulation_time_seconds = "));
 		EXPECT_TRUE(FileContains(output_dir + "bincount.txt", "# completed_outward_escapes = 1"));
 		EXPECT_TRUE(FileContains(output_dir + "bincount.txt", "# unresolved_not_captured_trajectories = 0"));
 		EXPECT_FALSE(FileExists(output_dir + "evaporation_diagnostics.txt"));

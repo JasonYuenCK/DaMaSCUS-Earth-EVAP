@@ -3,7 +3,9 @@
 #include <algorithm>
 #include <cmath>
 #include <cstddef>
+#include <limits>
 #include <mpi.h>
+#include <stdexcept>
 
 #include "libphysica/Integration.hpp"
 #include "libphysica/Natural_Units.hpp"
@@ -25,6 +27,8 @@ Solar_Isotope::Solar_Isotope(const obscura::Isotope& isotope, const std::vector<
 
 double Solar_Isotope::Number_Density(double r)
 {
+	if(!std::isfinite(r))
+		return std::numeric_limits<double>::quiet_NaN();
 	// 边界检查：防止负半径
 	if(r < 0.0)
 		r = 0.0;
@@ -163,6 +167,8 @@ Solar_Model::Solar_Model()
 
 double Solar_Model::Mass(double r)
 {
+	if(!std::isfinite(r))
+		return std::numeric_limits<double>::quiet_NaN();
 	// 边界检查：防止负半径
 	if(r < 0.0)
 		r = 0.0;
@@ -174,6 +180,8 @@ double Solar_Model::Mass(double r)
 
 double Solar_Model::Mass_Density(double r)
 {
+	if(!std::isfinite(r))
+		return std::numeric_limits<double>::quiet_NaN();
 	// 边界检查：防止负半径
 	if(r < 0.0)
 		r = 0.0;
@@ -185,6 +193,8 @@ double Solar_Model::Mass_Density(double r)
 
 double Solar_Model::Temperature(double r)
 {
+	if(!std::isfinite(r))
+		return std::numeric_limits<double>::quiet_NaN();
 	// 边界检查：防止负半径
 	if(r < 0.0)
 		r = 0.0;
@@ -193,6 +203,8 @@ double Solar_Model::Temperature(double r)
 
 double Solar_Model::Local_Escape_Speed(double r)
 {
+	if(!std::isfinite(r))
+		return std::numeric_limits<double>::quiet_NaN();
 	// 边界检查：防止负半径导致插值错误
 	if(r < 0.0)
 	{
@@ -207,6 +219,8 @@ double Solar_Model::Local_Escape_Speed(double r)
 
 double Solar_Model::Debye_Screening_Scale_Squared(double r)
 {
+	if(!std::isfinite(r))
+		return std::numeric_limits<double>::quiet_NaN();
 	if(r <= rSun)
 	{
 		double T			 = Temperature(r);
@@ -235,6 +249,8 @@ double Solar_Model::Number_Density_Nucleus(double r, unsigned int nucleus_index)
 
 double Solar_Model::Number_Density_Electron(double r)
 {
+	if(!std::isfinite(r))
+		return std::numeric_limits<double>::quiet_NaN();
 	// 边界检查：防止负半径
 	if(r < 0.0)
 		r = 0.0;
@@ -246,6 +262,8 @@ double Solar_Model::Number_Density_Electron(double r)
 
 double Solar_Model::DM_Scattering_Rate_Electron(obscura::DM_Particle& DM, double r, double DM_speed)
 {
+	if(!std::isfinite(r) || !std::isfinite(DM_speed))
+		return std::numeric_limits<double>::quiet_NaN();
 	// 边界检查：防止负半径或负速度
 	if(r < 0.0)
 		r = 0.0;
@@ -267,6 +285,8 @@ double Solar_Model::DM_Scattering_Rate_Nucleus(obscura::DM_Particle& DM, double 
 		std::cerr << "Error in Solar_Model::Number_Density_Nucleus(): Index = " << nucleus_index << " is out of bound (number of targets: " << target_isotopes.size() << ")." << std::endl;
 		std::exit(EXIT_FAILURE);
 	}
+	if(!std::isfinite(r) || !std::isfinite(DM_speed))
+		return std::numeric_limits<double>::quiet_NaN();
 	// 边界检查：防止负半径或负速度
 	if(r < 0.0)
 		r = 0.0;
@@ -284,6 +304,8 @@ double Solar_Model::DM_Scattering_Rate_Nucleus(obscura::DM_Particle& DM, double 
 
 double Solar_Model::Total_DM_Scattering_Rate(obscura::DM_Particle& DM, double r, double DM_speed)
 {
+	if(!std::isfinite(r) || !std::isfinite(DM_speed))
+		return std::numeric_limits<double>::quiet_NaN();
 	// 边界检查：防止负半径或负速度
 	if(r < 0.0)
 		r = 0.0;
@@ -301,6 +323,8 @@ double Solar_Model::Total_DM_Scattering_Rate(obscura::DM_Particle& DM, double r,
 
 double Solar_Model::Total_DM_Scattering_Rate_Computed(obscura::DM_Particle& DM, double r, double DM_speed)
 {
+	if(!std::isfinite(r) || !std::isfinite(DM_speed))
+		return std::numeric_limits<double>::quiet_NaN();
 	// 边界检查：防止负半径或负速度
 	if(r < 0.0)
 		r = 0.0;
@@ -319,6 +343,15 @@ double Solar_Model::Total_DM_Scattering_Rate_Computed(obscura::DM_Particle& DM, 
 
 double Solar_Model::Total_DM_Scattering_Rate_Interpolated(obscura::DM_Particle& DM, double r, double DM_speed)
 {
+	if(!std::isfinite(r) || !std::isfinite(DM_speed))
+		return std::numeric_limits<double>::quiet_NaN();
+	const std::size_t expected_grid_size = static_cast<std::size_t>(rate_grid_radius_points)
+	                                       * static_cast<std::size_t>(rate_grid_speed_points);
+	if(!using_interpolated_rate || rate_grid_radius_points < 2 || rate_grid_speed_points < 2
+	   || rate_grid.size() != expected_grid_size
+	   || !std::isfinite(rate_grid_inverse_radius_step) || rate_grid_inverse_radius_step <= 0.0
+	   || !std::isfinite(rate_grid_inverse_speed_step) || rate_grid_inverse_speed_step <= 0.0)
+		return Total_DM_Scattering_Rate_Computed(DM, r, DM_speed);
 	// 边界检查：防止超出插值域
 	if(r > rSun || r < 0.0)
 		return 0.0;
@@ -336,6 +369,9 @@ double Solar_Model::Total_DM_Scattering_Rate_Interpolated(obscura::DM_Particle& 
 
 	const double radius_coordinate = r * rate_grid_inverse_radius_step;
 	const double speed_coordinate = DM_speed * rate_grid_inverse_speed_step;
+	if(!std::isfinite(radius_coordinate) || !std::isfinite(speed_coordinate)
+	   || radius_coordinate < 0.0 || speed_coordinate < 0.0)
+		return Total_DM_Scattering_Rate_Computed(DM, r, DM_speed);
 	const unsigned int radius_index = std::min(
 	    static_cast<unsigned int>(radius_coordinate), rate_grid_radius_points - 2);
 	const unsigned int speed_index = std::min(
@@ -350,7 +386,10 @@ double Solar_Model::Total_DM_Scattering_Rate_Interpolated(obscura::DM_Particle& 
 	                        + speed_fraction * (rate_grid[lower_offset + 1] - rate_grid[lower_offset]);
 	const double upper_rate = rate_grid[upper_offset]
 	                        + speed_fraction * (rate_grid[upper_offset + 1] - rate_grid[upper_offset]);
-	return std::max(0.0, lower_rate + radius_fraction * (upper_rate - lower_rate));
+	const double interpolated_rate = lower_rate + radius_fraction * (upper_rate - lower_rate);
+	return std::isfinite(interpolated_rate)
+	           ? std::max(0.0, interpolated_rate)
+	           : std::numeric_limits<double>::quiet_NaN();
 }
 
 void Solar_Model::Interpolate_Total_DM_Scattering_Rate(obscura::DM_Particle& DM, unsigned int N_radius, unsigned int N_speed)
@@ -371,35 +410,68 @@ void Solar_Model::Interpolate_Total_DM_Scattering_Rate(obscura::DM_Particle& DM,
 		MPI_Comm_size(MPI_COMM_WORLD, &mpi_processes);
 		MPI_Comm_rank(MPI_COMM_WORLD, &mpi_rank);
 
-		using_interpolated_rate = true;
+		const double vMax = 0.75;
+		const unsigned int process_count = static_cast<unsigned int>(mpi_processes);
+		const unsigned int base_radius_count = N_radius / process_count;
+		const unsigned int remainder = N_radius % process_count;
+		const unsigned int local_N_radius = base_radius_count + (static_cast<unsigned int>(mpi_rank) < remainder ? 1u : 0u);
+		const unsigned int local_radius_offset = static_cast<unsigned int>(mpi_rank) * base_radius_count
+		                                         + std::min(static_cast<unsigned int>(mpi_rank), remainder);
 
-		double vMax					 = 0.75;
-		unsigned int local_N_radius	 = std::ceil(1.0 * N_radius / mpi_processes);
-		unsigned int global_N_radius = mpi_processes * local_N_radius;
+		const unsigned long long total_rate_count = static_cast<unsigned long long>(N_radius) * N_speed;
+		if(total_rate_count > static_cast<unsigned long long>(std::numeric_limits<int>::max()))
+			throw std::invalid_argument("scattering-rate interpolation grid is too large for MPI_Allgatherv");
 
-		std::vector<double> global_radii = libphysica::Linear_Space(0, rSun, global_N_radius);
-		std::vector<double> local_radii(local_N_radius, 0.0);
+		std::vector<int> receive_counts(mpi_processes, 0);
+		std::vector<int> displacements(mpi_processes, 0);
+		for(int rank = 0; rank < mpi_processes; rank++)
+		{
+			const unsigned int rank_index = static_cast<unsigned int>(rank);
+			const unsigned int rank_radius_count = base_radius_count + (rank_index < remainder ? 1u : 0u);
+			const unsigned int rank_radius_offset = rank_index * base_radius_count + std::min(rank_index, remainder);
+			receive_counts[rank] = static_cast<int>(static_cast<unsigned long long>(rank_radius_count) * N_speed);
+			displacements[rank] = static_cast<int>(static_cast<unsigned long long>(rank_radius_offset) * N_speed);
+		}
 
-		// Compute the table in parallel
-		MPI_Scatter(global_radii.data(), local_N_radius, MPI_DOUBLE, local_radii.data(), local_N_radius, MPI_DOUBLE, 0, MPI_COMM_WORLD);
-		std::vector<double> speeds = libphysica::Linear_Space(0, vMax, N_speed);
+		// Each rank computes its exact contiguous slice of the requested grid. Uneven
+		// slices avoid padding N_radius to a multiple of the MPI process count.
+		const std::vector<double> speeds = libphysica::Linear_Space(0, vMax, N_speed);
 		std::vector<double> local_rates;
 		local_rates.reserve(static_cast<size_t>(local_N_radius) * N_speed);
-		std::vector<double> global_rates(static_cast<size_t>(N_speed) * global_N_radius, 0.0);
-		for(auto& radius : local_radii)
-			for(auto& speed : speeds)
+		for(unsigned int local_radius_index = 0; local_radius_index < local_N_radius; local_radius_index++)
+		{
+			const unsigned int global_radius_index = local_radius_offset + local_radius_index;
+			const double radius = rSun * static_cast<double>(global_radius_index) / static_cast<double>(N_radius - 1);
+			for(const auto speed : speeds)
 				local_rates.push_back(Total_DM_Scattering_Rate_Computed(DM, radius, speed));
-		MPI_Allgather(local_rates.data(), local_N_radius * N_speed, MPI_DOUBLE, global_rates.data(), local_N_radius * N_speed, MPI_DOUBLE, MPI_COMM_WORLD);
+		}
+
+		std::vector<double> global_rates(static_cast<size_t>(N_speed) * N_radius, 0.0);
+		MPI_Allgatherv(local_rates.empty() ? nullptr : local_rates.data(),
+		               receive_counts[mpi_rank], MPI_DOUBLE,
+		               global_rates.data(), receive_counts.data(), displacements.data(),
+		               MPI_DOUBLE, MPI_COMM_WORLD);
 
 		// The table is regular and radius-major, so queries can use direct indices
 		// instead of two generic binary searches and nested vector lookups.
 		rate_grid.swap(global_rates);
-		rate_grid_radius_points = global_N_radius;
+		rate_grid_radius_points = N_radius;
 		rate_grid_speed_points = N_speed;
-		rate_grid_inverse_radius_step = static_cast<double>(global_N_radius - 1) / rSun;
+		rate_grid_inverse_radius_step = static_cast<double>(N_radius - 1) / rSun;
 		rate_grid_inverse_speed_step = static_cast<double>(N_speed - 1) / vMax;
 		rate_grid_max_speed = vMax;
+		using_interpolated_rate = true;
 	}
+}
+
+unsigned int Solar_Model::Scattering_Rate_Interpolation_Radius_Points() const
+{
+	return rate_grid_radius_points;
+}
+
+unsigned int Solar_Model::Scattering_Rate_Interpolation_Speed_Points() const
+{
+	return rate_grid_speed_points;
 }
 
 void Solar_Model::Print_Summary(int mpi_rank) const
@@ -420,14 +492,32 @@ void Solar_Model::Print_Summary(int mpi_rank) const
 
 double Thermal_Averaged_Relative_Speed(double temperature, double mass_target, double v_DM)
 {
-	double kappa = sqrt(mass_target / 2.0 / temperature);
-	if(v_DM < 1.0e-20)
+	if(!std::isfinite(temperature) || temperature <= 0.0
+	   || !std::isfinite(mass_target) || mass_target <= 0.0
+	   || !std::isfinite(v_DM) || v_DM < 0.0)
+		return std::numeric_limits<double>::quiet_NaN();
+
+	const double kappa = sqrt(mass_target / (2.0 * temperature));
+	if(!std::isfinite(kappa) || kappa <= 0.0)
+		return std::numeric_limits<double>::quiet_NaN();
+	if(v_DM == 0.0)
 		return 2.0 / sqrt(M_PI) / kappa;
-	else
+
+	const double x = kappa * v_DM;
+	if(!std::isfinite(x))
+		return v_DM;
+	if(x < 1.0e-4)
 	{
-		double relative_speed = (1.0 + 2.0 * pow(kappa * v_DM, 2.0)) * erf(kappa * v_DM) / 2.0 / kappa / kappa / v_DM + exp(-pow(kappa * v_DM, 2.0)) / sqrt(M_PI) / kappa;
-		return relative_speed;
+		const double x2 = x * x;
+		return 2.0 / sqrt(M_PI) / kappa
+		       * (1.0 + x2 / 3.0 - x2 * x2 / 30.0 + x2 * x2 * x2 / 210.0);
 	}
+	if(x > 26.0)
+		return v_DM * (1.0 + 0.5 / (x * x));
+
+	const double x2 = x * x;
+	return v_DM * ((1.0 + 2.0 * x2) * erf(x) / (2.0 * x2)
+	               + exp(-x2) / (sqrt(M_PI) * x));
 }
 
 }	// namespace DaMaSCUS_SUN

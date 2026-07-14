@@ -29,9 +29,9 @@ namespace
 constexpr double RK45_MIN_STEP_FACTOR = 0.1;
 constexpr double RK45_MAX_STEP_FACTOR = 4.0;
 // 单次 Runge_Kutta_45_Step 内层 while(!accepted) 的最大重试次数。
-// 在正常物理场景下 <100 次即可收敛；设为 2000 是为了在极端数值情形下
-// 保证外层循环一定能在有限时间内拿回控制权，从而触发 snapshot 回调。
-constexpr int RK45_MAX_INNER_RETRIES = 2000;
+// 正常物理场景下通常在 100 次内收敛；保留额外裕量，同时避免一次病态
+// 步长重试长时间占住外层，使轨迹墙钟保护无法及时获得控制权。
+constexpr int RK45_MAX_INNER_RETRIES = 256;
 constexpr double FREE_ENERGY_DRIFT_REL_E_SCALE_EV = 1.0e-30;
 constexpr double MAX_OPTICAL_DEPTH_STEP = 0.05;
 constexpr double CAPTURE_MODE_MAX_OPTICAL_DEPTH_STEP = 0.10;
@@ -40,7 +40,7 @@ constexpr double OPTICAL_DEPTH_ABSOLUTE_TOLERANCE = 1.0e-12 * MAX_OPTICAL_DEPTH_
 constexpr unsigned int MAX_OPTICAL_DEPTH_RETRIES = 100;
 constexpr std::size_t MAX_OPTICAL_DEPTH_PIECES = 4;
 constexpr std::size_t CAPTURE_MODE_OPTICAL_DEPTH_PIECES = 2;
-constexpr unsigned long int TARGET_VELOCITY_MAX_REJECTION_ATTEMPTS = 1000000UL;
+constexpr unsigned long int TARGET_VELOCITY_MAX_REJECTION_ATTEMPTS = 10000UL;
 
 struct OpticalDepthPiece
 {
@@ -100,8 +100,17 @@ double Clamp_Cosine(double value)
 	return std::max(-1.0, std::min(1.0, value));
 }
 
+double Positive_Unit_Uniform(std::mt19937& PRNG)
+{
+	return std::max(libphysica::Sample_Uniform(PRNG, 0.0, 1.0),
+	                std::numeric_limits<double>::min());
+}
+
 libphysica::Vector Unit_Vector_At_Angle_From_Axis(double cos_theta, double phi, const libphysica::Vector& axis)
 {
+	if(!std::isfinite(cos_theta) || cos_theta < -1.0 - 1.0e-12 || cos_theta > 1.0 + 1.0e-12
+	   || !std::isfinite(phi))
+		throw std::runtime_error("Unit_Vector_At_Angle_From_Axis(): angle is non-finite or outside its domain.");
 	const double axis_norm = axis.Norm();
 	if(!std::isfinite(axis_norm) || axis_norm <= 0.0)
 		throw std::runtime_error("Unit_Vector_At_Angle_From_Axis(): axis is zero or non-finite.");
@@ -578,6 +587,8 @@ void Trajectory_Result::Print_Summary(Solar_Model& solar_model, unsigned int mpi
 Trajectory_Simulator::Trajectory_Simulator(const Solar_Model& model, unsigned long int max_time_steps, unsigned long int max_scatterings, double max_distance)
 : solar_model(model), free_flight_reference_energy_eV(std::numeric_limits<double>::quiet_NaN()), current_physical_bound_state(false), terminate_on_capture(false), snapshot_recorder(nullptr), trajectory_in_progress(false), track_trajectory_wall_time(false), accumulated_snapshot_overhead_sec(0.0), maximum_time_steps(max_time_steps), maximum_scatterings(max_scatterings), maximum_distance(max_distance), current_mpi_rank(0), current_trajectory_id(0)
 {
+	if(!std::isfinite(maximum_distance) || maximum_distance <= 0.0)
+		throw std::invalid_argument("Trajectory_Simulator(): maximum distance must be finite and positive.");
 	std::random_device rd;
 	PRNG.seed(rd());
 	rate_nuclei_cache.resize(solar_model.target_isotopes.size());
@@ -781,7 +792,7 @@ TrajectoryTerminationReason Trajectory_Simulator::Propagate_Freely(Event& curren
 	Event local_initial_event = current_event;
 	local_initial_event.time = 0.0;
 	Free_Particle_Propagator particle_propagator(local_initial_event);
-	double minus_log_xi = -log(libphysica::Sample_Uniform(PRNG));
+	double minus_log_xi = -log(Positive_Unit_Uniform(PRNG));
 	TrajectoryTerminationReason outcome = TrajectoryTerminationReason::MaxFreeSteps;
 	unsigned long int time_steps = 0;
 	unsigned long int step_attempts = 0;
@@ -1149,9 +1160,12 @@ int Trajectory_Simulator::Sample_Target(obscura::DM_Particle& DM, double r, doub
 libphysica::Vector Trajectory_Simulator::Sample_Target_Velocity(double temperature, double target_mass, const libphysica::Vector& vel_DM)
 {
 	// Sampling algorithm taken from Romano & Walsh, "An improved target velocity sampling algorithm for free gas elastic scattering"
+	if(!std::isfinite(temperature) || temperature <= 0.0
+	   || !std::isfinite(target_mass) || target_mass <= 0.0)
+		throw std::runtime_error("Sample_Target_Velocity(): temperature and target mass must be finite and positive.");
 	double kappa = sqrt(target_mass / 2.0 / temperature);
 	double vDM	 = vel_DM.Norm();
-	if(!std::isfinite(vDM) || vDM <= 0.0)
+	if(!std::isfinite(kappa) || kappa <= 0.0 || !std::isfinite(vDM) || vDM <= 0.0)
 		throw std::runtime_error("Sample_Target_Velocity(): DM speed is non-positive or non-finite.");
 	// 1. Sample target speed vT and mu = cos alpha
 	double y  = kappa * vDM;
@@ -1159,8 +1173,22 @@ libphysica::Vector Trajectory_Simulator::Sample_Target_Velocity(double temperatu
 	double mu = 1.0;
 	unsigned long int rejection_attempts = 0;
 	auto relative_speed_ratio = [&]() {
-		const double relative_speed_sqr = std::max(0.0, x * x + y * y - 2.0 * x * y * mu);
-		return sqrt(relative_speed_sqr) / (x + y);
+		const double x_sqr = x * x;
+		const double y_sqr = y * y;
+		const double relative_speed_sqr_raw = x_sqr + y_sqr - 2.0 * x * y * mu;
+		const double denominator = x + y;
+		const double roundoff_scale = std::max(1.0, x_sqr + y_sqr + 2.0 * std::fabs(x * y));
+		if(!std::isfinite(x) || x < 0.0 || !std::isfinite(y) || y <= 0.0
+		   || !std::isfinite(mu) || mu < -1.0 || mu > 1.0
+		   || !std::isfinite(relative_speed_sqr_raw)
+		   || relative_speed_sqr_raw < -1.0e-12 * roundoff_scale
+		   || !std::isfinite(denominator) || denominator <= 0.0)
+			throw std::runtime_error("Sample_Target_Velocity(): rejection state is invalid.");
+		const double relative_speed_sqr = std::max(0.0, relative_speed_sqr_raw);
+		const double ratio = sqrt(relative_speed_sqr) / denominator;
+		if(!std::isfinite(ratio) || ratio < 0.0 || ratio > 1.0 + 1.0e-12)
+			throw std::runtime_error("Sample_Target_Velocity(): rejection ratio is invalid.");
+		return std::min(1.0, ratio);
 	};
 	while(relative_speed_ratio() < libphysica::Sample_Uniform(PRNG, 0.0, 1.0))
 	{
@@ -1171,16 +1199,16 @@ libphysica::Vector Trajectory_Simulator::Sample_Target_Velocity(double temperatu
 		double xi_1 = libphysica::Sample_Uniform(PRNG, 0.0, 1.0);
 		if(xi_1 < 2.0 / (sqrt(M_PI) * y + 2.0))
 		{
-			double xi_2 = libphysica::Sample_Uniform(PRNG, 0.0, 1.0);
-			double xi_3 = libphysica::Sample_Uniform(PRNG, 0.0, 1.0);
-			double z	= -log(xi_2 * xi_3);
+			double xi_2 = Positive_Unit_Uniform(PRNG);
+			double xi_3 = Positive_Unit_Uniform(PRNG);
+			double z	= -log(xi_2) - log(xi_3);
 			x			= sqrt(z);
 		}
 		else
 		{
-			double xi_2 = libphysica::Sample_Uniform(PRNG, 0.0, 1.0);
+			double xi_2 = Positive_Unit_Uniform(PRNG);
 			double xi_3 = libphysica::Sample_Uniform(PRNG, 0.0, 1.0);
-			double xi_4 = libphysica::Sample_Uniform(PRNG, 0.0, 1.0);
+			double xi_4 = Positive_Unit_Uniform(PRNG);
 			double z	= -log(xi_2) - pow(cos(M_PI / 2.0 * xi_3), 2.0) * log(xi_4);
 			x			= sqrt(z);
 		}
@@ -1191,18 +1219,31 @@ libphysica::Vector Trajectory_Simulator::Sample_Target_Velocity(double temperatu
 	double phi		 = libphysica::Sample_Uniform(PRNG, 0.0, 2.0 * M_PI);
 	libphysica::Vector unit_vector_T = Unit_Vector_At_Angle_From_Axis(cos_theta, phi, vel_DM);
 
-	return vT * unit_vector_T;
+	libphysica::Vector velocity = vT * unit_vector_T;
+	if(!std::isfinite(velocity.Norm()))
+		throw std::runtime_error("Sample_Target_Velocity(): sampled target velocity is non-finite.");
+	return velocity;
 }
 
 libphysica::Vector Trajectory_Simulator::New_DM_Velocity(double cos_scattering_angle, double DM_mass, double target_mass, libphysica::Vector& vel_DM, libphysica::Vector& vel_target)
 {
+	if(!std::isfinite(cos_scattering_angle)
+	   || cos_scattering_angle < -1.0 - 1.0e-12 || cos_scattering_angle > 1.0 + 1.0e-12
+	   || !std::isfinite(DM_mass) || DM_mass <= 0.0
+	   || !std::isfinite(target_mass) || target_mass <= 0.0
+	   || !std::isfinite(vel_DM.Norm()) || !std::isfinite(vel_target.Norm()))
+		throw std::runtime_error("New_DM_Velocity(): masses, velocities, or scattering angle are invalid.");
+	cos_scattering_angle = Clamp_Cosine(cos_scattering_angle);
 	// Construction of n, the unit vector pointing into the direction of vfinal.
 	double phi			 = libphysica::Sample_Uniform(PRNG, 0.0, 2.0 * M_PI);
 	libphysica::Vector n = Unit_Vector_At_Angle_From_Axis(cos_scattering_angle, phi, vel_DM);
 
 	double relative_speed = (vel_target - vel_DM).Norm();
 
-	return target_mass * relative_speed / (target_mass + DM_mass) * n + (DM_mass * vel_DM + target_mass * vel_target) / (target_mass + DM_mass);
+	libphysica::Vector velocity = target_mass * relative_speed / (target_mass + DM_mass) * n + (DM_mass * vel_DM + target_mass * vel_target) / (target_mass + DM_mass);
+	if(!std::isfinite(velocity.Norm()))
+		throw std::runtime_error("New_DM_Velocity(): final DM velocity is non-finite.");
+	return velocity;
 }
 
 void Trajectory_Simulator::Scatter(Event& current_event, obscura::DM_Particle& DM)
@@ -1234,6 +1275,12 @@ void Trajectory_Simulator::Fix_PRNG_Seed(unsigned int fixed_seed)
 
 Trajectory_Result Trajectory_Simulator::Simulate(const Event& initial_condition, obscura::DM_Particle& DM, unsigned int mpi_rank)
 {
+	if(!std::isfinite(initial_condition.time) || initial_condition.time < 0.0
+	   || !std::isfinite(initial_condition.Radius()) || initial_condition.Radius() <= 0.0
+	   || !std::isfinite(initial_condition.Speed()) || initial_condition.Speed() <= 0.0
+	   || !std::isfinite(DM.mass) || DM.mass <= 0.0
+	   || !std::isfinite(max_trajectory_wall_time_sec) || max_trajectory_wall_time_sec < 0.0)
+		throw std::invalid_argument("Trajectory_Simulator::Simulate(): initial state, DM mass, or wall-time limit is invalid.");
 	Event current_event = initial_condition;
 	long unsigned int number_of_scatterings = 0;
 

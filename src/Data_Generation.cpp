@@ -210,6 +210,8 @@ const char* Stop_Reason_Key(SimulationStopReason reason)
 			return "capture_target_not_reached";
 		case SimulationStopReason::InitialShiftFailureFractionExceeded:
 			return "initial_shift_failure_fraction_exceeded";
+		case SimulationStopReason::InvalidTrajectoryFractionExceeded:
+			return "invalid_trajectory_fraction_exceeded";
 		case SimulationStopReason::None:
 		default:
 			return "none";
@@ -226,6 +228,8 @@ const char* Stop_Reason_Display(SimulationStopReason reason)
 			return "capture target not reached";
 		case SimulationStopReason::InitialShiftFailureFractionExceeded:
 			return "initial shift failure fraction exceeded";
+		case SimulationStopReason::InvalidTrajectoryFractionExceeded:
+			return "numerical/computational invalid-trajectory fraction exceeded";
 		case SimulationStopReason::None:
 		default:
 			return "none";
@@ -447,7 +451,9 @@ Simulation_Data::Simulation_Data(unsigned int sample_size, unsigned int max_traj
   number_of_invalid_survival_captured_particles(0),
   number_of_initial_shift_failures(0), number_of_final_reflection_shift_failures(0), number_of_numerical_failures(0),
   number_of_computational_truncations(0),
-  total_number_of_scatterings(0), average_number_of_scatterings(0.0), computing_time(0.0), early_stopped(false), early_stop_reason(SimulationStopReason::None),
+  total_number_of_scatterings(0), average_number_of_scatterings(0.0),
+  mpi_sync_rounds(0), final_mpi_round_trajectories(0), capture_target_overshoot(0),
+  computing_time(0.0), early_stopped(false), early_stop_reason(SimulationStopReason::None),
   mpi_rank(0), mpi_processes(1), isoreflection_rings(iso_rings), minimum_speed_threshold(u_min),
   number_of_data_points(std::vector<unsigned long int>(iso_rings, 0)),
   data(iso_rings, std::vector<libphysica::DataPoint>())
@@ -649,6 +655,8 @@ void Simulation_Data::Generate_Data(obscura::DM_Particle& DM, Solar_Model& solar
 	early_stop_reason = SimulationStopReason::None;
 
 	unsigned long int global_captured = 0;
+	const bool unlimited_trajectory_budget =
+	    max_trajectories_per_rank == std::numeric_limits<unsigned long int>::max();
 	const std::vector<double> progress_milestones = {0.0, 0.01, 0.05, 0.10, 0.20, 0.40, 0.60, 0.80, 1.0};
 	size_t next_progress_milestone = 0;
 	bool progress_line_printed = false;
@@ -730,6 +738,8 @@ void Simulation_Data::Generate_Data(obscura::DM_Particle& DM, Solar_Model& solar
 			early_stop_reason = SimulationStopReason::MaxTrajectoriesReached;
 			break;
 		}
+		mpi_sync_rounds++;
+		final_mpi_round_trajectories = assigned_trajectories;
 
 		for(unsigned long int trajectory_in_round = 0; trajectory_in_round < local_trajectories_this_round; trajectory_in_round++)
 		{
@@ -849,13 +859,16 @@ void Simulation_Data::Generate_Data(obscura::DM_Particle& DM, Solar_Model& solar
 			}
 		}
 
-		const std::array<unsigned long int, 3> local_progress = {
-		    local_captured, number_of_trajectories, number_of_initial_shift_failures};
-		std::array<unsigned long int, 3> global_progress = {{0, 0, 0}};
+		const std::array<unsigned long int, 5> local_progress = {
+		    local_captured, number_of_trajectories, number_of_initial_shift_failures,
+		    number_of_numerical_failures, number_of_computational_truncations};
+		std::array<unsigned long int, 5> global_progress = {{0, 0, 0, 0, 0}};
 		MPI_Allreduce(local_progress.data(), global_progress.data(), static_cast<int>(global_progress.size()), MPI_UNSIGNED_LONG, MPI_SUM, MPI_COMM_WORLD);
 		global_captured = global_progress[0];
 		const unsigned long int global_attempted_trajectories = global_progress[1];
 		const unsigned long int global_initial_shift_failures = global_progress[2];
+		const unsigned long int global_numerical_failures = global_progress[3];
+		const unsigned long int global_computational_truncations = global_progress[4];
 
 		if(global_attempted_trajectories > 0)
 		{
@@ -884,10 +897,31 @@ void Simulation_Data::Generate_Data(obscura::DM_Particle& DM, Solar_Model& solar
 					          << "." << std::endl;
 				initial_shift_failure_warning_emitted = true;
 			}
+
+			const double invalid_trajectory_fraction =
+			    static_cast<double>(global_numerical_failures + global_computational_truncations)
+			    / static_cast<double>(global_attempted_trajectories);
+			if(unlimited_trajectory_budget
+			   && invalid_trajectory_fraction > NUMERICAL_FAILURE_ABORT_FRACTION)
+			{
+				if(mpi_rank == 0)
+					std::cerr << "Error in Generate_Data(): invalid trajectory fraction "
+					          << invalid_trajectory_fraction
+					          << " exceeds abort threshold "
+					          << NUMERICAL_FAILURE_ABORT_FRACTION
+					          << " with an unlimited trajectory budget. Stopping to avoid a non-progressing run."
+					          << std::endl;
+				early_stopped = true;
+				early_stop_reason = SimulationStopReason::InvalidTrajectoryFractionExceeded;
+				break;
+			}
 		}
 
 		print_progress_update(global_captured, false);
 	}
+	capture_target_overshoot = (global_captured > requested_captured_particles)
+	                         ? global_captured - requested_captured_particles
+	                         : 0UL;
 
 	if(global_captured < requested_captured_particles)
 	{
@@ -1183,6 +1217,12 @@ void Simulation_Data::Write_Output_Files(const std::string& output_dir, obscura:
 		f << "# initial_shift_failures = " << number_of_initial_shift_failures << "\n";
 		f << "# final_reflection_shift_failures = " << number_of_final_reflection_shift_failures << "\n";
 		f << "# normal_mode_mpi_sync_interval = " << normal_mode_mpi_sync_interval << "\n";
+		f << "# mpi_sync_rounds = " << mpi_sync_rounds << "\n";
+		f << "# final_mpi_round_trajectories = " << final_mpi_round_trajectories << "\n";
+		f << "# capture_target_overshoot = " << capture_target_overshoot << "\n";
+		f << "# total_scatterings = " << total_number_of_scatterings << "\n";
+		f << "# average_scatterings = " << std::setprecision(12) << average_number_of_scatterings << "\n";
+		f << "# simulation_time_seconds = " << std::setprecision(12) << computing_time << "\n";
 		const BinomialRateEstimate valid = Estimate_Binomial_Rate(Valid_Trajectories(), number_of_captured_particles);
 		f << "# capture_rate_valid = " << std::fixed << std::setprecision(8) << valid.rate << "\n";
 		f << "# capture_rate_valid_err = " << std::fixed << std::setprecision(8) << valid.standard_error << "\n";
@@ -1334,6 +1374,7 @@ void Simulation_Data::Print_Capture_Mode_Summary(unsigned int mpi_rank)
 
 		const double captured_particle_rate = (computing_time > 0.0) ? number_of_captured_particles / computing_time : 0.0;
 		std::cout << "Captured particle rate [1/s]:\t" << libphysica::Round(captured_particle_rate) << std::endl
+		          << "Simulation time [s]:\t\t" << std::fixed << std::setprecision(6) << computing_time << std::endl
 		          << "Simulation time:\t\t" << libphysica::Time_Display(computing_time) << std::endl
 		          << SEPARATOR << std::endl;
 	}
@@ -1359,6 +1400,10 @@ void Simulation_Data::Print_Summary(unsigned int mpi_rank)
 				  << "Captured particles valid [%]:\t" << libphysica::Round(100.0 * Capture_Ratio_Valid()) << std::endl
 				  << "Captured count:\t\t\t" << number_of_captured_particles << std::endl
 				  << "Normal-mode MPI sync interval:\t" << normal_mode_mpi_sync_interval << std::endl
+				  << "MPI sync rounds:\t\t" << mpi_sync_rounds << std::endl
+				  << "Final MPI round trajectories:\t" << final_mpi_round_trajectories << std::endl
+				  << "Capture target overshoot:\t" << capture_target_overshoot << std::endl
+				  << "Total # of scatterings:\t" << total_number_of_scatterings << std::endl
 				  << "Numerical failure count:\t" << number_of_numerical_failures << std::endl
 				  << "Computational truncations:\t" << number_of_computational_truncations << std::endl
 				  << "Initial shift failures:\t\t" << number_of_initial_shift_failures << std::endl
@@ -1421,6 +1466,7 @@ void Simulation_Data::Print_Summary(unsigned int mpi_rank)
 		std::cout << std::endl
 				  << "Trajectory rate [1/s]:\t\t" << libphysica::Round(1.0 * number_of_trajectories / computing_time) << std::endl
 				  << "Captured particle rate [1/s]:\t" << libphysica::Round(1.0 * number_of_captured_particles / computing_time) << std::endl
+				  << "Simulation time [s]:\t\t" << std::fixed << std::setprecision(6) << computing_time << std::endl
 				  << "Simulation time:\t\t" << libphysica::Time_Display(computing_time) << std::endl;
 
 

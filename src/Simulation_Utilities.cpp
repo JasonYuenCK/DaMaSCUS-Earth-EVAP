@@ -4,6 +4,7 @@
 #include <cmath>
 #include <cstdlib>
 #include <iostream>
+#include <stdexcept>
 #include <string>
 
 #include "libphysica/Special_Functions.hpp"
@@ -80,7 +81,14 @@ double Event::Asymptotic_Speed_Sqr(Solar_Model& solar_model) const
 
 double Event::Isoreflection_Angle(const libphysica::Vector& vel_sun) const
 {
-	return acos(position.Normalized().Dot(vel_sun.Normalized()));
+	const double position_norm = position.Norm();
+	const double sun_speed = vel_sun.Norm();
+	if(!Finite_Positive(position_norm) || !Finite_Positive(sun_speed))
+		throw std::runtime_error("Event::Isoreflection_Angle(): position and solar velocity must be finite and non-zero.");
+	const double cosine = position.Dot(vel_sun) / position_norm / sun_speed;
+	if(!std::isfinite(cosine))
+		throw std::runtime_error("Event::Isoreflection_Angle(): angle cosine is non-finite.");
+	return acos(Clamp_Cosine(cosine));
 }
 
 int Event::Isoreflection_Ring(const libphysica::Vector& vel_sun, unsigned int number_of_rings) const
@@ -114,42 +122,86 @@ std::ostream& operator<<(std::ostream& output, const Event& event)
 // 2. Generator of initial conditions
 double PDF_Initial_Speed(double v, obscura::DM_Distribution& halo_model, Solar_Model& solar_model)
 {
+	if(!std::isfinite(v) || v < 0.0)
+		throw std::invalid_argument("PDF_Initial_Speed(): speed must be finite and non-negative.");
+	// The physical speed PDF is O(v^2), so the flux-weighted distribution has
+	// a finite zero limit despite the apparent v_esc^2/v factor.
+	if(v == 0.0)
+		return 0.0;
+
 	double v_esc			 = solar_model.Local_Escape_Speed(rSun);
 	double v_average		 = halo_model.Average_Speed();
 	double v_inverse_average = halo_model.Eta_Function(0.0);
-	return halo_model.PDF_Speed(v) * (v + v_esc * v_esc / v) / (v_average + v_esc * v_esc * v_inverse_average);
+	const double normalization = v_average + v_esc * v_esc * v_inverse_average;
+	const double speed_pdf = halo_model.PDF_Speed(v);
+	if(!Finite_Positive(normalization) || !std::isfinite(speed_pdf) || speed_pdf < 0.0)
+		throw std::runtime_error("PDF_Initial_Speed(): halo normalization or speed PDF is invalid.");
+	const double pdf = (speed_pdf * v + (speed_pdf / v) * v_esc * v_esc) / normalization;
+	if(!std::isfinite(pdf) || pdf < 0.0)
+		throw std::runtime_error("PDF_Initial_Speed(): flux-weighted speed PDF is invalid.");
+	return pdf;
 }
 
 // Conditional pdf for cos_theta given a speed value v
 double PDF_Cos_Theta(double cos_theta, double v, obscura::DM_Distribution& halo_model)
 {
-	double normalization = 2.0 * M_PI * v * v / halo_model.PDF_Speed(v);
+	if(!std::isfinite(cos_theta) || cos_theta < -1.0 || cos_theta > 1.0)
+		throw std::invalid_argument("PDF_Cos_Theta(): cosine must be finite and lie in [-1, 1].");
+	if(!Finite_Positive(v))
+		throw std::invalid_argument("PDF_Cos_Theta(): speed must be finite and positive.");
+	const double speed_pdf = halo_model.PDF_Speed(v);
+	if(!Finite_Positive(speed_pdf))
+		throw std::runtime_error("PDF_Cos_Theta(): halo speed PDF must be finite and positive.");
+	double normalization = 2.0 * M_PI * v * v / speed_pdf;
 
 	// Construct velocity vector with angle theta to the Sun's velocity
-	libphysica::Vector vel_sun = dynamic_cast<obscura::Standard_Halo_Model*>(&halo_model)->Get_Observer_Velocity();
-	libphysica::Vector vel	   = libphysica::Spherical_Coordinates(v, acos(cos_theta), 0.0, vel_sun);
+	auto* standard_halo = dynamic_cast<obscura::Standard_Halo_Model*>(&halo_model);
+	if(standard_halo == nullptr)
+		throw std::invalid_argument("PDF_Cos_Theta(): initial-condition sampling requires a Standard_Halo_Model.");
+	libphysica::Vector vel_sun = standard_halo->Get_Observer_Velocity();
+	const double observer_speed = vel_sun.Norm();
+	if(!std::isfinite(observer_speed))
+		throw std::runtime_error("PDF_Cos_Theta(): observer velocity is non-finite.");
+	const libphysica::Vector angular_axis = (observer_speed > 0.0)
+	                                           ? vel_sun
+	                                           : libphysica::Vector({0.0, 0.0, 1.0});
+	libphysica::Vector vel	   = libphysica::Spherical_Coordinates(v, acos(cos_theta), 0.0, angular_axis);
 
-	return normalization * halo_model.PDF_Velocity(vel);
+	const double pdf = normalization * halo_model.PDF_Velocity(vel);
+	if(!std::isfinite(pdf) || pdf < 0.0)
+		throw std::runtime_error("PDF_Cos_Theta(): conditional angular PDF is invalid.");
+	return pdf;
 }
 
 Event Initial_Conditions(obscura::DM_Distribution& halo_model, Solar_Model& solar_model, std::mt19937& PRNG)
 {
+	auto* standard_halo = dynamic_cast<obscura::Standard_Halo_Model*>(&halo_model);
+	if(standard_halo == nullptr)
+		throw std::invalid_argument("Initial_Conditions(): only Standard_Halo_Model distributions are supported.");
 	// 1. Initial velocity
 	// 1.1. Sample initial speed u asymptotically far from the Sun.
 	std::function<double(double)> pdf_v = [&halo_model, &solar_model](double v) {
 		return PDF_Initial_Speed(v, halo_model, solar_model);
 	};
 	double u = libphysica::Rejection_Sampling(pdf_v, halo_model.Minimum_DM_Speed(), halo_model.Maximum_DM_Speed(), 1200.0, PRNG);
+	if(!Finite_Positive(u))
+		throw std::runtime_error("Initial_Conditions(): sampled asymptotic speed is invalid.");
 
 	// 1.2. Sample cos(theta) where theta is the angle between v and v_sun.
 	std::function<double(double)> pdf_cos_theta = [u, &halo_model](double cos_theta) {
 		return PDF_Cos_Theta(cos_theta, u, halo_model);
 	};
 	// Determine domain of cos theta
-	libphysica::Vector vel_sun = dynamic_cast<obscura::Standard_Halo_Model*>(&halo_model)->Get_Observer_Velocity();
+	libphysica::Vector vel_sun = standard_halo->Get_Observer_Velocity();
 	double v_sun			   = vel_sun.Norm();
+	if(!std::isfinite(v_sun))
+		throw std::runtime_error("Initial_Conditions(): observer velocity is non-finite.");
 	double v_gal			   = halo_model.Maximum_DM_Speed() - v_sun;
-	double cos_theta_max	   = std::min(1.0, (v_gal * v_gal - v_sun * v_sun - u * u) / (2.0 * u * v_sun));
+	double cos_theta_max	   = (v_sun == 0.0)
+	                              ? 1.0
+	                              : std::min(1.0, (v_gal * v_gal - v_sun * v_sun - u * u) / (2.0 * u * v_sun));
+	if(!std::isfinite(cos_theta_max) || cos_theta_max < -1.0)
+		throw std::runtime_error("Initial_Conditions(): angular sampling domain is empty or non-finite.");
 
 	double y_max	 = PDF_Cos_Theta(-1.0, u, halo_model);
 	double cos_theta = libphysica::Rejection_Sampling(pdf_cos_theta, -1.0, cos_theta_max, y_max, PRNG);
@@ -157,28 +209,41 @@ Event Initial_Conditions(obscura::DM_Distribution& halo_model, Solar_Model& sola
 
 	// 1.3. Construct velocity vector
 	double phi							= libphysica::Sample_Uniform(PRNG, 0.0, 2.0 * M_PI);
-	libphysica::Vector initial_velocity = libphysica::Spherical_Coordinates(u, acos(cos_theta), phi, vel_sun);
+	const libphysica::Vector angular_axis = (v_sun > 0.0)
+	                                           ? vel_sun
+	                                           : libphysica::Vector({0.0, 0.0, 1.0});
+	libphysica::Vector initial_velocity = libphysica::Spherical_Coordinates(u, acos(Clamp_Cosine(cos_theta)), phi, angular_axis);
+	if(!Finite_Positive(initial_velocity.Norm()))
+		throw std::runtime_error("Initial_Conditions(): sampled velocity is zero or non-finite.");
 
 	// 1.4. Blue-shift the speed
 	double asymptotic_distance = 1000.0 * AU;
 	double vesc_asymptotic	   = solar_model.Local_Escape_Speed(asymptotic_distance);
 	double v				   = sqrt(u * u + vesc_asymptotic * vesc_asymptotic);
+	if(!std::isfinite(vesc_asymptotic) || vesc_asymptotic < 0.0 || !Finite_Positive(v))
+		throw std::runtime_error("Initial_Conditions(): asymptotic escape speed is invalid.");
 	initial_velocity		   = v * initial_velocity.Normalized();
 
 	// 2. Initial position
 	// 2.1 Find the maximum impact parameter such that the particle still hits the Sun.
 	double v_esc				= solar_model.Local_Escape_Speed(rSun);
 	double impact_parameter_max = sqrt(u * u + v_esc * v_esc) / v * rSun;
+	if(!std::isfinite(v_esc) || v_esc < 0.0 || !Finite_Positive(impact_parameter_max))
+		throw std::runtime_error("Initial_Conditions(): solar escape speed or impact-parameter bound is invalid.");
 	libphysica::Vector e_z		= (-1.0) * initial_velocity.Normalized();
-	libphysica::Vector e_x({0, e_z[2], -e_z[1]});
-	e_x.Normalize();
-	libphysica::Vector e_y = e_z.Cross(e_x);
+	const libphysica::Vector reference = (std::fabs(e_z[2]) < 0.9)
+	                                         ? libphysica::Vector({0.0, 0.0, 1.0})
+	                                         : libphysica::Vector({1.0, 0.0, 0.0});
+	libphysica::Vector e_x = reference.Cross(e_z).Normalized();
+	libphysica::Vector e_y = e_z.Cross(e_x).Normalized();
 
 	// 2.2 Find a random point in the plane.
 	double phi_disk						= libphysica::Sample_Uniform(PRNG, 0.0, 2.0 * M_PI);
 	double xi							= libphysica::Sample_Uniform(PRNG, 0.0, 1.0);
 	double impact_parameter				= sqrt(xi) * impact_parameter_max;
 	libphysica::Vector initial_position = asymptotic_distance * e_z + impact_parameter * (cos(phi_disk) * e_x + sin(phi_disk) * e_y);
+	if(!Finite_Positive(initial_position.Norm()))
+		throw std::runtime_error("Initial_Conditions(): sampled position is zero or non-finite.");
 
 	return Event(0.0, initial_position, initial_velocity);
 }
@@ -258,6 +323,8 @@ bool Hyperbolic_Kepler_Shift(Event& event, double R_final)
 // 4. Equiareal isodetection rings
 std::vector<double> Isoreflection_Ring_Angles(unsigned int number_of_rings)
 {
+	if(number_of_rings == 0)
+		throw std::invalid_argument("Isoreflection_Ring_Angles(): number_of_rings must be positive.");
 	std::vector<double> thetas;
 	double theta = 0;
 	for(unsigned int i = 0; i < number_of_rings - 1; i++)

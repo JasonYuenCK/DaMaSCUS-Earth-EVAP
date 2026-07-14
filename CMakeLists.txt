@@ -49,6 +49,14 @@ FetchContent_Declare(obscura
 FetchContent_GetProperties(obscura)
 if(NOT obscura_POPULATED)
     FetchContent_Populate(obscura)
+    execute_process(
+      COMMAND ${CMAKE_COMMAND}
+        -DOBSCURA_SOURCE_DIR=${obscura_SOURCE_DIR}
+        -P ${PROJECT_SOURCE_DIR}/cmake/PatchObscuraCrystalInitialization.cmake
+      RESULT_VARIABLE OBSCURA_PATCH_RESULT)
+    if(NOT OBSCURA_PATCH_RESULT EQUAL 0)
+      message(FATAL_ERROR "Failed to patch obscura crystal detector initialization")
+    endif()
     add_subdirectory( ${obscura_SOURCE_DIR} )
 endif()
 
