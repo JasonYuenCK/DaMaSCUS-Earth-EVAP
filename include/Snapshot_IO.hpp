@@ -34,6 +34,7 @@ struct SnapshotRankState
 	uint64_t local_captured = 0;
 	uint64_t local_total = 0;
 	uint64_t local_classified = 0;
+	uint64_t local_numerical_failures = 0;
 	uint64_t bincount_captured_samples = 0;
 	uint64_t bincount_not_captured_samples = 0;
 	uint64_t current_trajectory_id = 0;

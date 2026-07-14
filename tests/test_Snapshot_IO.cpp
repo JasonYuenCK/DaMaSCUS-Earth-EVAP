@@ -140,6 +140,7 @@ SnapshotRankState MakeRoundTripState(uint64_t run_id)
 	state.local_captured = 1;
 	state.local_total = 2;
 	state.local_classified = 2;
+	state.local_numerical_failures = 1;
 	state.bincount_captured_samples = 1;
 	state.bincount_not_captured_samples = 1;
 	state.current_trajectory_id = 901;
@@ -182,6 +183,7 @@ void ExpectStatesEqual(const SnapshotRankState& expected, const SnapshotRankStat
 	EXPECT_EQ(expected.local_captured, actual.local_captured);
 	EXPECT_EQ(expected.local_total, actual.local_total);
 	EXPECT_EQ(expected.local_classified, actual.local_classified);
+	EXPECT_EQ(expected.local_numerical_failures, actual.local_numerical_failures);
 	EXPECT_EQ(expected.bincount_captured_samples, actual.bincount_captured_samples);
 	EXPECT_EQ(expected.bincount_not_captured_samples, actual.bincount_not_captured_samples);
 	EXPECT_EQ(expected.current_trajectory_id, actual.current_trajectory_id);
@@ -320,13 +322,19 @@ TEST_F(SnapshotIOTest, SharedStatePublishesCurrentTrajectoryProgress)
 
 	TrajectoryBincount completed;
 	completed.is_captured = true;
+	completed.termination_reason = TrajectoryTerminationReason::OutwardEscape;
 	shared_state.RecordCompletedTrajectory(completed, true, false, {});
+	TrajectoryBincount failed;
+	failed.termination_reason = TrajectoryTerminationReason::NumericalFailure;
+	shared_state.BeginTrajectory(78, 103.0);
+	shared_state.RecordCompletedTrajectory(failed, false, false, {});
 	const SnapshotRankState idle = shared_state.CopyForSnapshot(2, 20.0, 20.0, 0, evaporation_end);
 	EXPECT_EQ(0, idle.trajectory_in_progress);
 	EXPECT_EQ(0U, idle.current_trajectory_id);
 	EXPECT_DOUBLE_EQ(0.0, idle.current_trajectory_wall_sec);
 	EXPECT_DOUBLE_EQ(0.0, idle.current_trajectory_simulated_elapsed_sec);
 	EXPECT_EQ(0U, idle.current_trajectory_scatterings);
+	EXPECT_EQ(1U, idle.local_numerical_failures);
 }
 
 TEST_F(SnapshotIOTest, TextReportListsEachMpiRankActivity)
@@ -530,6 +538,7 @@ TEST_F(SnapshotIOTest, ReportsRawAndClassifiedCaptureRatesSeparately)
 	state.rank_elapsed_wall_sec = 10.0;
 	state.local_total = 2;
 	state.local_classified = 1;
+	state.local_numerical_failures = 1;
 	state.local_captured = 1;
 	state.bincount_captured_samples = 1;
 	state.captured_dt_hist[0] = 1.0;
@@ -545,6 +554,7 @@ TEST_F(SnapshotIOTest, ReportsRawAndClassifiedCaptureRatesSeparately)
 	const std::string report = ReadAll(SnapshotTextFilePath(snapshot_root, 1, interval));
 	EXPECT_NE(std::string::npos, report.find("# total_trajectories = 2"));
 	EXPECT_NE(std::string::npos, report.find("# valid_trajectories = 1"));
+	EXPECT_NE(std::string::npos, report.find("# numerical_failures = 1"));
 	EXPECT_NE(std::string::npos, report.find("# unresolved_not_captured_trajectories = 1"));
 	EXPECT_NE(std::string::npos, report.find("# capture_rate_raw = 0.50000000"));
 	EXPECT_NE(std::string::npos, report.find("# capture_rate_valid = 1.00000000"));

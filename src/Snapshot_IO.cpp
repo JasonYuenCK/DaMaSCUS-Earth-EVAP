@@ -20,7 +20,7 @@ namespace DaMaSCUS_SUN
 namespace
 {
 constexpr uint64_t SNAPSHOT_RANK_STATE_MAGIC = 0x4453534e41503031ULL;
-constexpr uint32_t SNAPSHOT_RANK_STATE_VERSION = 3;
+constexpr uint32_t SNAPSHOT_RANK_STATE_VERSION = 4;
 constexpr uint32_t SNAPSHOT_RANK_STATE_HEADER_BYTES = sizeof(uint64_t) + 2 * sizeof(uint32_t);
 constexpr uint64_t MAX_SNAPSHOT_EVAPORATION_EVENTS = 10000000ULL;
 
@@ -29,7 +29,7 @@ uint64_t SnapshotRankStateFixedBytes()
 	return SNAPSHOT_RANK_STATE_HEADER_BYTES
 	     + sizeof(uint64_t)
 	     + 4 * sizeof(int32_t)
-	     + 7 * sizeof(uint64_t)
+	     + 8 * sizeof(uint64_t)
 	     + 3 * sizeof(double)
 	     + sizeof(int32_t)
 	     + 10ULL * NUM_BINS * sizeof(double)
@@ -98,6 +98,7 @@ bool IsValidRankState(const SnapshotRankState& state)
 		return false;
 	if(state.local_captured > state.local_classified
 	   || state.local_classified > state.local_total
+	   || state.local_numerical_failures > state.local_total
 	   || state.bincount_captured_samples > state.local_total
 	   || state.bincount_not_captured_samples > state.local_total
 	   || state.bincount_captured_samples > state.local_total - state.bincount_not_captured_samples)
@@ -341,6 +342,7 @@ struct SnapshotReportState
 	uint64_t total_trajectories = 0;
 	uint64_t captured_particles = 0;
 	uint64_t classified_trajectories = 0;
+	uint64_t numerical_failures = 0;
 	uint64_t snapshot_bincount_captured_samples = 0;
 	uint64_t snapshot_bincount_not_captured_samples = 0;
 	std::array<double, NUM_BINS> captured_dt_hist{};
@@ -381,6 +383,7 @@ void AccumulateSnapshotReportState(SnapshotReportState& report, const SnapshotRa
 	report.total_trajectories += state.local_total;
 	report.captured_particles += state.local_captured;
 	report.classified_trajectories += state.local_classified;
+	report.numerical_failures += state.local_numerical_failures;
 	report.snapshot_bincount_captured_samples += state.bincount_captured_samples;
 	report.snapshot_bincount_not_captured_samples += state.bincount_not_captured_samples;
 
@@ -509,6 +512,7 @@ void WriteReportHeader(
 	uint64_t total_trajectories,
 	uint64_t captured_particles,
 	uint64_t classified_trajectories,
+	uint64_t numerical_failures,
 	long long snapshot_time_label,
 	double snapshot_interval_seconds)
 {
@@ -519,6 +523,7 @@ void WriteReportHeader(
 	file << "# total_trajectories = " << total_trajectories << "\n";
 	file << "# captured_particles = " << captured_particles << "\n";
 	file << "# valid_trajectories = " << classified_trajectories << "\n";
+	file << "# numerical_failures = " << numerical_failures << "\n";
 	file << "# unresolved_not_captured_trajectories = "
 	     << (total_trajectories - classified_trajectories) << "\n";
 
@@ -604,6 +609,7 @@ bool WriteSnapshotReportFile(
 			report.total_trajectories,
 			report.captured_particles,
 			report.classified_trajectories,
+			report.numerical_failures,
 			report.snapshot_time_label,
 			report.snapshot_interval_seconds);
 
@@ -715,6 +721,7 @@ bool WriteSnapshotRankState(const std::string& path, const SnapshotRankState& st
 	WriteBinaryValue(file, state.local_captured);
 	WriteBinaryValue(file, state.local_total);
 	WriteBinaryValue(file, state.local_classified);
+	WriteBinaryValue(file, state.local_numerical_failures);
 	WriteBinaryValue(file, state.bincount_captured_samples);
 	WriteBinaryValue(file, state.bincount_not_captured_samples);
 	WriteBinaryValue(file, state.current_trajectory_id);
@@ -788,6 +795,7 @@ bool ReadSnapshotRankState(const std::string& path, uint64_t expected_run_id, Sn
 	ReadBinaryValue(file, state.local_captured);
 	ReadBinaryValue(file, state.local_total);
 	ReadBinaryValue(file, state.local_classified);
+	ReadBinaryValue(file, state.local_numerical_failures);
 	ReadBinaryValue(file, state.bincount_captured_samples);
 	ReadBinaryValue(file, state.bincount_not_captured_samples);
 	ReadBinaryValue(file, state.current_trajectory_id);

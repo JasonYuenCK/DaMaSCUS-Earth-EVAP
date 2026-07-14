@@ -237,9 +237,12 @@ TEST(TestSimulationTrajectory, TestUncapturedBoundFreeFlightTerminatesAsNumerica
 		libphysica::Vector({radius, 0.0, 0.0}),
 		libphysica::Vector({bound_speed, 0.0, 0.0}));
 
+	testing::internal::CaptureStderr();
 	Trajectory_Result result = simulator.Simulate(IC, DM, 0);
+	const std::string stderr_output = testing::internal::GetCapturedStderr();
 
 	EXPECT_EQ(result.bincount.termination_reason, TrajectoryTerminationReason::NumericalFailure);
+	EXPECT_TRUE(stderr_output.empty());
 	EXPECT_FALSE(result.bincount.is_captured);
 	EXPECT_FALSE(result.bincount.survival_valid);
 	EXPECT_EQ(result.number_of_scatterings, 0UL);

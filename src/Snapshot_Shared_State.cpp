@@ -5,6 +5,17 @@
 
 namespace DaMaSCUS_SUN
 {
+namespace
+{
+bool IsNumericalTermination(TrajectoryTerminationReason reason)
+{
+	return reason == TrajectoryTerminationReason::NumericalFailure
+	    || reason == TrajectoryTerminationReason::NonFiniteState
+	    || reason == TrajectoryTerminationReason::SpeedLimit
+	    || reason == TrajectoryTerminationReason::EnergyDriftEscape
+	    || reason == TrajectoryTerminationReason::Unknown;
+}
+}
 
 void SnapshotSharedState::Initialize(uint64_t run_id, int rank)
 {
@@ -23,6 +34,7 @@ void SnapshotSharedState::Initialize(uint64_t run_id, int rank)
 	completed_trajectories_ = 0;
 	captured_particles_ = 0;
 	classified_trajectories_ = 0;
+	numerical_failures_ = 0;
 	bincount_captured_samples_ = 0;
 	bincount_not_captured_samples_ = 0;
 	captured_dt_hist_.fill(0.0);
@@ -100,6 +112,8 @@ void SnapshotSharedState::RecordCompletedTrajectory(
 		captured_particles_++;
 	if(bincount.is_captured || count_as_not_captured_bincount_sample)
 		classified_trajectories_++;
+	if(IsNumericalTermination(bincount.termination_reason))
+		numerical_failures_++;
 
 	if(count_as_captured_bincount_sample)
 	{
@@ -179,6 +193,7 @@ SnapshotRankState SnapshotSharedState::CopyLocked(
 	state.local_captured = captured_particles_;
 	state.local_total = completed_trajectories_;
 	state.local_classified = classified_trajectories_;
+	state.local_numerical_failures = numerical_failures_;
 	state.bincount_captured_samples = bincount_captured_samples_;
 	state.bincount_not_captured_samples = bincount_not_captured_samples_;
 	state.current_trajectory_id = state.trajectory_in_progress ? current_trajectory_id_ : 0;

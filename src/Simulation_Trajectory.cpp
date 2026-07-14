@@ -753,7 +753,7 @@ TrajectoryTerminationReason Trajectory_Simulator::Propagate_Freely(Event& curren
 	if(Outward_Escaping_At_Boundary(current_event, solar_model, maximum_distance))
 		return TrajectoryTerminationReason::OutwardEscape;
 
-	auto abort_if_uncaptured_bound = [&](const Event& event, const char* phase)
+	auto abort_if_uncaptured_bound = [&](const Event& event)
 	{
 		if(current_bincount.is_captured)
 			return false;
@@ -762,12 +762,6 @@ TrajectoryTerminationReason Trajectory_Simulator::Propagate_Freely(Event& curren
 		if(std::isfinite(energy_eV) && energy_eV >= 0.0)
 			return false;
 
-		std::cerr << "\nWarning in Propagate_Freely(): uncaptured trajectory entered a bound or non-finite "
-		          << "free-flight state (rank " << current_mpi_rank
-		          << ", traj " << current_trajectory_id
-		          << ", phase=" << phase
-		          << ", energy=" << energy_eV
-		          << " eV). Marking trajectory as numerically failed." << std::endl;
 		current_event = event;
 		return true;
 	};
@@ -777,7 +771,7 @@ TrajectoryTerminationReason Trajectory_Simulator::Propagate_Freely(Event& curren
 	// Entering free flight already bound while still marked uncaptured is a
 	// numerical-state mismatch; without this guard it can repeat bound Kepler
 	// returns up to maximum_time_steps and stall an entire MPI batch.
-	if(abort_if_uncaptured_bound(current_event, "entry"))
+	if(abort_if_uncaptured_bound(current_event))
 		return TrajectoryTerminationReason::NumericalFailure;
 
 	// Keep each free-propagation segment near t=0. Otherwise a captured particle
@@ -1074,7 +1068,7 @@ TrajectoryTerminationReason Trajectory_Simulator::Propagate_Freely(Event& curren
 			else if(r_boundary >= maximum_distance && r_boundary >= r_before)
 			{
 				const Event absolute_boundary_event = to_absolute_event(boundary_event);
-				if(abort_if_uncaptured_bound(absolute_boundary_event, "bound_boundary_return"))
+				if(abort_if_uncaptured_bound(absolute_boundary_event))
 					return TrajectoryTerminationReason::NumericalFailure;
 
 				Event inbound_boundary_event;
@@ -1100,7 +1094,7 @@ TrajectoryTerminationReason Trajectory_Simulator::Propagate_Freely(Event& curren
 			optical_depth_retries = 0;
 			const bool captured_now = commit_accepted_event(accepted_event);
 			current_event = to_absolute_event(accepted_event);
-			if(abort_if_uncaptured_bound(current_event, "after_free_step"))
+			if(abort_if_uncaptured_bound(current_event))
 				return TrajectoryTerminationReason::NumericalFailure;
 			if(terminate_on_capture && captured_now)
 				return TrajectoryTerminationReason::CaptureMode;

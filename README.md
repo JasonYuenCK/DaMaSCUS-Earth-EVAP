@@ -176,8 +176,10 @@ not restart checkpoints. A report can temporarily have `snapshot_status =
 partial` while ranks publish their state. If a rank misses the deadline, the
 report remains incomplete rather than reconstructing state that was not
 captured. Final rank states are retained when the last merge is incomplete.
-Snapshot reports likewise expose attempted, classified, and unresolved counts
-plus raw and valid capture-rate intervals.
+Snapshot reports likewise expose attempted, classified, unresolved, and
+`numerical_failures` counts plus raw and valid capture-rate intervals. The
+uncaptured-bound free-flight guard records its failures in these cumulative
+reports without printing one warning for every failed trajectory.
 
 The executable requests `MPI_THREAD_FUNNELED`; only the main thread calls MPI,
 while one heartbeat thread per rank performs local state copies and file I/O.
