@@ -1,11 +1,13 @@
 #include "Parameter_Scan.hpp"
 
 #include <algorithm>
+#include <cstddef>
 #include <cmath>
 #include <libconfig.h++>
 #include <limits>
 #include <mpi.h>
 #include <set>
+#include <stdexcept>
 #include <string>
 
 #include "libphysica/Natural_Units.hpp"
@@ -24,6 +26,37 @@ namespace DaMaSCUS_SUN
 
 using namespace libconfig;
 using namespace libphysica::natural_units;
+
+namespace
+{
+
+double Checked_Probability(double p, const std::string& context)
+{
+	if(!std::isfinite(p) || p < 0.0 || p > 1.0)
+		throw std::runtime_error(context + ": p-value must be finite and lie in [0, 1].");
+	return p;
+}
+
+double Log10_Probability(double p, const std::string& context)
+{
+	p = Checked_Probability(p, context);
+	return (p < 1.0e-100) ? -100.0 : log10(p);
+}
+
+std::size_t STA_Step_Limit(std::size_t rows, std::size_t columns)
+{
+	if(rows == 0 || columns == 0)
+		throw std::invalid_argument("square tracing requires a non-empty parameter grid");
+	if(rows > std::numeric_limits<std::size_t>::max() / columns)
+		throw std::length_error("parameter grid is too large for square tracing");
+
+	const std::size_t cells = rows * columns;
+	if(cells > (std::numeric_limits<std::size_t>::max() - 16) / 16)
+		throw std::length_error("parameter grid is too large for a bounded square trace");
+	return std::max<std::size_t>(32, 16 * cells + 16);
+}
+
+} // namespace
 
 // 1. Configuration class for input file, which extends the obscura::Configuration class.
 
@@ -58,12 +91,32 @@ void Configuration::Import_Parameter_Scan_Parameter()
 {
 	try
 	{
-		sample_size = config.lookup("sample_size");
+		const int configured_sample_size = config.lookup("sample_size");
+		if(configured_sample_size <= 0)
+		{
+			std::cerr << "Error in Configuration::Import_Parameter_Scan_Parameter(): 'sample_size' must be positive." << std::endl;
+			std::exit(EXIT_FAILURE);
+		}
+		sample_size = static_cast<unsigned int>(configured_sample_size);
 	}
 	catch(const SettingNotFoundException& nfex)
 	{
 		std::cerr << "No 'sample_size' setting in configuration file." << std::endl;
 		std::exit(EXIT_FAILURE);
+	}
+	fixed_seed = 0;
+	try
+	{
+		const int configured_seed = config.lookup("fixed_seed");
+		if(configured_seed < 0)
+		{
+			std::cerr << "Error in Configuration::Import_Parameter_Scan_Parameter(): 'fixed_seed' must be non-negative." << std::endl;
+			std::exit(EXIT_FAILURE);
+		}
+		fixed_seed = static_cast<unsigned int>(configured_seed);
+	}
+	catch(const SettingNotFoundException& nfex)
+	{
 	}
 	try
 	{
@@ -88,20 +141,27 @@ void Configuration::Import_Parameter_Scan_Parameter()
 	const bool parameter_scan_mode = (run_mode == "Parameter scan");
 	try
 	{
-		isoreflection_rings = config.lookup("isoreflection_rings");
+		const int configured_rings = config.lookup("isoreflection_rings");
+		if(configured_rings <= 0)
+		{
+			std::cerr << "Error in Configuration::Import_Parameter_Scan_Parameter(): 'isoreflection_rings' must be positive." << std::endl;
+			std::exit(EXIT_FAILURE);
+		}
+		isoreflection_rings = static_cast<unsigned int>(configured_rings);
 	}
 	catch(const SettingNotFoundException& nfex)
 	{
 		isoreflection_rings = 1;
 	}
-	if(isoreflection_rings == 0)
-	{
-		std::cerr << "Error in Configuration::Import_Parameter_Scan_Parameter(): 'isoreflection_rings' must be positive." << std::endl;
-		std::exit(EXIT_FAILURE);
-	}
 	try
 	{
-		interpolation_points = config.lookup("interpolation_points");
+		const int configured_interpolation_points = config.lookup("interpolation_points");
+		if(configured_interpolation_points < 0)
+		{
+			std::cerr << "Error in Configuration::Import_Parameter_Scan_Parameter(): 'interpolation_points' must be non-negative." << std::endl;
+			std::exit(EXIT_FAILURE);
+		}
+		interpolation_points = static_cast<unsigned int>(configured_interpolation_points);
 	}
 	catch(const SettingNotFoundException& nfex)
 	{
@@ -139,7 +199,18 @@ void Configuration::Import_Parameter_Scan_Parameter()
 
 	try
 	{
-		cross_sections = config.lookup("cross_sections");
+		const int configured_cross_sections = config.lookup("cross_sections");
+		if(parameter_scan_mode && configured_cross_sections <= 0)
+		{
+			std::cerr << "Error in Configuration::Import_Parameter_Scan_Parameter(): 'cross_sections' must be positive in parameter-scan mode." << std::endl;
+			std::exit(EXIT_FAILURE);
+		}
+		if(configured_cross_sections < 0)
+		{
+			std::cerr << "Error in Configuration::Import_Parameter_Scan_Parameter(): 'cross_sections' must be non-negative." << std::endl;
+			std::exit(EXIT_FAILURE);
+		}
+		cross_sections = static_cast<unsigned int>(configured_cross_sections);
 	}
 	catch(const SettingNotFoundException& nfex)
 	{
@@ -188,7 +259,12 @@ void Configuration::Import_Parameter_Scan_Parameter()
 	try
 	{
 		int mt = config.lookup("max_trajectories");
-		max_trajectories = mt;
+		if(mt < 0)
+		{
+			std::cerr << "Error in Configuration::Import_Parameter_Scan_Parameter(): 'max_trajectories' must be non-negative." << std::endl;
+			std::exit(EXIT_FAILURE);
+		}
+		max_trajectories = static_cast<unsigned int>(mt);
 		g_max_trajectories = max_trajectories;
 	}
 	catch(const SettingNotFoundException& nfex)
@@ -273,6 +349,11 @@ void Configuration::Import_Parameter_Scan_Parameter()
 	try
 	{
 		double wall_budget = config.lookup("max_trajectory_wall_time_sec");
+		if(!std::isfinite(wall_budget) || wall_budget < 0.0)
+		{
+			std::cerr << "Error in Configuration::Import_Parameter_Scan_Parameter(): 'max_trajectory_wall_time_sec' must be finite and non-negative." << std::endl;
+			std::exit(EXIT_FAILURE);
+		}
 		snapshot_config.max_trajectory_wall_time_sec = wall_budget;
 	}
 	catch(const SettingNotFoundException& nfex)
@@ -284,6 +365,21 @@ void Configuration::Import_Parameter_Scan_Parameter()
 	{
 		std::cerr << "Error in Configuration::Import_Parameter_Scan_Parameter(): Run mode " << run_mode << " not recognized." << std::endl;
 		std::exit(EXIT_FAILURE);
+	}
+	if(parameter_scan_mode)
+	{
+		const int configured_mass_points = config.lookup("constraints_masses");
+		if(!std::isfinite(constraints_certainty) || constraints_certainty <= 0.0 || constraints_certainty >= 1.0
+		   || !std::isfinite(constraints_mass_min) || constraints_mass_min <= 0.0
+		   || !std::isfinite(constraints_mass_max) || constraints_mass_max <= constraints_mass_min
+		   || configured_mass_points <= 0
+		   || !std::isfinite(cross_section_min) || cross_section_min <= 0.0
+		   || !std::isfinite(cross_section_max) || cross_section_max <= cross_section_min)
+		{
+			std::cerr << "Error in Configuration::Import_Parameter_Scan_Parameter(): invalid or non-finite parameter-scan bounds." << std::endl;
+			std::exit(EXIT_FAILURE);
+		}
+		constraints_masses = static_cast<unsigned int>(configured_mass_points);
 	}
 }
 
@@ -329,6 +425,13 @@ void Configuration::Construct_DM_Particle()
 		std::cerr << "No 'DM_light' setting in configuration file." << std::endl;
 		std::exit(EXIT_FAILURE);
 	}
+	if(!std::isfinite(DM_mass) || DM_mass <= 0.0
+	   || !std::isfinite(DM_spin) || DM_spin < 0.0
+	   || !std::isfinite(DM_fraction) || DM_fraction <= 0.0 || DM_fraction > 1.0)
+	{
+		std::cerr << "Error in Configuration::Construct_DM_Particle(): DM mass, spin, and fraction must be finite and physical." << std::endl;
+		std::exit(EXIT_FAILURE);
+	}
 
 	// 3.2 DM interactions
 	std::string DM_interaction;
@@ -357,6 +460,14 @@ void Configuration::Construct_DM_Particle()
 	DM->Set_Spin(DM_spin);
 	DM->Set_Fractional_Density(DM_fraction);
 	DM->Set_Low_Mass_Mode(DM_light);
+	const double primary_cross_section = DM->Get_Interaction_Parameter("Nuclei");
+	const double electron_cross_section = DM->Get_Interaction_Parameter("Electrons");
+	if(!std::isfinite(primary_cross_section) || primary_cross_section < 0.0
+	   || !std::isfinite(electron_cross_section) || electron_cross_section < 0.0)
+	{
+		std::cerr << "Error in Configuration::Construct_DM_Particle(): DM cross sections must be finite and non-negative." << std::endl;
+		std::exit(EXIT_FAILURE);
+	}
 }
 
 void Configuration::Construct_DM_Particle_Dark_Photon()
@@ -387,6 +498,11 @@ void Configuration::Construct_DM_Particle_Dark_Photon()
 			std::cerr << "Error in Configuration::Construct_DM_Particle_DP(): No 'DM_mediator_mass' setting in configuration file." << std::endl;
 			std::exit(EXIT_FAILURE);
 		}
+		if(!std::isfinite(DM_mediator_mass) || DM_mediator_mass <= 0.0)
+		{
+			std::cerr << "Error in Configuration::Construct_DM_Particle_DP(): 'DM_mediator_mass' must be finite and positive for the General form factor." << std::endl;
+			std::exit(EXIT_FAILURE);
+		}
 	}
 	dynamic_cast<DM_Particle_Dark_Photon*>(DM)->Set_FormFactor_DM(DM_form_factor, DM_mediator_mass);
 	double DM_cross_section_electron;
@@ -413,6 +529,7 @@ void Configuration::Print_Summary(int mpi_rank)
 				  << "\tRun mode:\t\t\t" << run_mode << std::endl
 				  << "\tCapture mode:\t\t\t" << (capture_mode ? "[x]" : "[ ]") << std::endl
 				  << "\tSample size:\t\t\t" << sample_size << std::endl
+				  << "\tFixed PRNG seed:\t\t" << (fixed_seed == 0 ? "random" : std::to_string(fixed_seed)) << std::endl
 				  << "\tMax scatterings/traj:\t\t" << maximum_number_of_scatterings << std::endl
 				  << "\tSc. rate interpolation:\t\t" << ((interpolation_points > 0) ? "[x] (Grid: " + std::to_string(interpolation_points) + "×" + std::to_string(interpolation_points) + ")" : "[ ]") << std::endl;
 		if(run_mode == "Parameter point" && isoreflection_rings > 1)
@@ -426,37 +543,53 @@ void Configuration::Print_Summary(int mpi_rank)
 	}
 }
 
-double Compute_p_Value(unsigned int sample_size, obscura::DM_Particle& DM, obscura::DM_Detector& detector, Solar_Model& solar_model, obscura::DM_Distribution& halo_model, unsigned int rate_interpolation_points, int mpi_rank, unsigned long int max_scatterings)
+double Compute_p_Value(unsigned int sample_size, obscura::DM_Particle& DM, obscura::DM_Detector& detector, Solar_Model& solar_model, obscura::DM_Distribution& halo_model, unsigned int rate_interpolation_points, int mpi_rank, unsigned long int max_scatterings, SnapshotConfig snapshot_config, unsigned int fixed_seed)
 {
 	double u_min = detector.Minimum_DM_Speed(DM);
 
 	solar_model.Interpolate_Total_DM_Scattering_Rate(DM, rate_interpolation_points, rate_interpolation_points);
 	Simulation_Data data_set(sample_size, g_max_trajectories, u_min);
 	data_set.Configure(2.0 * rSun, 1, max_scatterings);
-	data_set.Generate_Data(DM, solar_model, halo_model);
+	data_set.Generate_Data(DM, solar_model, halo_model, snapshot_config, fixed_seed, false);
 	data_set.Print_Summary(mpi_rank);
 	Reflection_Spectrum spectrum(data_set, solar_model, halo_model, DM.mass);
 	double p = detector.P_Value(DM, spectrum);
+	p = Checked_Probability(p, "Compute_p_Value()");
 	return (p < 1.0e-100) ? 0.0 : p;
 }
 
 // 2. 	Class to perform parameter scans in the (m_DM, sigma)-plane to search for equal-p-value contours.
 Parameter_Scan::Parameter_Scan(const std::vector<double>& masses, const std::vector<double>& coupl, std::string ID, unsigned int samplesize, unsigned int interpolation_points, double CL, unsigned long int max_scatterings)
-: DM_masses(masses), couplings(coupl), sample_size(samplesize), scattering_rate_interpolation_points(interpolation_points), maximum_number_of_scatterings(max_scatterings), certainty_level(CL)
+: DM_masses(masses), couplings(coupl), sample_size(samplesize), scattering_rate_interpolation_points(interpolation_points), maximum_number_of_scatterings(max_scatterings), snapshot_config(), fixed_seed(0), certainty_level(CL)
 {
+	if(DM_masses.empty() || couplings.empty())
+		throw std::invalid_argument("Parameter_Scan requires non-empty mass and coupling grids");
+	if(DM_masses.size() > static_cast<std::size_t>(std::numeric_limits<int>::max())
+	   || couplings.size() > static_cast<std::size_t>(std::numeric_limits<int>::max()))
+		throw std::length_error("Parameter_Scan grid dimensions exceed the supported index range");
+	if(!std::isfinite(certainty_level) || certainty_level <= 0.0 || certainty_level >= 1.0)
+		throw std::invalid_argument("Parameter_Scan certainty level must be finite and lie strictly between 0 and 1");
+	for(const double mass : DM_masses)
+		if(!std::isfinite(mass) || mass <= 0.0)
+			throw std::invalid_argument("Parameter_Scan masses must be finite and positive");
+	for(const double coupling : couplings)
+		if(!std::isfinite(coupling) || coupling <= 0.0)
+			throw std::invalid_argument("Parameter_Scan couplings must be finite and positive");
+
 	results_path = g_top_level_dir + "results/" + ID + "/";
+	std::sort(DM_masses.begin(), DM_masses.end());
+	std::sort(couplings.begin(), couplings.end());
 	p_value_grid = std::vector<std::vector<double>>(couplings.size(), std::vector<double>(DM_masses.size(), -1.0));
 
 	// Try to import previous results from an incomplete run
 	Import_P_Values();
-
-	std::sort(DM_masses.begin(), DM_masses.end());
-	std::sort(couplings.begin(), couplings.end());
 }
 
 Parameter_Scan::Parameter_Scan(Configuration& config)
 : Parameter_Scan(libphysica::Log_Space(config.constraints_mass_min, config.constraints_mass_max, config.constraints_masses), libphysica::Log_Space(config.cross_section_min, config.cross_section_max, config.cross_sections), config.ID, config.sample_size, config.interpolation_points, config.constraints_certainty, config.maximum_number_of_scatterings)
 {
+	snapshot_config = config.snapshot_config;
+	fixed_seed = config.fixed_seed;
 }
 
 void Parameter_Scan::Import_P_Values()
@@ -467,8 +600,22 @@ void Parameter_Scan::Import_P_Values()
 	if(libphysica::File_Exists(filepath))
 	{
 		std::vector<std::vector<double>> imported_table = libphysica::Import_Table(filepath);
-		if(imported_table.size() == p_value_grid.size() && imported_table[0].size() == p_value_grid[0].size())
+		bool dimensions_match = imported_table.size() == p_value_grid.size();
+		if(dimensions_match)
+			for(const auto& imported_row : imported_table)
+				if(imported_row.size() != DM_masses.size())
+				{
+					dimensions_match = false;
+					break;
+				}
+		if(dimensions_match)
+		{
+			for(const auto& imported_row : imported_table)
+				for(const double p : imported_row)
+					if(p != -1.0)
+						Checked_Probability(p, "Parameter_Scan::Import_P_Values()");
 			p_value_grid = imported_table;
+		}
 	}
 }
 
@@ -547,7 +694,7 @@ void Parameter_Scan::STA_Fill_Gaps()
 			double p = p_value_grid[row][column];
 			if(p < 0)
 				p_value_grid[row][column] = excluded ? 0.0 : 1.0;
-			else if(p < 1.0 - certainty_level)
+			else if(Checked_Probability(p, "Parameter_Scan::STA_Fill_Gaps()") < 1.0 - certainty_level)
 				excluded = true;
 			else
 				excluded = false;
@@ -566,10 +713,15 @@ std::vector<double> Parameter_Scan::Find_Contour_Point(int row, int column, int 
 		double x_2	 = DM_masses[column_2];
 		double p_1	 = p_value_grid[row][column_1];
 		double p_2	 = p_value_grid[row][column_2];
-		double y_1	 = p_1 < 1.0e-100 ? -100.0 : log10(p_1);
-		double y_2	 = p_2 < 1.0e-100 ? -100.0 : log10(p_2);
+		double y_1	 = Log10_Probability(p_1, "Parameter_Scan::Find_Contour_Point()");
+		double y_2	 = Log10_Probability(p_2, "Parameter_Scan::Find_Contour_Point()");
 		double y	 = log10(p_critical);
-		double x	 = (x_2 - x_1) * (y - y_1) / (y_2 - y_1) + x_1;
+		const double denominator = y_2 - y_1;
+		if(!std::isfinite(denominator) || denominator == 0.0)
+			throw std::runtime_error("Parameter_Scan::Find_Contour_Point(): degenerate p-values cannot be interpolated");
+		double x	 = (x_2 - x_1) * (y - y_1) / denominator + x_1;
+		if(!std::isfinite(x))
+			throw std::runtime_error("Parameter_Scan::Find_Contour_Point(): interpolation produced a non-finite mass");
 		return {x, sigma};
 	}
 	else
@@ -581,10 +733,15 @@ std::vector<double> Parameter_Scan::Find_Contour_Point(int row, int column, int 
 		double x_2 = couplings[row_2];
 		double p_1 = p_value_grid[row_1][column];
 		double p_2 = p_value_grid[row_2][column];
-		double y_1 = p_1 < 1.0e-100 ? -100.0 : log10(p_1);
-		double y_2 = p_2 < 1.0e-100 ? -100.0 : log10(p_2);
+		double y_1 = Log10_Probability(p_1, "Parameter_Scan::Find_Contour_Point()");
+		double y_2 = Log10_Probability(p_2, "Parameter_Scan::Find_Contour_Point()");
 		double y   = log10(p_critical);
-		double x   = (x_2 - x_1) * (y - y_1) / (y_2 - y_1) + x_1;
+		const double denominator = y_2 - y_1;
+		if(!std::isfinite(denominator) || denominator == 0.0)
+			throw std::runtime_error("Parameter_Scan::Find_Contour_Point(): degenerate p-values cannot be interpolated");
+		double x   = (x_2 - x_1) * (y - y_1) / denominator + x_1;
+		if(!std::isfinite(x))
+			throw std::runtime_error("Parameter_Scan::Find_Contour_Point(): interpolation produced a non-finite coupling");
 		return {mDM, x};
 	}
 }
@@ -600,11 +757,17 @@ std::vector<std::vector<double>> Parameter_Scan::Limit_Curve()
 	double p_critical = 1.0 - certainty_level;
 	std::vector<int> first_excluded_point;
 	unsigned int first_excluded_point_visits = 0;
+	const std::size_t maximum_steps = STA_Step_Limit(couplings.size(), DM_masses.size());
+	std::size_t steps = 0;
 	while(first_excluded_point_visits < 2)
 	{
-		double p = STA_Point_On_Grid(row, column) ? p_value_grid[row][column] : 1.0;
+		if(++steps > maximum_steps)
+			throw std::runtime_error("Parameter_Scan::Limit_Curve(): square tracing exceeded its bounded step count");
+		double p = STA_Point_On_Grid(row, column)
+		             ? Checked_Probability(p_value_grid[row][column], "Parameter_Scan::Limit_Curve()")
+		             : 1.0;
 		// Abort if no point in the upper row can be excluded:
-		if(first_excluded_point.empty() && p > p_critical && row == couplings.size() - 1 && column == 0)
+		if(first_excluded_point.empty() && p >= p_critical && row == static_cast<int>(couplings.size()) - 1 && column == 0)
 			break;
 		// Save the first excluded point and count how often we re-visit that point
 		if(p < p_critical && first_excluded_point.empty())
@@ -612,10 +775,11 @@ std::vector<std::vector<double>> Parameter_Scan::Limit_Curve()
 		if(!first_excluded_point.empty() && row == first_excluded_point[0] && column == first_excluded_point[1])
 			first_excluded_point_visits++;
 		// Interpolate at the boundary to find the point where p == p_critical
-		if(STA_Point_On_Grid(row, column) && STA_Point_On_Grid(row_previous, column_previous) && (p - p_critical) * (p_previous - p_critical) < 0.0)
+		if(STA_Point_On_Grid(row, column) && STA_Point_On_Grid(row_previous, column_previous)
+		   && ((p < p_critical) != (p_previous < p_critical)))
 		{
 			std::vector<double> contour_point = Find_Contour_Point(row, column, row_previous, column_previous, p_critical);
-			if(limit_curve.empty() || limit_curve.back()[1] != couplings[row] || limit_curve.back()[0] != DM_masses[column])
+			if(limit_curve.empty() || limit_curve.back() != contour_point)
 				limit_curve.push_back(contour_point);
 		}
 		p_previous		= p;
@@ -647,8 +811,12 @@ void Parameter_Scan::Perform_STA_Scan(obscura::DM_Particle& DM, obscura::DM_Dete
 	double p_critical		  = 1.0 - certainty_level;
 
 	int first_excluded_point_counter = 0;
+	const std::size_t maximum_steps = STA_Step_Limit(couplings.size(), DM_masses.size());
+	std::size_t steps = 0;
 	while(first_excluded_point_counter < 2)
 	{
+		if(++steps > maximum_steps)
+			throw std::runtime_error("Parameter_Scan::Perform_STA_Scan(): square tracing exceeded its bounded step count");
 		MPI_Barrier(MPI_COMM_WORLD);
 		double p;
 		if(!STA_Point_On_Grid(row, column))
@@ -671,7 +839,7 @@ void Parameter_Scan::Perform_STA_Scan(obscura::DM_Particle& DM, obscura::DM_Dete
 			Print_Grid(mpi_rank, row, column);
 			MPI_Barrier(MPI_COMM_WORLD);
 
-			p = Compute_p_Value(sample_size, DM, detector, solar_model, halo_model, scattering_rate_interpolation_points, mpi_rank, maximum_number_of_scatterings);
+			p = Compute_p_Value(sample_size, DM, detector, solar_model, halo_model, scattering_rate_interpolation_points, mpi_rank, maximum_number_of_scatterings, snapshot_config, fixed_seed);
 
 			p_value_grid[row][column] = p;
 			libphysica::Export_Table(results_path + "P_Values_Grid.txt", p_value_grid);
@@ -682,8 +850,9 @@ void Parameter_Scan::Perform_STA_Scan(obscura::DM_Particle& DM, obscura::DM_Dete
 				libphysica::Print_Box("p = " + std::to_string(libphysica::Round(p)), 1);
 			}
 		}
+		p = Checked_Probability(p, "Parameter_Scan::Perform_STA_Scan()");
 		// If the upper row does not contain excluded points, we abort.
-		if(first_excluded_point.empty() && p > p_critical && row == couplings.size() - 1 && column == 0)
+		if(first_excluded_point.empty() && p >= p_critical && row == static_cast<int>(couplings.size()) - 1 && column == 0)
 			break;
 		// Check if we arrived back at the first excluded point
 		if(first_excluded_point.empty() && p < p_critical)
@@ -741,7 +910,7 @@ void Parameter_Scan::Perform_Full_Scan(obscura::DM_Particle& DM, obscura::DM_Det
 				Print_Grid(mpi_rank, row, column);
 				MPI_Barrier(MPI_COMM_WORLD);
 
-				p = Compute_p_Value(sample_size, DM, detector, solar_model, halo_model, scattering_rate_interpolation_points, mpi_rank, maximum_number_of_scatterings);
+				p = Compute_p_Value(sample_size, DM, detector, solar_model, halo_model, scattering_rate_interpolation_points, mpi_rank, maximum_number_of_scatterings, snapshot_config, fixed_seed);
 
 				p_value_grid[row][column] = p;
 				libphysica::Export_Table(results_path + "P_Values_Grid.txt", p_value_grid);
@@ -752,6 +921,7 @@ void Parameter_Scan::Perform_Full_Scan(obscura::DM_Particle& DM, obscura::DM_Det
 					libphysica::Print_Box("p = " + std::to_string(libphysica::Round(p)), 1);
 				}
 			}
+			p = Checked_Probability(p, "Parameter_Scan::Perform_Full_Scan()");
 
 			if(p < p_critical)
 				row_exclusion			 = true;

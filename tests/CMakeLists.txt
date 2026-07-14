@@ -92,6 +92,22 @@ install(TARGETS test_Simulation_Utilities DESTINATION ${TESTS_DIR})
 add_test(NAME test_Simulation_Utilities COMMAND test_Simulation_Utilities
 	WORKING_DIRECTORY ${TESTS_DIR})
 
+# 7b. Physics-facing validation: analytic limits, invariants, and sampling laws.
+add_executable(test_Physics_Validation
+	test_Physics_Validation.cpp)
+target_include_directories(test_Physics_Validation PRIVATE ${GENERATED_DIR})
+target_link_libraries(test_Physics_Validation
+	PRIVATE
+		lib_damascus_sun
+		gtest_main)
+target_compile_options(test_Physics_Validation PUBLIC -Wall -pedantic)
+install(TARGETS test_Physics_Validation DESTINATION ${TESTS_DIR})
+add_test(NAME test_Physics_Validation COMMAND test_Physics_Validation
+	WORKING_DIRECTORY ${TESTS_DIR})
+set_tests_properties(test_Physics_Validation PROPERTIES
+	TIMEOUT 30
+	LABELS "physics-validation;unit")
+
 # 8. Unit tests: Solar_Model.xpp	
 add_executable(test_Solar_Model
 	test_Solar_Model.cpp)
@@ -104,6 +120,27 @@ target_compile_options(test_Solar_Model PUBLIC -Wall -pedantic)
 install(TARGETS test_Solar_Model DESTINATION ${TESTS_DIR})
 add_test(NAME test_Solar_Model COMMAND test_Solar_Model
 	WORKING_DIRECTORY ${TESTS_DIR})
+if(MPIEXEC_EXECUTABLE
+	AND MPIEXEC_NUMPROC_FLAG
+	AND DEFINED MPIEXEC_MAX_NUMPROCS
+	AND MPIEXEC_MAX_NUMPROCS GREATER_EQUAL 3)
+	add_test(NAME test_Solar_Model_MPI_3Ranks
+		COMMAND
+			${MPIEXEC_EXECUTABLE}
+			${MPIEXEC_NUMPROC_FLAG} 3
+			${MPIEXEC_PREFLAGS}
+			$<TARGET_FILE:test_Solar_Model>
+			--gtest_filter=TestSolarModel.TestTotalDMScatteringRateRegularGridNodes
+			${MPIEXEC_POSTFLAGS}
+		WORKING_DIRECTORY ${TESTS_DIR})
+	set_tests_properties(test_Solar_Model_MPI_3Ranks PROPERTIES
+		PROCESSORS 3
+		RUN_SERIAL TRUE
+		TIMEOUT 60
+		LABELS "solar-model;mpi")
+else()
+	message(STATUS "Skipping three-rank solar-model grid test: MPI launcher or explicit three-rank capacity is unavailable (MPIEXEC_EXECUTABLE='${MPIEXEC_EXECUTABLE}', MPIEXEC_MAX_NUMPROCS='${MPIEXEC_MAX_NUMPROCS}')")
+endif()
 
 # 9. Snapshot serialization and merge tests (no solar model/runtime data)
 add_executable(test_Snapshot_IO
@@ -150,4 +187,29 @@ if(MPIEXEC_EXECUTABLE
 		LABELS "snapshot;mpi;slow")
 else()
 	message(STATUS "Skipping four-rank snapshot heartbeat test: MPI launcher or explicit four-rank capacity is unavailable (MPIEXEC_EXECUTABLE='${MPIEXEC_EXECUTABLE}', MPIEXEC_MAX_NUMPROCS='${MPIEXEC_MAX_NUMPROCS}')")
+endif()
+
+# 11. Regression-metric extraction and comparison (standard-library Python only).
+find_package(Python3 COMPONENTS Interpreter QUIET)
+if(Python3_Interpreter_FOUND)
+	add_test(NAME test_Benchmark_Metrics
+		COMMAND ${Python3_EXECUTABLE} ${TESTS_DIR}/test_benchmark_metrics.py
+		WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
+	set_tests_properties(test_Benchmark_Metrics PROPERTIES
+		TIMEOUT 10
+		LABELS "benchmark;unit")
+	add_test(NAME test_Numerical_Stability_Python
+		COMMAND ${Python3_EXECUTABLE} ${TESTS_DIR}/test_numerical_stability.py
+		WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
+	set_tests_properties(test_Numerical_Stability_Python PROPERTIES
+		TIMEOUT 30
+		LABELS "numerical-stability;unit")
+	add_test(NAME test_Physics_Validation_Workflow
+		COMMAND ${Python3_EXECUTABLE} ${TESTS_DIR}/test_physics_validation.py
+		WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
+	set_tests_properties(test_Physics_Validation_Workflow PROPERTIES
+		TIMEOUT 10
+		LABELS "physics-validation;unit")
+else()
+	message(STATUS "Skipping benchmark-metrics test: Python3 interpreter is unavailable")
 endif()

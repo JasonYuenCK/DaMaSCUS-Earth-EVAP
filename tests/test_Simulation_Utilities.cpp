@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <stdexcept>
 
 #include "obscura/Astronomy.hpp"
 #include "obscura/DM_Halo_Models.hpp"
@@ -189,6 +190,15 @@ TEST(TestSimulationUtilities, TestInitialConditions)
 	}
 }
 
+TEST(TestSimulationUtilities, TestInitialSpeedPDFIsFiniteAtZero)
+{
+	Solar_Model SSM;
+	obscura::Standard_Halo_Model SHM;
+	EXPECT_DOUBLE_EQ(PDF_Initial_Speed(0.0, SHM, SSM), 0.0);
+	EXPECT_TRUE(std::isfinite(PDF_Initial_Speed(1.0e-12 * km / sec, SHM, SSM)));
+	EXPECT_THROW(PDF_Initial_Speed(-1.0, SHM, SSM), std::invalid_argument);
+}
+
 // 3. Analytically propagate a particle at event on a hyperbolic Kepler orbit to a radius R (without passing the periapsis)
 TEST(TestSimulationUtilities, TestHyperbolicKeplerShift)
 {
@@ -257,4 +267,5 @@ TEST(TestSimulationUtilities, TestIsoreflectionRingAngles)
 		EXPECT_NEAR(Isoreflection_Ring_Angles(2)[i], two_rings[i], tol);
 	for(unsigned int i = 0; i < hundred_rings.size(); i++)
 		EXPECT_NEAR(Isoreflection_Ring_Angles(10)[i], hundred_rings[i], tol);
+	EXPECT_THROW(Isoreflection_Ring_Angles(0), std::invalid_argument);
 }

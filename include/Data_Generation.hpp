@@ -58,7 +58,8 @@ enum class SimulationStopReason
 	None = 0,
 	MaxTrajectoriesReached = 1,
 	CaptureTargetNotReached = 2,
-	InitialShiftFailureFractionExceeded = 3
+	InitialShiftFailureFractionExceeded = 3,
+	InvalidTrajectoryFractionExceeded = 4
 };
 
 class Simulation_Data
@@ -86,7 +87,11 @@ class Simulation_Data
 	unsigned long int number_of_final_reflection_shift_failures;
 	unsigned long int number_of_numerical_failures;
 	unsigned long int number_of_computational_truncations;
+	uint64_t total_number_of_scatterings;
 	double average_number_of_scatterings;
+	unsigned long int mpi_sync_rounds;
+	unsigned long int final_mpi_round_trajectories;
+	unsigned long int capture_target_overshoot;
 	double computing_time;
 	bool early_stopped;
 	SimulationStopReason early_stop_reason;

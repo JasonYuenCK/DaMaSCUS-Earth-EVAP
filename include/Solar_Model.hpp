@@ -41,7 +41,12 @@ class Solar_Model
 
 	// Interpolation of total scattering rate
 	bool using_interpolated_rate;
-	libphysica::Interpolation_2D rate_interpolation;
+	std::vector<double> rate_grid;
+	unsigned int rate_grid_radius_points;
+	unsigned int rate_grid_speed_points;
+	double rate_grid_inverse_radius_step;
+	double rate_grid_inverse_speed_step;
+	double rate_grid_max_speed;
 
   public:
 	std::string name;
@@ -66,6 +71,8 @@ class Solar_Model
 
 	double Total_DM_Scattering_Rate_Interpolated(obscura::DM_Particle& DM, double r, double DM_speed);
 	void Interpolate_Total_DM_Scattering_Rate(obscura::DM_Particle& DM, unsigned int N_radius, unsigned int N_speed);
+	unsigned int Scattering_Rate_Interpolation_Radius_Points() const;
+	unsigned int Scattering_Rate_Interpolation_Speed_Points() const;
 
 	void Print_Summary(int mpi_rank = 0) const;
 };

@@ -6,6 +6,12 @@ import multiprocessing
 N_COLS = 8
 _DTYPE = np.float64  # 默认值，由 analyze_trajectory_folder 检测后设置
 
+
+def _initialize_worker_dtype(dtype_string: str) -> None:
+    """Keep spawned multiprocessing workers on the detected binary dtype."""
+    global _DTYPE
+    _DTYPE = np.dtype(dtype_string).type
+
 def detect_dtype(file_path):
     """检测文件的数据类型，返回 np.float64 或 np.float32 或 None"""
     file_size = os.path.getsize(file_path)
@@ -58,6 +64,11 @@ def calculate_bound_time_for_file(filepath: str) -> Optional[dict]:
             'status': f'error: {str(e)}'
         }
 
+    if not np.all(np.isfinite(time_arr)) or not np.all(np.isfinite(energy_arr)):
+        return {'filename': os.path.basename(filepath), 'interval': None, 'status': 'non_finite_data'}
+    if np.any(np.diff(time_arr) < 0.0):
+        return {'filename': os.path.basename(filepath), 'interval': None, 'status': 'non_monotonic_time'}
+
     # 找出能量为负的最早和最晚时刻
     negative_mask = energy_arr < 0
     if not np.any(negative_mask):
@@ -70,6 +81,8 @@ def calculate_bound_time_for_file(filepath: str) -> Optional[dict]:
     t_start_negative = time_arr[negative_mask][0]
     t_end_negative   = time_arr[negative_mask][-1]
     time_interval = t_end_negative - t_start_negative
+    if not np.isfinite(time_interval) or time_interval < 0.0:
+        return {'filename': os.path.basename(filepath), 'interval': None, 'status': 'invalid_interval'}
 
     return {
         'filename': os.path.basename(filepath),
@@ -92,17 +105,21 @@ def analyze_trajectory_folder(folder_path: str, max_samples: int = 1000000, num_
     if not os.path.isdir(folder_path):
         print(f"错误: 文件夹 '{folder_path}' 不存在。请检查路径。", flush=True)
         return 0.0
+    if max_samples <= 0:
+        raise ValueError("max_samples must be positive")
+    if num_processes <= 0:
+        raise ValueError("num_processes must be positive")
 
     # 收集所有 trajectory*.dat 文件路径
     file_list = []
-    for filename in os.listdir(folder_path):
+    for filename in sorted(os.listdir(folder_path)):
         if "trajectory" in filename and filename.endswith(".dat"):
             filepath = os.path.join(folder_path, filename)
             if os.path.isfile(filepath):
                 file_list.append(filepath)
                 if len(file_list) >= max_samples:
                     break
-    
+
     if not file_list:
         print("未找到任何trajectory文件。", flush=True)
         return 0.0
@@ -128,7 +145,12 @@ def analyze_trajectory_folder(folder_path: str, max_samples: int = 1000000, num_
     error_count = 0
     processed_count = 0
     
-    with multiprocessing.Pool(processes=num_processes) as pool:
+    dtype_string = np.dtype(_DTYPE).str
+    with multiprocessing.Pool(
+        processes=num_processes,
+        initializer=_initialize_worker_dtype,
+        initargs=(dtype_string,),
+    ) as pool:
         # 使用 imap_unordered 进行流式处理，哪个完成先处理哪个
         for result in pool.imap_unordered(calculate_bound_time_for_file, file_list, chunksize=1):
             processed_count += 1
@@ -161,12 +183,14 @@ def analyze_trajectory_folder(folder_path: str, max_samples: int = 1000000, num_
         print("\n最终结果: 未在任何文件中计算出有效的时间间隔，无法计算平均值。", flush=True)
         return 0.0
     
-    # average_time = sum(all_intervals) / len(all_intervals)
+    average_time = float(np.mean(np.asarray(all_intervals, dtype=np.float64)))
+    if not np.isfinite(average_time) or average_time < 0.0:
+        raise RuntimeError("computed bound-time average is invalid")
     
     print(f"\n共计算出 {len(all_intervals)} 个有效的时间间隔。", flush=True)
-    # print(f"它们的平均值为: {average_time:.4f}", flush=True)
+    print(f"它们的平均值为: {average_time:.4f}", flush=True)
     
-    return 0.0
+    return average_time
 
 # --- 主程序入口和自测试示例 ---
 if __name__ == "__main__":
@@ -210,4 +234,3 @@ if __name__ == "__main__":
     # --- 3. 打印最终的平均时间 ---
     # print(f"\n程序执行完毕。最终计算出的平均时间间隔为: {final_average_time:.4f}", flush=True)
     print(f"日志文件已保存到: {log_file}", flush=True)
-    

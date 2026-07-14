@@ -68,6 +68,14 @@ rank_snapshot/
 /bin/job-*
 /job-*
 slurm-*.out
+
+# Version-controlled CHPC regression tools (keep other bin/ artifacts local)
+!/bin/
+/bin/*
+!/bin/benchmark_metrics.py
+!/bin/job_perf_regression.sh
+!/bin/submit_perf_regression.sh
+!/bin/README_perf_regression.md
 *.slurm
 *.pbs
 *.lsf

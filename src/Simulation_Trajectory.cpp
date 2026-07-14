@@ -29,9 +29,9 @@ namespace
 constexpr double RK45_MIN_STEP_FACTOR = 0.1;
 constexpr double RK45_MAX_STEP_FACTOR = 4.0;
 // 单次 Runge_Kutta_45_Step 内层 while(!accepted) 的最大重试次数。
-// 在正常物理场景下 <100 次即可收敛；设为 2000 是为了在极端数值情形下
-// 保证外层循环一定能在有限时间内拿回控制权，从而触发 snapshot 回调。
-constexpr int RK45_MAX_INNER_RETRIES = 2000;
+// 正常物理场景下通常在 100 次内收敛；保留额外裕量，同时避免一次病态
+// 步长重试长时间占住外层，使轨迹墙钟保护无法及时获得控制权。
+constexpr int RK45_MAX_INNER_RETRIES = 256;
 constexpr double FREE_ENERGY_DRIFT_REL_E_SCALE_EV = 1.0e-30;
 constexpr double MAX_OPTICAL_DEPTH_STEP = 0.05;
 constexpr double CAPTURE_MODE_MAX_OPTICAL_DEPTH_STEP = 0.10;
@@ -40,7 +40,7 @@ constexpr double OPTICAL_DEPTH_ABSOLUTE_TOLERANCE = 1.0e-12 * MAX_OPTICAL_DEPTH_
 constexpr unsigned int MAX_OPTICAL_DEPTH_RETRIES = 100;
 constexpr std::size_t MAX_OPTICAL_DEPTH_PIECES = 4;
 constexpr std::size_t CAPTURE_MODE_OPTICAL_DEPTH_PIECES = 2;
-constexpr unsigned long int TARGET_VELOCITY_MAX_REJECTION_ATTEMPTS = 1000000UL;
+constexpr unsigned long int TARGET_VELOCITY_MAX_REJECTION_ATTEMPTS = 10000UL;
 
 struct OpticalDepthPiece
 {
@@ -100,8 +100,17 @@ double Clamp_Cosine(double value)
 	return std::max(-1.0, std::min(1.0, value));
 }
 
+double Positive_Unit_Uniform(std::mt19937& PRNG)
+{
+	return std::max(libphysica::Sample_Uniform(PRNG, 0.0, 1.0),
+	                std::numeric_limits<double>::min());
+}
+
 libphysica::Vector Unit_Vector_At_Angle_From_Axis(double cos_theta, double phi, const libphysica::Vector& axis)
 {
+	if(!std::isfinite(cos_theta) || cos_theta < -1.0 - 1.0e-12 || cos_theta > 1.0 + 1.0e-12
+	   || !std::isfinite(phi))
+		throw std::runtime_error("Unit_Vector_At_Angle_From_Axis(): angle is non-finite or outside its domain.");
 	const double axis_norm = axis.Norm();
 	if(!std::isfinite(axis_norm) || axis_norm <= 0.0)
 		throw std::runtime_error("Unit_Vector_At_Angle_From_Axis(): axis is zero or non-finite.");
@@ -194,25 +203,46 @@ bool Bound_Kepler_Return_At_Same_Radius(const Event& outward_event, Event& inbou
 Event Interpolate_Event(const Event& before, const Event& after, double fraction)
 {
 	fraction = Clamp_Unit_Interval(fraction);
-	return Event(before.time + fraction * (after.time - before.time),
-	             before.position + fraction * (after.position - before.position),
-	             before.velocity + fraction * (after.velocity - before.velocity));
+	libphysica::Vector position(3);
+	libphysica::Vector velocity(3);
+	for(unsigned int component = 0; component < 3; component++)
+	{
+		position[component] = before.position[component]
+		                    + fraction * (after.position[component] - before.position[component]);
+		velocity[component] = before.velocity[component]
+		                    + fraction * (after.velocity[component] - before.velocity[component]);
+	}
+	return Event(before.time + fraction * (after.time - before.time), position, velocity);
 }
 
 double Radius_At_Fraction(const Event& before, const Event& after, double fraction)
 {
-	return Interpolate_Event(before, after, fraction).Radius();
+	fraction = Clamp_Unit_Interval(fraction);
+	double radius_squared = 0.0;
+	for(unsigned int component = 0; component < 3; component++)
+	{
+		const double value = before.position[component]
+		                   + fraction * (after.position[component] - before.position[component]);
+		radius_squared += value * value;
+	}
+	return sqrt(std::max(0.0, radius_squared));
 }
 
 bool Surface_Crossing_Fractions(const Event& before, const Event& after, double& first, double& second)
 {
-	const libphysica::Vector displacement = after.position - before.position;
-	const double a = displacement.Dot(displacement);
+	double a = 0.0;
+	double b = 0.0;
+	double c = -rSun * rSun;
+	for(unsigned int component = 0; component < 3; component++)
+	{
+		const double displacement = after.position[component] - before.position[component];
+		a += displacement * displacement;
+		b += 2.0 * before.position[component] * displacement;
+		c += before.position[component] * before.position[component];
+	}
 	if(a <= 0.0)
 		return false;
 
-	const double b = 2.0 * before.position.Dot(displacement);
-	const double c = before.position.Dot(before.position) - rSun * rSun;
 	const double discriminant = b * b - 4.0 * a * c;
 	if(!std::isfinite(discriminant) || discriminant < 0.0)
 		return false;
@@ -296,11 +326,22 @@ bool Solar_Interior_Fraction_Interval(const Event& before, const Event& after, d
 
 double Scattering_Rate_At_Fraction(const Event& before, const Event& after, double fraction, Solar_Model& solar_model, obscura::DM_Particle& DM)
 {
-	const Event event = Interpolate_Event(before, after, fraction);
-	const double radius = event.Radius();
+	fraction = Clamp_Unit_Interval(fraction);
+	double radius_squared = 0.0;
+	double speed_squared = 0.0;
+	for(unsigned int component = 0; component < 3; component++)
+	{
+		const double position = before.position[component]
+		                      + fraction * (after.position[component] - before.position[component]);
+		const double velocity = before.velocity[component]
+		                      + fraction * (after.velocity[component] - before.velocity[component]);
+		radius_squared += position * position;
+		speed_squared += velocity * velocity;
+	}
+	const double radius = sqrt(std::max(0.0, radius_squared));
 	if(radius >= rSun)
 		return 0.0;
-	return solar_model.Total_DM_Scattering_Rate(DM, radius, event.Speed());
+	return solar_model.Total_DM_Scattering_Rate(DM, radius, sqrt(std::max(0.0, speed_squared)));
 }
 
 bool Build_Optical_Depth_Pieces(const Event& before,
@@ -544,8 +585,10 @@ void Trajectory_Result::Print_Summary(Solar_Model& solar_model, unsigned int mpi
 
 // 2. Simulator
 Trajectory_Simulator::Trajectory_Simulator(const Solar_Model& model, unsigned long int max_time_steps, unsigned long int max_scatterings, double max_distance)
-: solar_model(model), free_flight_reference_energy_eV(std::numeric_limits<double>::quiet_NaN()), current_physical_bound_state(false), terminate_on_capture(false), snapshot_recorder(nullptr), trajectory_in_progress(false), accumulated_snapshot_overhead_sec(0.0), maximum_time_steps(max_time_steps), maximum_scatterings(max_scatterings), maximum_distance(max_distance), current_mpi_rank(0), current_trajectory_id(0)
+: solar_model(model), free_flight_reference_energy_eV(std::numeric_limits<double>::quiet_NaN()), current_physical_bound_state(false), terminate_on_capture(false), snapshot_recorder(nullptr), trajectory_in_progress(false), track_trajectory_wall_time(false), accumulated_snapshot_overhead_sec(0.0), maximum_time_steps(max_time_steps), maximum_scatterings(max_scatterings), maximum_distance(max_distance), current_mpi_rank(0), current_trajectory_id(0)
 {
+	if(!std::isfinite(maximum_distance) || maximum_distance <= 0.0)
+		throw std::invalid_argument("Trajectory_Simulator(): maximum distance must be finite and positive.");
 	std::random_device rd;
 	PRNG.seed(rd());
 	rate_nuclei_cache.resize(solar_model.target_isotopes.size());
@@ -573,7 +616,7 @@ unsigned long int Trajectory_Simulator::Current_Trajectory_ID() const
 
 double Trajectory_Simulator::Current_Trajectory_Wall_Time_Seconds() const
 {
-	if(!trajectory_in_progress)
+	if(!trajectory_in_progress || !track_trajectory_wall_time)
 		return 0.0;
 
 	const double total_wall_time_sec = 1.0e-9 * std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - current_trajectory_wall_start).count();
@@ -582,7 +625,7 @@ double Trajectory_Simulator::Current_Trajectory_Wall_Time_Seconds() const
 
 void Trajectory_Simulator::Accumulate_Snapshot_Overhead(const std::chrono::steady_clock::time_point& operation_start)
 {
-	if(!trajectory_in_progress)
+	if(!trajectory_in_progress || !track_trajectory_wall_time)
 		return;
 	accumulated_snapshot_overhead_sec += 1.0e-9 * std::chrono::duration_cast<std::chrono::nanoseconds>(
 		std::chrono::steady_clock::now() - operation_start).count();
@@ -594,19 +637,33 @@ const TrajectoryBincount& Trajectory_Simulator::Current_Trajectory_Bincount() co
 }
 
 // Accumulate one step into the current bincount
-void Trajectory_Simulator::Accumulate_Bincount_Step(double r_km, double v2_km2s2, double dt_sec)
+void Trajectory_Simulator::Accumulate_Bincount_Step(
+	double r_km,
+	double v2_km2s2,
+	double dt_sec,
+	double simulated_time_sec)
 {
-	if(dt_sec <= 0.0 || r_km < 0.0 || r_km >= BIN_MAX_KM)
+	if(!std::isfinite(dt_sec) || dt_sec <= 0.0)
 		return;
-	int bin_idx = static_cast<int>(r_km / BIN_WIDTH_KM);
-	if(bin_idx < 0) bin_idx = 0;
-	if(bin_idx >= NUM_BINS) return;
-	current_bincount.dt_hist[bin_idx] += dt_sec;
-	current_bincount.v2dt_hist[bin_idx] += v2_km2s2 * dt_sec;
+	int bin_idx = -1;
+	if(std::isfinite(r_km) && r_km >= 0.0 && r_km < BIN_MAX_KM)
+	{
+		bin_idx = static_cast<int>(r_km / BIN_WIDTH_KM);
+		if(bin_idx < 0)
+			bin_idx = 0;
+		if(bin_idx >= NUM_BINS)
+			bin_idx = -1;
+	}
+	const double v2dt = (bin_idx >= 0) ? v2_km2s2 * dt_sec : 0.0;
+	if(bin_idx >= 0)
+	{
+		current_bincount.dt_hist[bin_idx] += dt_sec;
+		current_bincount.v2dt_hist[bin_idx] += v2dt;
+	}
 	if(snapshot_recorder != nullptr)
 	{
 		const auto snapshot_operation_start = std::chrono::steady_clock::now();
-		snapshot_recorder->AddCurrentBincountStep(bin_idx, dt_sec, v2_km2s2 * dt_sec);
+		snapshot_recorder->AddCurrentBincountStep(bin_idx, dt_sec, v2dt, simulated_time_sec);
 		Accumulate_Snapshot_Overhead(snapshot_operation_start);
 	}
 }
@@ -707,6 +764,27 @@ TrajectoryTerminationReason Trajectory_Simulator::Propagate_Freely(Event& curren
 	if(Outward_Escaping_At_Boundary(current_event, solar_model, maximum_distance))
 		return TrajectoryTerminationReason::OutwardEscape;
 
+	auto abort_if_uncaptured_bound = [&](const Event& event)
+	{
+		if(current_bincount.is_captured)
+			return false;
+
+		const double energy_eV = Capture_Energy_eV(event.Radius(), event.Speed(), DM);
+		if(std::isfinite(energy_eV) && energy_eV >= 0.0)
+			return false;
+
+		current_event = event;
+		return true;
+	};
+
+	// A trajectory can become physically bound only at a scattering, where
+	// Update_Capture_State(..., allow_new_capture=true) records the capture.
+	// Entering free flight already bound while still marked uncaptured is a
+	// numerical-state mismatch; without this guard it can repeat bound Kepler
+	// returns up to maximum_time_steps and stall an entire MPI batch.
+	if(abort_if_uncaptured_bound(current_event))
+		return TrajectoryTerminationReason::NumericalFailure;
+
 	// Keep each free-propagation segment near t=0. Otherwise a captured particle
 	// with a large absolute lifetime can make small RK45 increments disappear in
 	// double precision, producing dt=0 and an apparent hang.
@@ -714,7 +792,7 @@ TrajectoryTerminationReason Trajectory_Simulator::Propagate_Freely(Event& curren
 	Event local_initial_event = current_event;
 	local_initial_event.time = 0.0;
 	Free_Particle_Propagator particle_propagator(local_initial_event);
-	double minus_log_xi = -log(libphysica::Sample_Uniform(PRNG));
+	double minus_log_xi = -log(Positive_Unit_Uniform(PRNG));
 	TrajectoryTerminationReason outcome = TrajectoryTerminationReason::MaxFreeSteps;
 	unsigned long int time_steps = 0;
 	unsigned long int step_attempts = 0;
@@ -763,6 +841,9 @@ TrajectoryTerminationReason Trajectory_Simulator::Propagate_Freely(Event& curren
 
 	auto commit_accepted_event = [&](const Event& local_accepted_event)
 	{
+		const Event absolute_accepted_event = to_absolute_event(local_accepted_event);
+		const double simulated_time_sec = In_Units(absolute_accepted_event.time, sec);
+		bool snapshot_progress_updated = false;
 		const double t_now_sec = In_Units(local_accepted_event.time, sec);
 		if(!terminate_on_capture)
 		{
@@ -773,7 +854,8 @@ TrajectoryTerminationReason Trajectory_Simulator::Propagate_Freely(Event& curren
 			if(prev_time_sec >= 0.0)
 			{
 				const double dt_sec = t_now_sec - prev_time_sec;
-				Accumulate_Bincount_Step(prev_r_km, prev_v2_km2s2, dt_sec);
+				Accumulate_Bincount_Step(prev_r_km, prev_v2_km2s2, dt_sec, simulated_time_sec);
+				snapshot_progress_updated = std::isfinite(dt_sec) && dt_sec > 0.0;
 				prev_dt_sec = dt_sec;
 			}
 
@@ -782,7 +864,12 @@ TrajectoryTerminationReason Trajectory_Simulator::Propagate_Freely(Event& curren
 			prev_v2_km2s2 = v2_now;
 		}
 
-		const Event absolute_accepted_event = to_absolute_event(local_accepted_event);
+		if(snapshot_recorder != nullptr && !snapshot_progress_updated)
+		{
+			const auto snapshot_operation_start = std::chrono::steady_clock::now();
+			snapshot_recorder->UpdateCurrentSimulationTime(In_Units(absolute_accepted_event.time, sec));
+			Accumulate_Snapshot_Overhead(snapshot_operation_start);
+		}
 		return Update_Capture_State(absolute_accepted_event.Radius(), absolute_accepted_event.Speed(), absolute_accepted_event.time, DM, false);
 	};
 
@@ -991,6 +1078,10 @@ TrajectoryTerminationReason Trajectory_Simulator::Propagate_Freely(Event& curren
 			}
 			else if(r_boundary >= maximum_distance && r_boundary >= r_before)
 			{
+				const Event absolute_boundary_event = to_absolute_event(boundary_event);
+				if(abort_if_uncaptured_bound(absolute_boundary_event))
+					return TrajectoryTerminationReason::NumericalFailure;
+
 				Event inbound_boundary_event;
 				if(Bound_Kepler_Return_At_Same_Radius(boundary_event, inbound_boundary_event))
 				{
@@ -998,6 +1089,12 @@ TrajectoryTerminationReason Trajectory_Simulator::Propagate_Freely(Event& curren
 					optical_depth_retries = 0;
 						commit_accepted_event(boundary_event);
 						current_event = to_absolute_event(inbound_boundary_event);
+						if(snapshot_recorder != nullptr)
+						{
+							const auto snapshot_operation_start = std::chrono::steady_clock::now();
+							snapshot_recorder->UpdateCurrentSimulationTime(In_Units(current_event.time, sec));
+							Accumulate_Snapshot_Overhead(snapshot_operation_start);
+						}
 						reset_propagator_at_absolute_event(current_event);
 						continue;
 					}
@@ -1008,6 +1105,8 @@ TrajectoryTerminationReason Trajectory_Simulator::Propagate_Freely(Event& curren
 			optical_depth_retries = 0;
 			const bool captured_now = commit_accepted_event(accepted_event);
 			current_event = to_absolute_event(accepted_event);
+			if(abort_if_uncaptured_bound(current_event))
+				return TrajectoryTerminationReason::NumericalFailure;
 			if(terminate_on_capture && captured_now)
 				return TrajectoryTerminationReason::CaptureMode;
 
@@ -1061,9 +1160,12 @@ int Trajectory_Simulator::Sample_Target(obscura::DM_Particle& DM, double r, doub
 libphysica::Vector Trajectory_Simulator::Sample_Target_Velocity(double temperature, double target_mass, const libphysica::Vector& vel_DM)
 {
 	// Sampling algorithm taken from Romano & Walsh, "An improved target velocity sampling algorithm for free gas elastic scattering"
+	if(!std::isfinite(temperature) || temperature <= 0.0
+	   || !std::isfinite(target_mass) || target_mass <= 0.0)
+		throw std::runtime_error("Sample_Target_Velocity(): temperature and target mass must be finite and positive.");
 	double kappa = sqrt(target_mass / 2.0 / temperature);
 	double vDM	 = vel_DM.Norm();
-	if(!std::isfinite(vDM) || vDM <= 0.0)
+	if(!std::isfinite(kappa) || kappa <= 0.0 || !std::isfinite(vDM) || vDM <= 0.0)
 		throw std::runtime_error("Sample_Target_Velocity(): DM speed is non-positive or non-finite.");
 	// 1. Sample target speed vT and mu = cos alpha
 	double y  = kappa * vDM;
@@ -1071,8 +1173,22 @@ libphysica::Vector Trajectory_Simulator::Sample_Target_Velocity(double temperatu
 	double mu = 1.0;
 	unsigned long int rejection_attempts = 0;
 	auto relative_speed_ratio = [&]() {
-		const double relative_speed_sqr = std::max(0.0, x * x + y * y - 2.0 * x * y * mu);
-		return sqrt(relative_speed_sqr) / (x + y);
+		const double x_sqr = x * x;
+		const double y_sqr = y * y;
+		const double relative_speed_sqr_raw = x_sqr + y_sqr - 2.0 * x * y * mu;
+		const double denominator = x + y;
+		const double roundoff_scale = std::max(1.0, x_sqr + y_sqr + 2.0 * std::fabs(x * y));
+		if(!std::isfinite(x) || x < 0.0 || !std::isfinite(y) || y <= 0.0
+		   || !std::isfinite(mu) || mu < -1.0 || mu > 1.0
+		   || !std::isfinite(relative_speed_sqr_raw)
+		   || relative_speed_sqr_raw < -1.0e-12 * roundoff_scale
+		   || !std::isfinite(denominator) || denominator <= 0.0)
+			throw std::runtime_error("Sample_Target_Velocity(): rejection state is invalid.");
+		const double relative_speed_sqr = std::max(0.0, relative_speed_sqr_raw);
+		const double ratio = sqrt(relative_speed_sqr) / denominator;
+		if(!std::isfinite(ratio) || ratio < 0.0 || ratio > 1.0 + 1.0e-12)
+			throw std::runtime_error("Sample_Target_Velocity(): rejection ratio is invalid.");
+		return std::min(1.0, ratio);
 	};
 	while(relative_speed_ratio() < libphysica::Sample_Uniform(PRNG, 0.0, 1.0))
 	{
@@ -1083,16 +1199,16 @@ libphysica::Vector Trajectory_Simulator::Sample_Target_Velocity(double temperatu
 		double xi_1 = libphysica::Sample_Uniform(PRNG, 0.0, 1.0);
 		if(xi_1 < 2.0 / (sqrt(M_PI) * y + 2.0))
 		{
-			double xi_2 = libphysica::Sample_Uniform(PRNG, 0.0, 1.0);
-			double xi_3 = libphysica::Sample_Uniform(PRNG, 0.0, 1.0);
-			double z	= -log(xi_2 * xi_3);
+			double xi_2 = Positive_Unit_Uniform(PRNG);
+			double xi_3 = Positive_Unit_Uniform(PRNG);
+			double z	= -log(xi_2) - log(xi_3);
 			x			= sqrt(z);
 		}
 		else
 		{
-			double xi_2 = libphysica::Sample_Uniform(PRNG, 0.0, 1.0);
+			double xi_2 = Positive_Unit_Uniform(PRNG);
 			double xi_3 = libphysica::Sample_Uniform(PRNG, 0.0, 1.0);
-			double xi_4 = libphysica::Sample_Uniform(PRNG, 0.0, 1.0);
+			double xi_4 = Positive_Unit_Uniform(PRNG);
 			double z	= -log(xi_2) - pow(cos(M_PI / 2.0 * xi_3), 2.0) * log(xi_4);
 			x			= sqrt(z);
 		}
@@ -1103,18 +1219,31 @@ libphysica::Vector Trajectory_Simulator::Sample_Target_Velocity(double temperatu
 	double phi		 = libphysica::Sample_Uniform(PRNG, 0.0, 2.0 * M_PI);
 	libphysica::Vector unit_vector_T = Unit_Vector_At_Angle_From_Axis(cos_theta, phi, vel_DM);
 
-	return vT * unit_vector_T;
+	libphysica::Vector velocity = vT * unit_vector_T;
+	if(!std::isfinite(velocity.Norm()))
+		throw std::runtime_error("Sample_Target_Velocity(): sampled target velocity is non-finite.");
+	return velocity;
 }
 
 libphysica::Vector Trajectory_Simulator::New_DM_Velocity(double cos_scattering_angle, double DM_mass, double target_mass, libphysica::Vector& vel_DM, libphysica::Vector& vel_target)
 {
+	if(!std::isfinite(cos_scattering_angle)
+	   || cos_scattering_angle < -1.0 - 1.0e-12 || cos_scattering_angle > 1.0 + 1.0e-12
+	   || !std::isfinite(DM_mass) || DM_mass <= 0.0
+	   || !std::isfinite(target_mass) || target_mass <= 0.0
+	   || !std::isfinite(vel_DM.Norm()) || !std::isfinite(vel_target.Norm()))
+		throw std::runtime_error("New_DM_Velocity(): masses, velocities, or scattering angle are invalid.");
+	cos_scattering_angle = Clamp_Cosine(cos_scattering_angle);
 	// Construction of n, the unit vector pointing into the direction of vfinal.
 	double phi			 = libphysica::Sample_Uniform(PRNG, 0.0, 2.0 * M_PI);
 	libphysica::Vector n = Unit_Vector_At_Angle_From_Axis(cos_scattering_angle, phi, vel_DM);
 
 	double relative_speed = (vel_target - vel_DM).Norm();
 
-	return target_mass * relative_speed / (target_mass + DM_mass) * n + (DM_mass * vel_DM + target_mass * vel_target) / (target_mass + DM_mass);
+	libphysica::Vector velocity = target_mass * relative_speed / (target_mass + DM_mass) * n + (DM_mass * vel_DM + target_mass * vel_target) / (target_mass + DM_mass);
+	if(!std::isfinite(velocity.Norm()))
+		throw std::runtime_error("New_DM_Velocity(): final DM velocity is non-finite.");
+	return velocity;
 }
 
 void Trajectory_Simulator::Scatter(Event& current_event, obscura::DM_Particle& DM)
@@ -1146,6 +1275,12 @@ void Trajectory_Simulator::Fix_PRNG_Seed(unsigned int fixed_seed)
 
 Trajectory_Result Trajectory_Simulator::Simulate(const Event& initial_condition, obscura::DM_Particle& DM, unsigned int mpi_rank)
 {
+	if(!std::isfinite(initial_condition.time) || initial_condition.time < 0.0
+	   || !std::isfinite(initial_condition.Radius()) || initial_condition.Radius() <= 0.0
+	   || !std::isfinite(initial_condition.Speed()) || initial_condition.Speed() <= 0.0
+	   || !std::isfinite(DM.mass) || DM.mass <= 0.0
+	   || !std::isfinite(max_trajectory_wall_time_sec) || max_trajectory_wall_time_sec < 0.0)
+		throw std::invalid_argument("Trajectory_Simulator::Simulate(): initial state, DM mass, or wall-time limit is invalid.");
 	Event current_event = initial_condition;
 	long unsigned int number_of_scatterings = 0;
 
@@ -1161,12 +1296,14 @@ Trajectory_Result Trajectory_Simulator::Simulate(const Event& initial_condition,
 	current_mpi_rank = mpi_rank;
 	current_trajectory_id++;
 	trajectory_in_progress = true;
-	current_trajectory_wall_start = std::chrono::steady_clock::now();
+	track_trajectory_wall_time = snapshot_recorder != nullptr || max_trajectory_wall_time_sec > 0.0;
+	if(track_trajectory_wall_time)
+		current_trajectory_wall_start = std::chrono::steady_clock::now();
 	accumulated_snapshot_overhead_sec = 0.0;
 	if(snapshot_recorder != nullptr)
 	{
 		const auto snapshot_operation_start = std::chrono::steady_clock::now();
-		snapshot_recorder->BeginTrajectory(current_trajectory_id);
+		snapshot_recorder->BeginTrajectory(current_trajectory_id, In_Units(current_event.time, sec));
 		Accumulate_Snapshot_Overhead(snapshot_operation_start);
 	}
 
@@ -1188,6 +1325,12 @@ Trajectory_Result Trajectory_Simulator::Simulate(const Event& initial_condition,
 				break;
 			}
 			number_of_scatterings++;
+			if(snapshot_recorder != nullptr)
+			{
+				const auto snapshot_operation_start = std::chrono::steady_clock::now();
+				snapshot_recorder->UpdateCurrentScatterings(number_of_scatterings);
+				Accumulate_Snapshot_Overhead(snapshot_operation_start);
+			}
 			bool captured_after_scatter = Update_Capture_State(current_event.Radius(), current_event.Speed(), current_event.time, DM, true);
 			Reset_Bincount_Anchor(current_event);
 			if(terminate_on_capture && captured_after_scatter)
@@ -1207,6 +1350,7 @@ Trajectory_Result Trajectory_Simulator::Simulate(const Event& initial_condition,
 		termination_reason = TrajectoryTerminationReason::MaxScatterings;
 
 	trajectory_in_progress = false;
+	track_trajectory_wall_time = false;
 	current_bincount.termination_reason = termination_reason;
 	current_bincount.number_of_scatterings = number_of_scatterings;
 	current_bincount.t_termination = In_Units(current_event.time, sec);
@@ -1571,18 +1715,30 @@ double Free_Particle_Propagator::Current_Speed()
 Event Free_Particle_Propagator::Event_In_3D()
 {
 	const double safe_radius = (std::isfinite(radius) && radius > 0.0) ? radius : 0.0;
+	libphysica::Vector position(3);
+	libphysica::Vector velocity(3);
 	if(radial_mode || angular_momentum == 0.0 || safe_radius == 0.0)
 	{
-		libphysica::Vector xRadial = safe_radius * axis_x;
-		libphysica::Vector vRadial = v_radial * axis_x;
-		return Event(time, xRadial, vRadial);
+		for(unsigned int component = 0; component < 3; component++)
+		{
+			position[component] = safe_radius * axis_x[component];
+			velocity[component] = v_radial * axis_x[component];
+		}
+		return Event(time, position, velocity);
 	}
 
-	double v_phi			= angular_momentum / pow(safe_radius, 2);
-	libphysica::Vector xNew = safe_radius * (cos(phi) * axis_x + sin(phi) * axis_y);
-	libphysica::Vector vNew = (v_radial * cos(phi) - v_phi * safe_radius * sin(phi)) * axis_x + (v_radial * sin(phi) + safe_radius * v_phi * cos(phi)) * axis_y;
+	const double cos_phi = cos(phi);
+	const double sin_phi = sin(phi);
+	const double tangential_speed = angular_momentum / safe_radius;
+	const double velocity_x = v_radial * cos_phi - tangential_speed * sin_phi;
+	const double velocity_y = v_radial * sin_phi + tangential_speed * cos_phi;
+	for(unsigned int component = 0; component < 3; component++)
+	{
+		position[component] = safe_radius * (cos_phi * axis_x[component] + sin_phi * axis_y[component]);
+		velocity[component] = velocity_x * axis_x[component] + velocity_y * axis_y[component];
+	}
 
-	return Event(time, xNew, vNew);
+	return Event(time, position, velocity);
 }
 
 }	// namespace DaMaSCUS_SUN

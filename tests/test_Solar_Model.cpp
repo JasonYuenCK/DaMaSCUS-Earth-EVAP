@@ -1,6 +1,8 @@
 #include "gtest/gtest.h"
 
+#include <algorithm>
 #include <cmath>
+#include <limits>
 #include <mpi.h>
 #include <random>
 
@@ -187,6 +189,71 @@ TEST(TestSolarModel, TestTotalDMScatteringRateInterpolation)
 	}
 }
 
+TEST(TestSolarModel, TestTotalDMScatteringRateRegularGridNodes)
+{
+	Solar_Model SSM;
+	obscura::DM_Particle_SI DM(0.01);
+	DM.Set_Low_Mass_Mode(true);
+	DM.Set_Sigma_Proton(pb);
+	const unsigned int radius_points = 31;
+	const unsigned int speed_points = 29;
+	const unsigned int radius_indices[] = {0, 7, 15, 30};
+	const unsigned int speed_indices[] = {0, 5, 14, 28};
+
+	SSM.Interpolate_Total_DM_Scattering_Rate(DM, radius_points, speed_points);
+	EXPECT_EQ(SSM.Scattering_Rate_Interpolation_Radius_Points(), radius_points);
+	EXPECT_EQ(SSM.Scattering_Rate_Interpolation_Speed_Points(), speed_points);
+	for(const auto radius_index : radius_indices)
+	{
+		const double radius = rSun * radius_index / (radius_points - 1);
+		for(const auto speed_index : speed_indices)
+		{
+			const double speed = 0.75 * speed_index / (speed_points - 1);
+			const double expected = SSM.Total_DM_Scattering_Rate_Computed(DM, radius, speed);
+			const double tolerance = std::max(1.0e-30, 1.0e-10 * std::fabs(expected));
+			EXPECT_NEAR(SSM.Total_DM_Scattering_Rate(DM, radius, speed), expected, tolerance);
+		}
+	}
+
+	SSM.Interpolate_Total_DM_Scattering_Rate(DM, 1, speed_points);
+	EXPECT_EQ(SSM.Scattering_Rate_Interpolation_Radius_Points(), 0u);
+	EXPECT_EQ(SSM.Scattering_Rate_Interpolation_Speed_Points(), 0u);
+	const double radius = 0.37 * rSun;
+	const double speed = 0.21;
+	EXPECT_DOUBLE_EQ(SSM.Total_DM_Scattering_Rate(DM, radius, speed),
+	                 SSM.Total_DM_Scattering_Rate_Computed(DM, radius, speed));
+}
+
+TEST(TestSolarModel, TestTotalDMScatteringRateRegularGridSDProton)
+{
+	Solar_Model SSM;
+	obscura::DM_Particle_SD DM(4.0 * GeV);
+	DM.Set_Low_Mass_Mode(true);
+	DM.Fix_Coupling_Ratio(1.0, 0.0);
+	DM.Set_Sigma_Proton(1.0e-36 * cm * cm);
+	const unsigned int grid_points = 17;
+
+	SSM.Interpolate_Total_DM_Scattering_Rate(DM, grid_points, grid_points);
+	const double radius = rSun * 9.0 / (grid_points - 1);
+	const double speed = 0.75 * 11.0 / (grid_points - 1);
+	const double expected = SSM.Total_DM_Scattering_Rate_Computed(DM, radius, speed);
+	const double tolerance = std::max(1.0e-30, 1.0e-10 * std::fabs(expected));
+	EXPECT_NEAR(SSM.Total_DM_Scattering_Rate(DM, radius, speed), expected, tolerance);
+}
+
+TEST(TestSolarModel, TestNonFiniteInterpolationCoordinatesAreRejectedBeforeIndexing)
+{
+	Solar_Model SSM;
+	obscura::DM_Particle_SI DM(0.01 * GeV);
+	DM.Set_Low_Mass_Mode(true);
+	DM.Set_Sigma_Proton(pb);
+	SSM.Interpolate_Total_DM_Scattering_Rate(DM, 5, 5);
+
+	const double nan = std::numeric_limits<double>::quiet_NaN();
+	EXPECT_TRUE(std::isnan(SSM.Total_DM_Scattering_Rate(DM, nan, 1.0e-3)));
+	EXPECT_TRUE(std::isnan(SSM.Total_DM_Scattering_Rate_Interpolated(DM, 0.5 * rSun, nan)));
+}
+
 TEST(TestSolarModel, TestPrintSummary)
 {
 	// ARRANGE
@@ -206,4 +273,9 @@ TEST(TestSolarModel, TestThermalAveragedRelativeSpeed)
 	// ACT & ASSERT
 	EXPECT_NEAR(Thermal_Averaged_Relative_Speed(0.01 * Kelvin, mass_target, v_DM), v_DM, 1e-10);
 	EXPECT_NEAR(Thermal_Averaged_Relative_Speed(temperature, mass_target, v_DM), 0.0017928, 1.0e-7);
+	const double zero_speed_average = Thermal_Averaged_Relative_Speed(temperature, mass_target, 0.0);
+	EXPECT_TRUE(std::isfinite(zero_speed_average));
+	EXPECT_GT(zero_speed_average, 0.0);
+	EXPECT_TRUE(std::isnan(Thermal_Averaged_Relative_Speed(0.0, mass_target, v_DM)));
+	EXPECT_TRUE(std::isnan(Thermal_Averaged_Relative_Speed(temperature, mass_target, -v_DM)));
 }

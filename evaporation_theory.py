@@ -15,10 +15,7 @@ from scipy.integrate import trapezoid
 from scipy.special import erf, hyp0f1, gammaln, ive
 from scipy.optimize import brentq
 from scipy.interpolate import interp1d
-import matplotlib.pyplot as plt
 import os
-import warnings
-warnings.filterwarnings('ignore')
 
 # =============================================================
 # Physical Constants (CGS)
@@ -50,11 +47,10 @@ SI_ELEMENTS = [
 ]
 
 BASE_DIR  = os.path.dirname(os.path.abspath(__file__))
-ROOT_DIR  = os.path.dirname(BASE_DIR)
+ROOT_DIR  = BASE_DIR
 DATA_DIR  = os.path.join(ROOT_DIR, "data")
 SSM_PATH  = os.path.join(DATA_DIR, "model_agss09.dat")
 FIG_DIR   = os.path.join(ROOT_DIR, "figure")
-os.makedirs(FIG_DIR, exist_ok=True)
 
 
 # =============================================================
@@ -76,7 +72,12 @@ def load_solar_model():
                 rows.append(row)
             except ValueError:
                 continue
-    return np.array(rows)
+    data = np.asarray(rows, dtype=float)
+    if data.ndim != 2 or data.shape[0] < 2 or data.shape[1] < 20:
+        raise ValueError(f"invalid or empty AGSS09 solar-model table: {SSM_PATH}")
+    if not np.all(np.isfinite(data)):
+        raise ValueError(f"AGSS09 solar-model table contains non-finite values: {SSM_PATH}")
+    return data
 
 
 def build_solar_profiles(data):
@@ -91,6 +92,11 @@ def build_solar_profiles(data):
     rho     = data[:, 3]       # g/cm³
     M_frac  = data[:, 0]       # M/M_sun
     X_H     = data[:, 6]       # hydrogen mass fraction
+
+    if not np.all(np.isfinite(data)) or np.any(np.diff(r_frac) < 0.0):
+        raise ValueError("solar-model data must be finite and ordered by radius")
+    if np.any(T_K <= 0.0) or np.any(rho < 0.0) or np.any(M_frac < 0.0):
+        raise ValueError("solar-model temperature, density, and enclosed mass are invalid")
 
     N = len(r_frac)
     r   = r_frac * R_sun                          # cm
@@ -244,6 +250,12 @@ def compute_suppression(tau_arr, phi_hat_arr):
     """
     tau = np.asarray(tau_arr, dtype=float)
     phi_hat = np.asarray(phi_hat_arr, dtype=float)
+    if tau.shape != phi_hat.shape:
+        raise ValueError("tau_arr and phi_hat_arr must have identical shapes")
+    if not np.all(np.isfinite(tau)) or not np.all(np.isfinite(phi_hat)):
+        raise ValueError("suppression inputs must be finite")
+    if np.any(tau < 0.0) or np.any(phi_hat < 0.0):
+        raise ValueError("suppression inputs must be non-negative")
     s = np.zeros_like(tau)
 
     # ---- regime masks ----
@@ -259,7 +271,7 @@ def compute_suppression(tau_arr, phi_hat_arr):
         b = 1.0 + 2.0 / 3.0 * p               # parameter of ₀F₁
 
         # η_ang (C.11)
-        eta_ang = (7.0 / 10.0) * (1.0 - np.exp(-10.0 * t / 7.0)) / t
+        eta_ang = -(7.0 / 10.0) * np.expm1(-10.0 * t / 7.0) / t
 
         # η_mult (C.13):  ₀F₁(; b; τ)
         eta_mult = np.ones_like(t)
@@ -334,7 +346,7 @@ def compute_n_LTE(m_chi_g, sol, alpha_val):
         log_profile[k] = log_profile[k - 1] + integrand
 
     # n_LTE ∝ (T/T₀)^{3/2} exp(-log_profile)
-    n_raw = (T / T[0])**1.5 * np.exp(-log_profile)
+    n_raw = (T / T[0])**1.5 * np.exp(np.clip(-log_profile, -745.0, 700.0))
     n_raw = np.where(np.isfinite(n_raw), n_raw, 0.0)
     norm = trapezoid(n_raw * 4.0 * np.pi * r**2, r)
     if norm <= 0:
@@ -350,6 +362,9 @@ def knudsen_number(sigma_0, n_H_center, rho_center, T_center, m_chi_g):
     K = ℓ(0) / r_χ
     For SD (constant σ): ℓ(0) = 1/(σ₀ n_H(0))
     """
+    values = (sigma_0, n_H_center, rho_center, T_center, m_chi_g)
+    if not all(np.isfinite(value) and value > 0.0 for value in values):
+        return np.inf
     ell_0 = 1.0 / (sigma_0 * n_H_center)
     r_chi = np.sqrt(3.0 * T_center /
                     (2.0 * np.pi * G_N * rho_center * m_chi_g))
@@ -358,7 +373,14 @@ def knudsen_number(sigma_0, n_H_center, rho_center, T_center, m_chi_g):
 
 def f_K(K, K0=0.4):
     """Transition function f(K) = 1/(1 + (K/K₀)²), Eq. (4.12)."""
-    return 1.0 / (1.0 + (K / K0)**2)
+    if not np.isfinite(K):
+        return 0.0
+    if not np.isfinite(K0) or K0 <= 0.0 or K < 0.0:
+        raise ValueError("K and K0 must be non-negative/positive finite values")
+    ratio = K / K0
+    if ratio > np.sqrt(np.finfo(float).max):
+        return 0.0
+    return 1.0 / (1.0 + ratio**2)
 
 
 # =============================================================
@@ -621,7 +643,7 @@ def capture_rate_SD(m_chi_GeV, sigma_0, sol):
     C_geom = capture_rate_geom(m_chi_GeV, sol)
     if C_weak > 0:
         ratio = C_geom / C_weak
-        return C_weak * (1.0 - np.exp(-ratio))
+        return C_weak * (-np.expm1(-ratio))
     return 0.0
 
 
@@ -681,13 +703,26 @@ def N_total(C_sun, A_sun, E_sun):
     """
     Eq. (6.2): N_χ(t⊙) = √(C/A) × tanh(κ t⊙/τ_eq) / (κ + E τ_eq tanh/2)
     """
+    if not all(np.isfinite(value) for value in (C_sun, A_sun, E_sun)):
+        raise ValueError("C_sun, A_sun, and E_sun must be finite")
     if C_sun <= 0 or A_sun <= 0:
         return 0.0
-    tau_eq = 1.0 / np.sqrt(A_sun * C_sun)
-    kappa  = np.sqrt(1.0 + (E_sun * tau_eq / 2.0)**2)
-    arg    = kappa * t_sun / tau_eq
-    th     = np.tanh(min(arg, 500.0))
-    N = np.sqrt(C_sun / A_sun) * th / (kappa + 0.5 * E_sun * tau_eq * th)
+    if E_sun < 0:
+        raise ValueError("E_sun must be non-negative")
+    # Solve dN/dt = C - E*N - A*N^2 using the two equilibrium roots.  This
+    # form avoids squaring E*tau_eq and remains stable in both evaporation-
+    # and annihilation-dominated limits.
+    annihilation_scale = 2.0 * np.sqrt(A_sun) * np.sqrt(C_sun)
+    relaxation_rate = np.hypot(E_sun, annihilation_scale)
+    denominator = E_sun + relaxation_rate
+    if not np.isfinite(relaxation_rate) or denominator <= 0.0:
+        raise OverflowError("capture/annihilation scales exceed float64 range")
+    equilibrium = 2.0 * C_sun / denominator
+    root_ratio = (annihilation_scale / denominator)**2
+    relaxation_argument = relaxation_rate * t_sun
+    decay = 0.0 if not np.isfinite(relaxation_argument) or relaxation_argument >= 745.0 else np.exp(-relaxation_argument)
+    buildup = 1.0 if decay == 0.0 else -np.expm1(-relaxation_argument)
+    N = equilibrium * buildup / (1.0 + root_ratio * decay)
     return max(N, 0.0)
 
 
@@ -754,7 +789,7 @@ def compute_N_vs_sigma_SD(m_chi_GeV, log_sigma_arr, E_arr, sol):
         # Capture rate
         C_weak = sigma * C_unit
         if C_weak > 0:
-            C_val = C_weak * (1.0 - np.exp(-C_geom / C_weak))
+            C_val = C_weak * (-np.expm1(-C_geom / C_weak))
         else:
             C_val = 0.0
 

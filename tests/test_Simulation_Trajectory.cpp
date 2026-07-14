@@ -1,6 +1,8 @@
 #include "gtest/gtest.h"
 
 #include <cmath>
+#include <limits>
+#include <stdexcept>
 #include <vector>
 
 #include "libphysica/Natural_Units.hpp"
@@ -123,6 +125,13 @@ TEST(TestSimulationTrajectory, TestDefaultTrajectoryWallTimeIsUnlimited)
 	EXPECT_DOUBLE_EQ(simulator.max_trajectory_wall_time_sec, 0.0);
 }
 
+TEST(TestSimulationTrajectory, TestSimulatorRejectsInvalidNumericalBounds)
+{
+	Solar_Model SSM;
+	EXPECT_THROW(Trajectory_Simulator(SSM, 100, 100, 0.0), std::invalid_argument);
+	EXPECT_THROW(Trajectory_Simulator(SSM, 100, 100, std::numeric_limits<double>::quiet_NaN()), std::invalid_argument);
+}
+
 TEST(TestSimulationTrajectory, TestTrajectoryBincountSurvivalDefaults)
 {
 	TrajectoryBincount bincount;
@@ -211,7 +220,9 @@ TEST(TestSimulationTrajectory, TestMaxFreeStepsTerminationReason)
 	Solar_Model SSM;
 	Trajectory_Simulator simulator(SSM, 0, 10, 2.0 * rSun);
 
-	Event IC(0.0, libphysica::Vector({0.5 * rSun, 0.0, 0.0}), libphysica::Vector({0.0, 100.0 * km / sec, 0.0}));
+	const double radius = 0.5 * rSun;
+	const double unbound_speed = 1.1 * SSM.Local_Escape_Speed(radius);
+	Event IC(0.0, libphysica::Vector({radius, 0.0, 0.0}), libphysica::Vector({0.0, unbound_speed, 0.0}));
 	Trajectory_Result result = simulator.Simulate(IC, DM, 0);
 
 	EXPECT_EQ(result.bincount.termination_reason, TrajectoryTerminationReason::MaxFreeSteps);
@@ -219,6 +230,32 @@ TEST(TestSimulationTrajectory, TestMaxFreeStepsTerminationReason)
 	EXPECT_FALSE(result.bincount.survival_valid);
 	EXPECT_FALSE(result.Particle_Free());
 	EXPECT_FALSE(result.Particle_Reflected());
+}
+
+TEST(TestSimulationTrajectory, TestUncapturedBoundFreeFlightTerminatesAsNumericalFailure)
+{
+	obscura::DM_Particle_SI DM(0.5 * GeV);
+	DM.Set_Sigma_Proton(1.0e-40 * cm * cm);
+	Solar_Model SSM;
+	Trajectory_Simulator simulator(SSM, 100, 10, 2.0 * rSun);
+
+	const double radius = 1.5 * rSun;
+	const double bound_speed = 0.5 * SSM.Local_Escape_Speed(radius);
+	Event IC(
+		0.0,
+		libphysica::Vector({radius, 0.0, 0.0}),
+		libphysica::Vector({bound_speed, 0.0, 0.0}));
+
+	testing::internal::CaptureStderr();
+	Trajectory_Result result = simulator.Simulate(IC, DM, 0);
+	const std::string stderr_output = testing::internal::GetCapturedStderr();
+
+	EXPECT_EQ(result.bincount.termination_reason, TrajectoryTerminationReason::NumericalFailure);
+	EXPECT_TRUE(stderr_output.empty());
+	EXPECT_FALSE(result.bincount.is_captured);
+	EXPECT_FALSE(result.bincount.survival_valid);
+	EXPECT_EQ(result.number_of_scatterings, 0UL);
+	EXPECT_DOUBLE_EQ(result.bincount.t_termination, 0.0);
 }
 
 TEST(TestSimulationTrajectory, TestSimulate)

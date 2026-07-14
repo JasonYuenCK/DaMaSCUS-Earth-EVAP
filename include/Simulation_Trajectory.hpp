@@ -131,13 +131,14 @@ class Trajectory_Simulator
 	bool current_physical_bound_state;
 	bool terminate_on_capture;
 
-	void Accumulate_Bincount_Step(double r_km, double v2_km2s2, double dt_sec);
+	void Accumulate_Bincount_Step(double r_km, double v2_km2s2, double dt_sec, double simulated_time_sec);
 	void Reset_Bincount_Anchor(const Event& event);
 	double Capture_Energy_eV(double radius, double speed, obscura::DM_Particle& DM);
 	bool Update_Capture_State(double radius, double speed, double time, obscura::DM_Particle& DM, bool allow_new_capture);
 
 	SnapshotRecorder* snapshot_recorder;
 	bool trajectory_in_progress;
+	bool track_trajectory_wall_time;
 	std::chrono::steady_clock::time_point current_trajectory_wall_start;
 	double accumulated_snapshot_overhead_sec;
 	void Accumulate_Snapshot_Overhead(const std::chrono::steady_clock::time_point& operation_start);

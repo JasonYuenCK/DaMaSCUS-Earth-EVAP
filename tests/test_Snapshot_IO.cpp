@@ -140,10 +140,14 @@ SnapshotRankState MakeRoundTripState(uint64_t run_id)
 	state.local_captured = 1;
 	state.local_total = 2;
 	state.local_classified = 2;
+	state.local_numerical_failures = 1;
 	state.bincount_captured_samples = 1;
 	state.bincount_not_captured_samples = 1;
 	state.current_trajectory_id = 901;
 	state.rank_elapsed_wall_sec = 30.125;
+	state.current_trajectory_wall_sec = 12.5;
+	state.current_trajectory_simulated_elapsed_sec = 44.0;
+	state.current_trajectory_scatterings = 17;
 	state.current_trajectory_captured = 1;
 	state.current_trajectory_dt_hist[0] = 0.5;
 	state.current_trajectory_v2dt_hist[0] = 5.0;
@@ -179,10 +183,14 @@ void ExpectStatesEqual(const SnapshotRankState& expected, const SnapshotRankStat
 	EXPECT_EQ(expected.local_captured, actual.local_captured);
 	EXPECT_EQ(expected.local_total, actual.local_total);
 	EXPECT_EQ(expected.local_classified, actual.local_classified);
+	EXPECT_EQ(expected.local_numerical_failures, actual.local_numerical_failures);
 	EXPECT_EQ(expected.bincount_captured_samples, actual.bincount_captured_samples);
 	EXPECT_EQ(expected.bincount_not_captured_samples, actual.bincount_not_captured_samples);
 	EXPECT_EQ(expected.current_trajectory_id, actual.current_trajectory_id);
 	EXPECT_DOUBLE_EQ(expected.rank_elapsed_wall_sec, actual.rank_elapsed_wall_sec);
+	EXPECT_DOUBLE_EQ(expected.current_trajectory_wall_sec, actual.current_trajectory_wall_sec);
+	EXPECT_DOUBLE_EQ(expected.current_trajectory_simulated_elapsed_sec, actual.current_trajectory_simulated_elapsed_sec);
+	EXPECT_EQ(expected.current_trajectory_scatterings, actual.current_trajectory_scatterings);
 	EXPECT_EQ(expected.current_trajectory_captured, actual.current_trajectory_captured);
 	EXPECT_EQ(expected.current_trajectory_dt_hist, actual.current_trajectory_dt_hist);
 	EXPECT_EQ(expected.current_trajectory_v2dt_hist, actual.current_trajectory_v2dt_hist);
@@ -290,6 +298,105 @@ TEST_F(SnapshotIOTest, BinaryRankStateRoundTripsAndRejectsCorruption)
 	ASSERT_GT(info.st_size, 1);
 	ASSERT_EQ(0, truncate(path.c_str(), info.st_size - 1));
 	EXPECT_FALSE(ReadSnapshotRankState(path, run_id, actual));
+}
+
+TEST_F(SnapshotIOTest, SharedStatePublishesCurrentTrajectoryProgress)
+{
+	SnapshotSharedState shared_state;
+	shared_state.Initialize(501, 4);
+	shared_state.BeginTrajectory(77, 100.0);
+	shared_state.AddCurrentBincountStep(3, 2.5, 10.0, 102.5);
+	shared_state.UpdateCurrentScatterings(9);
+	shared_state.MarkCurrentCaptured(true);
+
+	size_t evaporation_end = 0;
+	const SnapshotRankState running = shared_state.CopyForSnapshot(1, 10.0, 10.0, 0, evaporation_end);
+	EXPECT_EQ(1, running.trajectory_in_progress);
+	EXPECT_EQ(77U, running.current_trajectory_id);
+	EXPECT_EQ(1, running.current_trajectory_captured);
+	EXPECT_GE(running.current_trajectory_wall_sec, 0.0);
+	EXPECT_DOUBLE_EQ(2.5, running.current_trajectory_simulated_elapsed_sec);
+	EXPECT_EQ(9U, running.current_trajectory_scatterings);
+	EXPECT_DOUBLE_EQ(2.5, running.current_trajectory_dt_hist[3]);
+	EXPECT_DOUBLE_EQ(10.0, running.current_trajectory_v2dt_hist[3]);
+
+	TrajectoryBincount completed;
+	completed.is_captured = true;
+	completed.termination_reason = TrajectoryTerminationReason::OutwardEscape;
+	shared_state.RecordCompletedTrajectory(completed, true, false, {});
+	TrajectoryBincount failed;
+	failed.termination_reason = TrajectoryTerminationReason::NumericalFailure;
+	shared_state.BeginTrajectory(78, 103.0);
+	shared_state.RecordCompletedTrajectory(failed, false, false, {});
+	const SnapshotRankState idle = shared_state.CopyForSnapshot(2, 20.0, 20.0, 0, evaporation_end);
+	EXPECT_EQ(0, idle.trajectory_in_progress);
+	EXPECT_EQ(0U, idle.current_trajectory_id);
+	EXPECT_DOUBLE_EQ(0.0, idle.current_trajectory_wall_sec);
+	EXPECT_DOUBLE_EQ(0.0, idle.current_trajectory_simulated_elapsed_sec);
+	EXPECT_EQ(0U, idle.current_trajectory_scatterings);
+	EXPECT_EQ(1U, idle.local_numerical_failures);
+}
+
+TEST_F(SnapshotIOTest, TextReportListsEachMpiRankActivity)
+{
+	const uint64_t run_id = 606;
+	const double interval = 10.0;
+
+	SnapshotRankState running_uncaptured;
+	running_uncaptured.run_id = run_id;
+	running_uncaptured.snapshot_index = 1;
+	running_uncaptured.rank = 0;
+	running_uncaptured.trajectory_in_progress = 1;
+	running_uncaptured.current_trajectory_id = 1001;
+	running_uncaptured.rank_elapsed_wall_sec = 10.0;
+	running_uncaptured.current_trajectory_wall_sec = 3.5;
+	running_uncaptured.current_trajectory_simulated_elapsed_sec = 125.0;
+	running_uncaptured.current_trajectory_scatterings = 7;
+
+	SnapshotRankState running_captured = running_uncaptured;
+	running_captured.rank = 1;
+	running_captured.current_trajectory_id = 2001;
+	running_captured.current_trajectory_wall_sec = 8.0;
+	running_captured.current_trajectory_simulated_elapsed_sec = 2500.0;
+	running_captured.current_trajectory_scatterings = 19;
+	running_captured.current_trajectory_captured = 1;
+
+	SnapshotRankState idle;
+	idle.run_id = run_id;
+	idle.snapshot_index = 1;
+	idle.rank = 2;
+	idle.rank_elapsed_wall_sec = 10.0;
+
+	SnapshotRankState done;
+	done.run_id = run_id;
+	done.snapshot_index = 0;
+	done.rank = 3;
+	done.done = 1;
+	done.rank_elapsed_wall_sec = 5.0;
+
+	ASSERT_TRUE(WriteSnapshotRankState(
+		SnapshotRankCheckpointPath(rank_snapshot_dir, 0, 1, interval), running_uncaptured));
+	ASSERT_TRUE(WriteSnapshotRankState(
+		SnapshotRankCheckpointPath(rank_snapshot_dir, 1, 1, interval), running_captured));
+	ASSERT_TRUE(WriteSnapshotRankState(
+		SnapshotRankCheckpointPath(rank_snapshot_dir, 2, 1, interval), idle));
+	ASSERT_TRUE(WriteSnapshotRankState(SnapshotRankFinalPath(rank_snapshot_dir, 3), done));
+
+	const SnapshotMergeResult merged = TryWriteSnapshot(
+		snapshot_root, rank_snapshot_dir, 1, interval, 4, run_id, 0.5, 1.0e-40, false);
+	ASSERT_EQ(SnapshotMergeStatus::Merged, merged.status);
+	const std::string report = ReadAll(SnapshotTextFilePath(snapshot_root, 1, interval));
+	EXPECT_NE(std::string::npos, report.find("# [MPI rank status]"));
+	EXPECT_NE(std::string::npos, report.find(
+		"# rank  state  trajectory_id  trajectory_wall_s  simulated_elapsed_s  scatterings  observed_at_wall_s"));
+	EXPECT_NE(std::string::npos, report.find(
+		"# 0\trunning_uncaptured\t1001\t3.5000000000e+00\t1.2500000000e+02\t7\t1.0000000000e+01"));
+	EXPECT_NE(std::string::npos, report.find(
+		"# 1\trunning_captured\t2001\t8.0000000000e+00\t2.5000000000e+03\t19\t1.0000000000e+01"));
+	EXPECT_NE(std::string::npos, report.find(
+		"# 2\tidle_or_waiting\t0\t0.0000000000e+00\t0.0000000000e+00\t0\t1.0000000000e+01"));
+	EXPECT_NE(std::string::npos, report.find(
+		"# 3\tdone\t0\t0.0000000000e+00\t0.0000000000e+00\t0\t5.0000000000e+00"));
 }
 
 TEST_F(SnapshotIOTest, FourLogicalRanksProgressFromPartialToMergedWithoutDowngrade)
@@ -431,6 +538,7 @@ TEST_F(SnapshotIOTest, ReportsRawAndClassifiedCaptureRatesSeparately)
 	state.rank_elapsed_wall_sec = 10.0;
 	state.local_total = 2;
 	state.local_classified = 1;
+	state.local_numerical_failures = 1;
 	state.local_captured = 1;
 	state.bincount_captured_samples = 1;
 	state.captured_dt_hist[0] = 1.0;
@@ -446,6 +554,7 @@ TEST_F(SnapshotIOTest, ReportsRawAndClassifiedCaptureRatesSeparately)
 	const std::string report = ReadAll(SnapshotTextFilePath(snapshot_root, 1, interval));
 	EXPECT_NE(std::string::npos, report.find("# total_trajectories = 2"));
 	EXPECT_NE(std::string::npos, report.find("# valid_trajectories = 1"));
+	EXPECT_NE(std::string::npos, report.find("# numerical_failures = 1"));
 	EXPECT_NE(std::string::npos, report.find("# unresolved_not_captured_trajectories = 1"));
 	EXPECT_NE(std::string::npos, report.find("# capture_rate_raw = 0.50000000"));
 	EXPECT_NE(std::string::npos, report.find("# capture_rate_valid = 1.00000000"));

@@ -107,6 +107,7 @@ Configuration files use libconfig syntax. The most important controls are:
 | `run_mode` | `"Parameter point"` for the main evaporation workflow, `"Capture"` for capture-rate runs, or `"Parameter scan"` for the older scan path. |
 | `capture_mode` | Boolean override for capture-only behavior. `run_mode = "Capture"` also enables capture mode. |
 | `sample_size` | Target number of captured particles. Normal-mode MPI runs batch trajectories between reductions, so the final captured count may slightly exceed this target. |
+| `fixed_seed` | Optional non-negative PRNG seed. `0` or an omitted setting uses nondeterministic seeding; a nonzero value is expanded independently by MPI rank. |
 | `max_trajectories` | Optional hard cap on generated trajectories. `0` or unset means no trajectory-count cap. |
 | `interpolation_points` | Scattering-rate interpolation grid size. `0` disables interpolation; production runs should compare representative values before fixing this. |
 | `output_dir` | Root directory for generated result folders. |
@@ -136,6 +137,11 @@ For reproducible MPI runs, a nonzero fixed seed is expanded by rank as
 from physical right-censoring so that final evaporation-time files contain only
 complete valid unbinding events.
 
+A trajectory can become physically bound only at a scattering. If an
+uncaptured trajectory acquires negative energy during scatter-free propagation,
+the run classifies that trajectory as a numerical failure instead of allowing
+repeated bound Kepler returns to stall its MPI batch.
+
 ## Outputs
 
 For non-capture parameter-point runs, the final files are written after MPI
@@ -155,6 +161,10 @@ classified), with separate standard errors and Wilson intervals. The legacy
 When snapshots are enabled, intermediate files are written under `snapshot/`:
 
 - `snapshot_{time}s.txt`: cumulative progress report at the snapshot wall time.
+  Its commented `[MPI rank status]` table reports each rank's activity, local
+  trajectory ID, trajectory wall time, simulated elapsed time, scattering
+  count, and the rank-local observation time. Status rows remain comments so
+  existing readers that skip `#` lines continue to see only bincount bins.
 - `snapshot_{time}s_evaporation_times.txt`: complete valid evaporation events
   first published by that checkpoint, sorted by `lifetime_unbinding_sec`.
   An event committed concurrently with a snapshot boundary is assigned once to
@@ -166,8 +176,10 @@ not restart checkpoints. A report can temporarily have `snapshot_status =
 partial` while ranks publish their state. If a rank misses the deadline, the
 report remains incomplete rather than reconstructing state that was not
 captured. Final rank states are retained when the last merge is incomplete.
-Snapshot reports likewise expose attempted, classified, and unresolved counts
-plus raw and valid capture-rate intervals.
+Snapshot reports likewise expose attempted, classified, unresolved, and
+`numerical_failures` counts plus raw and valid capture-rate intervals. The
+uncaptured-bound free-flight guard records its failures in these cumulative
+reports without printing one warning for every failed trajectory.
 
 The executable requests `MPI_THREAD_FUNNELED`; only the main thread calls MPI,
 while one heartbeat thread per rank performs local state copies and file I/O.
@@ -179,6 +191,23 @@ local to a run and is not a portable interchange or restart format.
 
 Capture-mode runs skip the full output path and print the capture summary
 instead.
+
+## Physics Validation
+
+The ordinary test suite now includes a `physics-validation` gate for analytic
+Kepler convergence, solar-profile structure, incident impact-parameter
+sampling, scattering-angle sampling, and the Maxwell thermal-speed limit:
+
+```bash
+ctest --test-dir build --output-on-failure -L physics-validation
+```
+
+Production results should additionally pass the slower grid-and-seed
+convergence matrix described in
+[`validation/README.md`](validation/README.md). It compares direct scattering
+rates with interpolated grids using capture-rate confidence intervals, average
+scattering counts, radial distributions, evaporation-time statistics, and the
+numerical-failure fraction.
 
 ## Citation
 

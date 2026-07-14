@@ -34,10 +34,14 @@ struct SnapshotRankState
 	uint64_t local_captured = 0;
 	uint64_t local_total = 0;
 	uint64_t local_classified = 0;
+	uint64_t local_numerical_failures = 0;
 	uint64_t bincount_captured_samples = 0;
 	uint64_t bincount_not_captured_samples = 0;
 	uint64_t current_trajectory_id = 0;
 	double rank_elapsed_wall_sec = 0.0;
+	double current_trajectory_wall_sec = 0.0;
+	double current_trajectory_simulated_elapsed_sec = 0.0;
+	uint64_t current_trajectory_scatterings = 0;
 	int32_t current_trajectory_captured = 0;
 	std::array<double, NUM_BINS> current_trajectory_dt_hist{};
 	std::array<double, NUM_BINS> current_trajectory_v2dt_hist{};
