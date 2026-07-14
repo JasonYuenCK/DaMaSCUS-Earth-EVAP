@@ -137,6 +137,11 @@ For reproducible MPI runs, a nonzero fixed seed is expanded by rank as
 from physical right-censoring so that final evaporation-time files contain only
 complete valid unbinding events.
 
+A trajectory can become physically bound only at a scattering. If an
+uncaptured trajectory acquires negative energy during scatter-free propagation,
+the run classifies that trajectory as a numerical failure instead of allowing
+repeated bound Kepler returns to stall its MPI batch.
+
 ## Outputs
 
 For non-capture parameter-point runs, the final files are written after MPI

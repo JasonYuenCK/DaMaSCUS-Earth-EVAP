@@ -130,6 +130,7 @@ $$\frac{dr}{dt} = v_r, \quad \frac{dv_r}{dt} = \frac{J^2}{r^3} - \frac{G_N M(r)}
 - 在太阳外传播时，步长还会受单步跨越距离和局域 Kepler 动力学时间限制，避免一步跳过 `2R_\odot` 边界并产生非物理巨大半径。
 - **太阳内部**：步长还受散射率约束，$\delta t \leq 0.1 / \Gamma_\text{total}(r, v)$。
 - **太阳外部**：无散射事件，RK45 步长只由轨道误差控制；从 `1000 AU` 到 `2R_\odot` 的入射段，以及逃逸后到 `1 AU` 的传播，可用 `Hyperbolic_Kepler_Shift()` 做解析 Kepler 推进。
+- **未捕获负能量保护**：物理上的首次捕获只能发生在散射后；若尚未捕获的轨迹在无散射自由传播中变为负能量，代码将其记为数值失败并立即终止，禁止进入反复的 bound Kepler return，从而避免单条病态轨迹阻塞整个 MPI 批次。
 - **单轨迹 wall-time 保护**：`max_trajectory_wall_time_sec` 默认 `0`，表示不限制；若显式设为正值，则每 `256` 个 RK45 步检查一次，超过后中止该轨迹并记录终止原因为 `wall_time_limit`。`wall_time_limit`、`max_free_steps`、`max_scatterings` 都属于计算截断，不能作为正常物理右删失样本，代码会将对应 captured 轨迹标记为 `survival_valid=false`。
 
 ### 3.2 弹性散射的蒙特卡洛采样
