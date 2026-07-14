@@ -39,6 +39,21 @@ endif()
 find_package(Boost 1.65 REQUIRED)
 
 include(FetchContent)
+# Declare googletest before adding dependencies. FetchContent keeps the first
+# declaration for a content name; obscura/libphysica also declare
+# "googletest", so declaring it here ensures the source lives at the root
+# project's stable path on clean and repeated configurations.
+set(DAMASCUS_GTEST_DIR ${EXTERNAL_DIR}/googletest)
+FetchContent_Declare(googletest
+  GIT_REPOSITORY https://github.com/google/googletest.git
+  GIT_TAG        release-1.10.0
+  SOURCE_DIR     "${DAMASCUS_GTEST_DIR}/src"
+  BINARY_DIR     "${DAMASCUS_GTEST_DIR}/build"
+  CONFIGURE_COMMAND ""
+  BUILD_COMMAND     ""
+  INSTALL_COMMAND   ""
+  TEST_COMMAND      "" )
+
 # obscura
 set(OBSCURA_DIR   ${EXTERNAL_DIR}/obscura)
 FetchContent_Declare(obscura
@@ -59,18 +74,6 @@ if(NOT obscura_POPULATED)
     endif()
     add_subdirectory( ${obscura_SOURCE_DIR} )
 endif()
-
-# Googletest
-set(GTEST_DIR   ${EXTERNAL_DIR}/googletest)
-FetchContent_Declare(googletest
-  GIT_REPOSITORY https://github.com/google/googletest.git
-  GIT_TAG        release-1.10.0
-  SOURCE_DIR     "${GTEST_DIR}/src"
-  BINARY_DIR     "${GTEST_DIR}/build"
-  CONFIGURE_COMMAND ""
-  BUILD_COMMAND     ""
-  INSTALL_COMMAND   ""
-  TEST_COMMAND      "" )
 
 # Refresh the build-tree version header on every build.
 set(VERSION_HEADER_TEMPLATE ${INCLUDE_DIR}/version.hpp.in)

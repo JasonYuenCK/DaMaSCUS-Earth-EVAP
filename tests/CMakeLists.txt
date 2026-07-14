@@ -92,6 +92,22 @@ install(TARGETS test_Simulation_Utilities DESTINATION ${TESTS_DIR})
 add_test(NAME test_Simulation_Utilities COMMAND test_Simulation_Utilities
 	WORKING_DIRECTORY ${TESTS_DIR})
 
+# 7b. Physics-facing validation: analytic limits, invariants, and sampling laws.
+add_executable(test_Physics_Validation
+	test_Physics_Validation.cpp)
+target_include_directories(test_Physics_Validation PRIVATE ${GENERATED_DIR})
+target_link_libraries(test_Physics_Validation
+	PRIVATE
+		lib_damascus_sun
+		gtest_main)
+target_compile_options(test_Physics_Validation PUBLIC -Wall -pedantic)
+install(TARGETS test_Physics_Validation DESTINATION ${TESTS_DIR})
+add_test(NAME test_Physics_Validation COMMAND test_Physics_Validation
+	WORKING_DIRECTORY ${TESTS_DIR})
+set_tests_properties(test_Physics_Validation PROPERTIES
+	TIMEOUT 30
+	LABELS "physics-validation;unit")
+
 # 8. Unit tests: Solar_Model.xpp	
 add_executable(test_Solar_Model
 	test_Solar_Model.cpp)
@@ -188,6 +204,12 @@ if(Python3_Interpreter_FOUND)
 	set_tests_properties(test_Numerical_Stability_Python PROPERTIES
 		TIMEOUT 30
 		LABELS "numerical-stability;unit")
+	add_test(NAME test_Physics_Validation_Workflow
+		COMMAND ${Python3_EXECUTABLE} ${TESTS_DIR}/test_physics_validation.py
+		WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
+	set_tests_properties(test_Physics_Validation_Workflow PROPERTIES
+		TIMEOUT 10
+		LABELS "physics-validation;unit")
 else()
 	message(STATUS "Skipping benchmark-metrics test: Python3 interpreter is unavailable")
 endif()
