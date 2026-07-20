@@ -120,6 +120,13 @@ Normal-mode MPI synchronization uses an automatic batch size selected from the
 DM-nucleon cross section. The selected value is written to output headers as
 `normal_mode_mpi_sync_interval`.
 
+At the end of each normal-mode batch, ranks rendezvous with a nonblocking MPI
+barrier. A rank that arrives early continues simulating independent trajectories
+until every rank reaches the rendezvous (or its local trajectory budget is
+exhausted), so a single long trajectory no longer leaves the other ranks idle.
+The number of trajectories completed in this tail-work window is reported as
+`mpi_tail_trajectories`. Capture mode keeps its exact bounded batch behavior.
+
 | `DM_cross_section_nucleon` range [cm^2] | MPI sync interval per rank |
 | --- | ---: |
 | `>= 1e-35` | 64 |

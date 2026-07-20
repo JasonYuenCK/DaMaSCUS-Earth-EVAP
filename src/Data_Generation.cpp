@@ -28,6 +28,7 @@
 #include "libphysica/Utilities.hpp"
 
 #include "obscura/Astronomy.hpp"
+#include "MPI_Tail_Work.hpp"
 #include "Snapshot_Heartbeat.hpp"
 #include "Snapshot_Shared_State.hpp"
 
@@ -452,7 +453,7 @@ Simulation_Data::Simulation_Data(unsigned int sample_size, unsigned int max_traj
   number_of_initial_shift_failures(0), number_of_final_reflection_shift_failures(0), number_of_numerical_failures(0),
   number_of_computational_truncations(0),
   total_number_of_scatterings(0), average_number_of_scatterings(0.0),
-  mpi_sync_rounds(0), final_mpi_round_trajectories(0), capture_target_overshoot(0),
+  mpi_sync_rounds(0), final_mpi_round_trajectories(0), mpi_tail_trajectories(0), capture_target_overshoot(0),
   computing_time(0.0), early_stopped(false), early_stop_reason(SimulationStopReason::None),
   mpi_rank(0), mpi_processes(1), isoreflection_rings(iso_rings), minimum_speed_threshold(u_min),
   number_of_data_points(std::vector<unsigned long int>(iso_rings, 0)),
@@ -741,7 +742,7 @@ void Simulation_Data::Generate_Data(obscura::DM_Particle& DM, Solar_Model& solar
 		mpi_sync_rounds++;
 		final_mpi_round_trajectories = assigned_trajectories;
 
-		for(unsigned long int trajectory_in_round = 0; trajectory_in_round < local_trajectories_this_round; trajectory_in_round++)
+		auto simulate_one_trajectory = [&]()
 		{
 			Event IC = Initial_Conditions(halo_model, solar_model, simulator.PRNG);
 			const bool initial_shift_ok = Hyperbolic_Kepler_Shift(IC, initial_and_final_radius);
@@ -857,6 +858,25 @@ void Simulation_Data::Generate_Data(obscura::DM_Particle& DM, Solar_Model& solar
 					count_as_not_captured_bincount_sample,
 					trajectory_snapshot_evaporation_events);
 			}
+		};
+
+		for(unsigned long int trajectory_in_round = 0; trajectory_in_round < local_trajectories_this_round; trajectory_in_round++)
+			simulate_one_trajectory();
+
+		// A blocking reduction here makes every early rank idle behind the rank
+		// whose final scheduled trajectory has the longest tail. In normal mode,
+		// rendezvous nonblockingly and use that tail time for more independent
+		// trajectories. All extra results are included in the reduction below.
+		if(!capture_mode)
+		{
+			const unsigned long int extra_capacity =
+			    (local_total < max_trajectories_per_rank)
+			    ? (max_trajectories_per_rank - local_total)
+			    : 0UL;
+			mpi_tail_trajectories += Perform_MPI_Tail_Work(
+				MPI_COMM_WORLD,
+				extra_capacity,
+				simulate_one_trajectory);
 		}
 
 		const std::array<unsigned long int, 5> local_progress = {
@@ -954,14 +974,15 @@ void Simulation_Data::Generate_Data(obscura::DM_Particle& DM, Solar_Model& solar
 void Simulation_Data::Perform_MPI_Reductions(bool capture_mode)
 {
 	MPI_Trace_Point(mpi_rank, "enter Perform_MPI_Reductions");
-	std::array<unsigned long int, 7> primary_counters = {{
+	std::array<unsigned long int, 8> primary_counters = {{
 	    number_of_trajectories,
 	    number_of_captured_particles,
 	    number_of_completed_outward_escapes,
 	    number_of_initial_shift_failures,
 	    number_of_final_reflection_shift_failures,
 	    number_of_numerical_failures,
-	    number_of_computational_truncations}};
+	    number_of_computational_truncations,
+	    mpi_tail_trajectories}};
 	MPI_Trace_Point(mpi_rank, "before allreduce primary counters");
 	MPI_Allreduce(MPI_IN_PLACE, primary_counters.data(), static_cast<int>(primary_counters.size()), MPI_UNSIGNED_LONG, MPI_SUM, MPI_COMM_WORLD);
 	number_of_trajectories = primary_counters[0];
@@ -971,6 +992,7 @@ void Simulation_Data::Perform_MPI_Reductions(bool capture_mode)
 	number_of_final_reflection_shift_failures = primary_counters[4];
 	number_of_numerical_failures = primary_counters[5];
 	number_of_computational_truncations = primary_counters[6];
+	mpi_tail_trajectories = primary_counters[7];
 	MPI_Trace_Point(mpi_rank, "before allreduce total scatterings");
 	MPI_Allreduce(MPI_IN_PLACE, &total_number_of_scatterings, 1, MPI_UINT64_T, MPI_SUM, MPI_COMM_WORLD);
 	average_number_of_scatterings = (number_of_trajectories > 0)
@@ -1219,6 +1241,7 @@ void Simulation_Data::Write_Output_Files(const std::string& output_dir, obscura:
 		f << "# normal_mode_mpi_sync_interval = " << normal_mode_mpi_sync_interval << "\n";
 		f << "# mpi_sync_rounds = " << mpi_sync_rounds << "\n";
 		f << "# final_mpi_round_trajectories = " << final_mpi_round_trajectories << "\n";
+		f << "# mpi_tail_trajectories = " << mpi_tail_trajectories << "\n";
 		f << "# capture_target_overshoot = " << capture_target_overshoot << "\n";
 		f << "# total_scatterings = " << total_number_of_scatterings << "\n";
 		f << "# average_scatterings = " << std::setprecision(12) << average_number_of_scatterings << "\n";
@@ -1402,6 +1425,7 @@ void Simulation_Data::Print_Summary(unsigned int mpi_rank)
 				  << "Normal-mode MPI sync interval:\t" << normal_mode_mpi_sync_interval << std::endl
 				  << "MPI sync rounds:\t\t" << mpi_sync_rounds << std::endl
 				  << "Final MPI round trajectories:\t" << final_mpi_round_trajectories << std::endl
+				  << "MPI tail trajectories:\t\t" << mpi_tail_trajectories << std::endl
 				  << "Capture target overshoot:\t" << capture_target_overshoot << std::endl
 				  << "Total # of scatterings:\t" << total_number_of_scatterings << std::endl
 				  << "Numerical failure count:\t" << number_of_numerical_failures << std::endl

@@ -91,6 +91,7 @@ class Simulation_Data
 	double average_number_of_scatterings;
 	unsigned long int mpi_sync_rounds;
 	unsigned long int final_mpi_round_trajectories;
+	unsigned long int mpi_tail_trajectories;
 	unsigned long int capture_target_overshoot;
 	double computing_time;
 	bool early_stopped;
